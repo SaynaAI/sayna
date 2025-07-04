@@ -4,6 +4,9 @@ use std::env;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+
+    pub deepgram_api_key: Option<String>,
+    pub elevenlabs_api_key: Option<String>,
 }
 
 impl ServerConfig {
@@ -17,7 +20,15 @@ impl ServerConfig {
             .parse::<u16>()
             .map_err(|e| format!("Invalid port number: {}", e))?;
 
-        Ok(ServerConfig { host, port })
+        let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
+        let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
+
+        Ok(ServerConfig {
+            host,
+            port,
+            deepgram_api_key,
+            elevenlabs_api_key,
+        })
     }
 
     pub fn address(&self) -> String {
