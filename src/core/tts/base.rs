@@ -438,7 +438,7 @@ mod tests {
 
             if let Some(callback) = &self.callback {
                 let audio_data = AudioData {
-                    data: format!("Generated audio for: {}", text).into_bytes(),
+                    data: format!("Generated audio for: {text}").into_bytes(),
                     sample_rate: 22050,
                     format: "pcm".to_string(),
                     duration_ms: Some(1000),
@@ -525,7 +525,7 @@ mod tests {
         let audio_data = audio_receiver.recv().await.unwrap();
         assert_eq!(audio_data.format, "pcm");
         assert_eq!(audio_data.sample_rate, 22050);
-        assert!(audio_data.data.len() > 0);
+        assert!(!audio_data.data.is_empty());
     }
 
     #[tokio::test]
