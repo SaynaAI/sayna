@@ -1,0 +1,142 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+
+description: Comprehensive best practices for developing robust, efficient, and maintainable applications using the axum framework in Rust with WebSocket support for an atomic web service.
+globs: \*.rs
+------------
+
+# Axum Best Practices: A Comprehensive Guide
+
+This guide provides best practices for developing applications using the Axum framework in Rust, enhanced with WebSocket support for building atomic web services. It covers code organization, common patterns, performance, security, WebSocket specifics, testing, pitfalls, and tooling.
+
+## 1. Code Organization and Structure
+
+A clear project layout improves maintainability and scalability. Consider the following structure:
+
+```
+project_root/
+├── src/
+│   ├── main.rs             # Application entry point (sets up Router + server)
+│   ├── lib.rs              # Shared library for core logic
+│   ├── routes/             # Route definitions
+│   │   ├── mod.rs
+│   │   ├── api.rs          # REST endpoints
+│   │   ├── ws.rs           # WebSocket routes and upgrade handlers
+│   ├── handlers/           # Request handlers and WebSocket message handlers
+│   │   ├── mod.rs
+│   │   ├── api_handlers.rs
+│   │   ├── ws_handlers.rs
+│   ├── services/           # Business logic services
+│   │   ├── mod.rs
+│   │   ├── user_service.rs
+│   │   ├── chat_service.rs # WebSocket message routing
+│   ├── middleware/         # Tower middleware layers
+│   │   ├── mod.rs
+│   │   ├── auth.rs
+│   │   ├── logging.rs
+│   ├── state/              # Shared application state
+│   │   ├── mod.rs          # Defines AppState struct wrapped in `Arc` or `Extension`
+│   ├── errors/             # Error types and conversion to responses
+│   │   ├── mod.rs
+│   │   ├── app_error.rs    # Implements `IntoResponse`
+│   ├── utils/              # Utility functions (e.g., DB pool setup)
+│   │   ├── mod.rs
+│   │   ├── db.rs
+├── tests/                  # Integration tests
+│   ├── api_tests.rs        # Tests for HTTP endpoints
+│   └── ws_tests.rs         # WebSocket integration tests
+├── Dockerfile              # Containerization
+├── Cargo.toml
+└── .env
+```
+
+### 1.1 Naming Conventions
+
+* **Modules & Files:** lowercase with underscores (e.g., `ws_handlers.rs`, `user_service.rs`).
+* **Structs & Enums:** CamelCase (e.g., `AppState`, `ChatMessage`).
+* **Functions:** snake\_case reflecting action (e.g., `create_user`, `handle_ws_message`).
+
+### 1.2 Modular Boundaries
+
+* **Router vs. Handler:** Keep route declarations (`Router::route`) in `routes/` and logic in `handlers/` or `services/`.
+* **State via `Extension`:** Pass shared state (e.g., DB pool, cache, broadcast channels) using `Extension<AppState>`.
+* **Separation of Concerns:** Handlers focus on HTTP/WebSocket framing; services manage business logic.
+
+## 2. Common Patterns and Anti-patterns
+
+### 2.1 Axum-Specific Patterns
+
+* **Extractors:** Use built‑in extractors (`Path`, `Query`, `Json`, `Extension`) for typed data parsing.
+* **Tower Middleware:** Leverage `tower-http` layers for CORS, compression, and tracing.
+* **Error Handling:** Define custom error types implementing `IntoResponse` to standardize responses.
+* **State Management:** Wrap shared resources in `Arc` or use `tokio::sync` types (e.g., `RwLock`, `broadcast`).
+
+### 2.2 Anti-patterns to Avoid
+
+* **Blocking in Handlers:** Never perform blocking I/O; use `spawn_blocking` or async drivers.
+* **Global Mutable State:** Avoid static mutable variables; prefer injected state.
+* **Large Handlers:** Break complex flows into smaller service functions.
+* **Ignoring WebSocket Backpressure:** Always handle send/receive delays to prevent buffer exhaustion.
+
+## 3. Performance Considerations
+
+* **Asynchronous Ecosystem:** Use async database clients (`sqlx`, `tokio-postgres`).
+* **Connection Pooling:** Configure DB pools for optimal concurrency.
+* **HTTP/2 & Keep-Alive:** Enable keep-alive and HTTP/2 via Hyper configuration in `Server::builder`.
+* **Compression & Caching:** Add `CompressionLayer` and `Cache` middlewares from `tower-http`.
+* **Efficient Serialization:** Use `serde` with `#[serde(crate = "serde")]` and consider `bincode` or `MessagePack` for WS when binary.
+
+## 4. Security Best Practices
+
+* **CORS:** Permit only trusted origins with `CorsLayer`.
+* **TLS:** Terminate TLS at reverse proxy or configure Hyper with `rustls`.
+* **Input Validation:** Rely on extractor types and manual checks for complex data.
+* **Authentication/Authorization:** Use JWT or session-based auth; protect WS upgrades by validating tokens in the handshake.
+* **Rate Limiting:** Apply `RateLimitLayer` to APIs and WS endpoints.
+
+## 5. WebSocket Best Practices
+
+* **Upgrade Endpoint:** Define a route using `get(ws_handler)` and call `WebSocketUpgrade::on_upgrade`.
+* **Message Loop:** Spawn a task handling `ws.on_upgrade`, splitting `WebSocket` into `Sender`/`Receiver`.
+* **Heartbeats:** Implement periodic ping/pong to detect stale connections.
+* **Channel Broadcasting:** Use `tokio::sync::broadcast` or `mpsc` for multi-client message distribution.
+* **Graceful Shutdown:** Listen for shutdown signals and close WS streams properly.
+* **Binary vs. Text:** Choose appropriate frame types and validate payload sizes.
+
+## 6. Testing Approaches
+
+* **Unit Tests:** Test services and error types in isolation.
+* **HTTP Integration:** Use `axum::Router::oneshot` for testing handlers without running a full server.
+* **WebSocket Tests:** Employ `tokio-tungstenite` to open in-memory WS connections and assert message flows.
+* **Property-Based Testing:** Integrate `proptest` for fuzzing JSON payloads.
+* **Test Organization:** Mirror `src/` structure under `tests/` for clarity.
+
+## 7. Common Pitfalls and Gotchas
+
+* **Unhandled Close Frames:** Always handle `Close` messages to avoid panics.
+* **Leaking Tasks:** Ensure spawned tasks are bounded or tied to connection lifetime.
+* **Shared State Locks:** Avoid long-held locks inside async contexts.
+* **Version Mismatches:** Keep Axum, Tower, and Hyper versions compatible.
+* **Middleware Order:** Layer order matters—e.g., CORS before auth.
+
+## 8. Tooling and Environment
+
+* **Cargo & Rustup:** Keep toolchains updated.
+* **Clippy & Rustfmt:** Enforce linting and formatting via pre-commit hooks.
+* **Tokio Console:** Use `tokio-console` for runtime diagnostics.
+* **Tracing:** Integrate `tracing` with `tracing-subscriber` for structured logs.
+* **IDE Support:** Leverage Rust Analyzer in VS Code or IntelliJ Rust.
+
+## 9. Deployment Best Practices
+
+* **Containerization:** Build minimal Docker images with `scratch` or `distroless`.
+* **Reverse Proxy:** Offload TLS and load balancing to Nginx or Traefik.
+* **Auto-Scaling:** Configure pods/instances to handle WS connections gracefully.
+* **Observability:** Export metrics via `tower-http` metrics layer and scrape with Prometheus.
+* **CI/CD:** Automate builds, tests, and docker pushes in GitHub Actions or GitLab CI.
+
+By following these Axum-specific guidelines—including WebSocket nuances—you can create atomic, resilient, and maintainable Rust web services tailored to modern requirements.
