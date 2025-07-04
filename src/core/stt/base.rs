@@ -80,14 +80,22 @@ pub type STTResultCallback =
 /// Base trait for Speech-to-Text providers
 #[async_trait::async_trait]
 pub trait BaseSTT: Send + Sync {
-    /// Connect to the STT provider
+    /// Create a new instance of the STT provider with the given configuration
     ///
     /// # Arguments
     /// * `config` - Configuration for the STT provider
     ///
     /// # Returns
+    /// * `Result<Self, STTError>` - New instance or error
+    async fn new(config: STTConfig) -> Result<Self, STTError>
+    where
+        Self: Sized;
+
+    /// Connect to the STT provider
+    ///
+    /// # Returns
     /// * `Result<(), STTError>` - Success or error
-    async fn connect(&mut self, config: STTConfig) -> Result<(), STTError>;
+    async fn connect(&mut self) -> Result<(), STTError>;
 
     /// Disconnect from the STT provider
     ///
@@ -209,20 +217,17 @@ mod tests {
         callback: Option<STTResultCallback>,
     }
 
-    impl MockSTT {
-        fn new() -> Self {
-            Self {
-                config: None,
-                connected: AtomicBool::new(false),
-                callback: None,
-            }
-        }
-    }
-
     #[async_trait::async_trait]
     impl BaseSTT for MockSTT {
-        async fn connect(&mut self, config: STTConfig) -> Result<(), STTError> {
-            self.config = Some(config);
+        async fn new(config: STTConfig) -> Result<Self, STTError> {
+            Ok(Self {
+                config: Some(config),
+                connected: AtomicBool::new(false),
+                callback: None,
+            })
+        }
+
+        async fn connect(&mut self) -> Result<(), STTError> {
             self.connected.store(true, Ordering::Relaxed);
             Ok(())
         }
@@ -279,23 +284,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_stt_implementation() {
-        let mut stt = MockSTT::new();
+    async fn test_stt_new_function() {
+        let config = STTConfig {
+            api_key: "test_key".to_string(),
+            language: "en-US".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+        };
 
-        // Test initial state
+        let stt = MockSTT::new(config.clone()).await.unwrap();
+
+        // Should have config set but not be connected
+        assert!(stt.get_config().is_some());
         assert!(!stt.is_ready());
-        assert!(stt.get_config().is_none());
+
+        // Config should match what we passed
+        let stored_config = stt.get_config().unwrap();
+        assert_eq!(stored_config.api_key, "test_key");
+        assert_eq!(stored_config.language, "en-US");
+        assert_eq!(stored_config.sample_rate, 16000);
+        assert_eq!(stored_config.channels, 1);
+        assert!(stored_config.punctuation);
+    }
+
+    #[tokio::test]
+    async fn test_mock_stt_implementation() {
+        // Test creation with config
+        let config = STTConfig::default();
+        let mut stt = MockSTT::new(config.clone()).await.unwrap();
+
+        // Test initial state - should not be connected yet
+        assert!(!stt.is_ready());
+        assert!(stt.get_config().is_some());
 
         // Test connection
-        let config = STTConfig::default();
-        stt.connect(config).await.unwrap();
+        stt.connect().await.unwrap();
         assert!(stt.is_ready());
         assert!(stt.get_config().is_some());
 
         // Test callback registration - simplified for testing
         let callback = Arc::new(|result: STTResult| {
             Box::pin(async move {
-                println!("Received result: {:?}", result);
+                println!("Received result: {result:?}");
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 

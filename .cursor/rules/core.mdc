@@ -12,6 +12,7 @@ The main business logic is inside [mod.rs](mdc:src/core/mod.rs) ("core" folder),
 ## STT Base Abstraction
 
 `BaseSTT` abstraction should have following functions
+* "new" - Create an instance of BaseSTT with an argument of the base stt config
 * "connect" - The main function to initiate a connection to STT providers like Deepgram or ElevenLabs
 * "disconnect" - The function to disconnect from provider
 * "is_ready" - The function to indicate whenever the connection is ready with a provider to be used
@@ -29,6 +30,7 @@ confidence: float
 ## TTS Base Abstraction
 
 `BaseTTS` abstraction should have following functions
+* "new" - Create an instance of BaseTTS with an argument of the base tts config
 * "connect" - The main function to initiate a connection to TTS providers like Deepgram or ElevenLabs
 * "disconnect" - The function to disconnect from provider
 * "is_ready" - The function to indicate whenever the connection is ready with a provider to be used

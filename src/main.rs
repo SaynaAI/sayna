@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ServerConfig::from_env()?;
     let address = config.address();
 
-    println!("Starting server on {}", address);
+    println!("Starting server on {address}");
 
     // Create application state
     let app_state = AppState::new(config);
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create listener
     let listener = TcpListener::bind(&address).await?;
 
-    println!("Server listening on {}", address);
+    println!("Server listening on {address}");
 
     // Start server
     axum::serve(listener, app).await?;

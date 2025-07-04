@@ -18,7 +18,7 @@ impl ServerConfig {
         let port = env::var("PORT")
             .unwrap_or_else(|_| "3001".to_string())
             .parse::<u16>()
-            .map_err(|e| format!("Invalid port number: {}", e))?;
+            .map_err(|e| format!("Invalid port number: {e}"))?;
 
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
