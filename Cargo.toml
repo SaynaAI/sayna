@@ -1,0 +1,27 @@
+[package]
+name = "sayna"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.88"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+# Server
+axum = { version = "0.8.4", features = ["ws"] }
+tokio = { version = "1.46.0", features = ["full"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["trace"] }
+futures = "0.3"
+
+# Environment variables
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }
+tokio-tungstenite = "0.27.0"
