@@ -1,0 +1,38 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Sayna Project
+
+This Rust Axum project is a unified STT, TTS server that handles a real time websocket APIs for STT and TTS providers like DeepGram, ElevenLabs, Google TTS, Google STT or other open source projects into one unified Websocket API, that can abstract away from providers.
+
+The main business logic is inside [mod.rs](mdc:src/core/mod.rs) ("core" folder), that uses the abstraction concept to have a unified higher level implementations of TTS and STT separated as a dedicated folders.
+
+## STT Base Abstraction
+
+`BaseSTT` abstraction should have following functions
+* "connect" - The main function to initiate a connection to STT providers like Deepgram or ElevenLabs
+* "disconnect" - The function to disconnect from provider
+* "is_ready" - The function to indicate whenever the connection is ready with a provider to be used
+* "send_audio" - The function to send the audio bytes chunk to deliver to the provider for STT
+* "on_result" - The function to register a callback that gets triggered when there is a transcription result from STT provider
+
+The `STTResult` Type should contain following fields
+```
+transcript: str
+is_final: bool
+is_speech_final: bool
+confidence: float
+```
+
+## TTS Base Abstraction
+
+`BaseTTS` abstraction should have following functions
+* "connect" - The main function to initiate a connection to TTS providers like Deepgram or ElevenLabs
+* "disconnect" - The function to disconnect from provider
+* "is_ready" - The function to indicate whenever the connection is ready with a provider to be used
+* "speak" - The function to send a text to the target TTS provider
+* "clear" - Send a clear command to the target provider for the active connection
+* "flush" - Flush command to the target TTS provider, that forces the TTS provider to start processing the queued text
+* "on_audio" - The function to register a callback that will be triggered when the audio provider responds with an audio data

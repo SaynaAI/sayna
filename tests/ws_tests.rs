@@ -10,6 +10,8 @@ async fn test_websocket_echo() {
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
         port: 0, // Let the OS assign a port
+        deepgram_api_key: None,
+        elevenlabs_api_key: None,
     };
 
     // Create application state

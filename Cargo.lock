@@ -647,6 +647,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-tungstenite 0.27.0",
  "tower",
