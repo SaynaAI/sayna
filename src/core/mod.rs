@@ -9,6 +9,6 @@ pub use stt::{
 };
 
 pub use tts::{
-    AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState, TTSConfig,
-    TTSError, TTSFactory, TTSResult,
+    AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState,
+    DeepgramTTS, TTSConfig, TTSError, TTSFactory, TTSResult, create_tts_provider,
 };
