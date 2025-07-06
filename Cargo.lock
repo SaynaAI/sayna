@@ -843,8 +843,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "dotenvy",
  "futures",
+ "futures-util",
  "serde",
  "serde_json",
  "thiserror",

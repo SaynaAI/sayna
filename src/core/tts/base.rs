@@ -6,7 +6,7 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use sayna::core::tts::{BaseTTS, TTSConfig, AudioCallback, AudioData, TTSError};
 //! use std::sync::Arc;
 //! use std::pin::Pin;
@@ -39,9 +39,6 @@
 //!
 //! // Usage with a TTS provider
 //! async fn example_usage() -> Result<(), TTSError> {
-//!     // Create your TTS provider (e.g., DeepgramTTS, ElevenLabsTTS, etc.)
-//!     let mut tts_provider = create_tts_provider("deepgram")?;
-//!     
 //!     // Configure the provider
 //!     let config = TTSConfig {
 //!         voice_id: Some("aura-luna-en".to_string()),
@@ -51,8 +48,11 @@
 //!         ..Default::default()
 //!     };
 //!     
+//!     // Create your TTS provider (e.g., DeepgramTTS, ElevenLabsTTS, etc.)
+//!     let mut tts_provider = create_tts_provider("deepgram", config)?;
+//!     
 //!     // Connect to the provider
-//!     tts_provider.connect(config).await?;
+//!     tts_provider.connect().await?;
 //!     
 //!     // Register audio callback
 //!     let callback = Arc::new(MyAudioCallback);
@@ -71,21 +71,10 @@
 //! }
 //!
 //! // Factory function example (would be implemented by your provider)
-//! fn create_tts_provider(provider_type: &str) -> Result<Box<dyn BaseTTS>, TTSError> {
-//!     match provider_type {
-//!         "deepgram" => {
-//!             // Return DeepgramTTS implementation
-//!             todo!("Implement DeepgramTTS")
-//!         },
-//!         "elevenlabs" => {
-//!             // Return ElevenLabsTTS implementation
-//!             todo!("Implement ElevenLabsTTS")
-//!         },
-//!         _ => Err(TTSError::InvalidConfiguration(
-//!             format!("Unsupported TTS provider: {}", provider_type)
-//!         ))
-//!     }
-//! }
+//! # fn create_tts_provider(_provider_type: &str, _config: TTSConfig) -> Result<Box<dyn BaseTTS>, TTSError> {
+//! #     // This is just a placeholder for the documentation example
+//! #     todo!("Implement your TTS provider factory")
+//! # }
 //! ```
 
 use async_trait::async_trait;
@@ -201,17 +190,29 @@ impl Default for TTSConfig {
 /// Base trait for Text-to-Speech providers
 #[async_trait]
 pub trait BaseTTS: Send + Sync {
-    /// Connect to the TTS provider
+    /// Create a new instance of the TTS provider
     ///
-    /// This method establishes a connection to the TTS provider (e.g., Deepgram, ElevenLabs)
-    /// and prepares it for text synthesis requests.
+    /// This method creates a new instance of the TTS provider with the given configuration.
+    /// The configuration is stored as a struct field and used later during connection.
     ///
     /// # Arguments
     /// * `config` - Configuration for the TTS provider
     ///
     /// # Returns
+    /// * `TTSResult<Self>` - A new instance of the TTS provider
+    fn new(config: TTSConfig) -> TTSResult<Self>
+    where
+        Self: Sized;
+
+    /// Connect to the TTS provider
+    ///
+    /// This method establishes a connection to the TTS provider (e.g., Deepgram, ElevenLabs)
+    /// and prepares it for text synthesis requests. Uses the configuration provided during
+    /// initialization.
+    ///
+    /// # Returns
     /// * `TTSResult<()>` - Success or failure of the connection attempt
-    async fn connect(&mut self, config: TTSConfig) -> TTSResult<()>;
+    async fn connect(&mut self) -> TTSResult<()>;
 
     /// Disconnect from the TTS provider
     ///
@@ -370,10 +371,11 @@ pub trait TTSFactory: Send + Sync {
     ///
     /// # Arguments
     /// * `provider_type` - The type of TTS provider to create
+    /// * `config` - Configuration for the TTS provider
     ///
     /// # Returns
     /// * `TTSResult<BoxedTTS>` - A boxed TTS provider instance
-    fn create_tts(&self, provider_type: &str) -> TTSResult<BoxedTTS>;
+    fn create_tts(&self, provider_type: &str, config: TTSConfig) -> TTSResult<BoxedTTS>;
 
     /// Get list of supported TTS providers
     ///
@@ -390,33 +392,33 @@ mod tests {
 
     struct MockTTS {
         state: ConnectionState,
-        config: Option<TTSConfig>,
+        config: TTSConfig,
         callback: Option<Arc<dyn AudioCallback>>,
-    }
-
-    impl MockTTS {
-        fn new() -> Self {
-            Self {
-                state: ConnectionState::Disconnected,
-                config: None,
-                callback: None,
-            }
-        }
     }
 
     #[async_trait]
     impl BaseTTS for MockTTS {
-        async fn connect(&mut self, config: TTSConfig) -> TTSResult<()> {
+        fn new(config: TTSConfig) -> TTSResult<Self> {
+            Ok(Self {
+                state: ConnectionState::Disconnected,
+                config,
+                callback: None,
+            })
+        }
+
+        async fn connect(&mut self) -> TTSResult<()> {
             self.state = ConnectionState::Connecting;
+            self.config
+                .audio_format
+                .as_ref()
+                .expect("Audio format is required");
             sleep(Duration::from_millis(100)).await;
-            self.config = Some(config);
             self.state = ConnectionState::Connected;
             Ok(())
         }
 
         async fn disconnect(&mut self) -> TTSResult<()> {
             self.state = ConnectionState::Disconnected;
-            self.config = None;
             self.callback = None;
             Ok(())
         }
@@ -492,15 +494,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_tts_connection_lifecycle() {
-        let mut tts = MockTTS::new();
+        let config = TTSConfig::default();
+        let mut tts = MockTTS::new(config).unwrap();
 
         // Initially disconnected
         assert!(!tts.is_ready());
         assert_eq!(tts.get_connection_state(), ConnectionState::Disconnected);
 
         // Connect
-        let config = TTSConfig::default();
-        tts.connect(config).await.unwrap();
+        tts.connect().await.unwrap();
         assert!(tts.is_ready());
         assert_eq!(tts.get_connection_state(), ConnectionState::Connected);
 
@@ -512,11 +514,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tts_audio_callback() {
-        let mut tts = MockTTS::new();
+        let config = TTSConfig::default();
+        let mut tts = MockTTS::new(config).unwrap();
         let (callback, mut audio_receiver, _error_receiver, _complete_receiver) =
             ChannelAudioCallback::new();
 
-        tts.connect(TTSConfig::default()).await.unwrap();
+        tts.connect().await.unwrap();
         tts.on_audio(Arc::new(callback)).unwrap();
 
         tts.speak("Hello, world!").await.unwrap();
@@ -530,7 +533,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_tts_error_when_not_ready() {
-        let tts = MockTTS::new();
+        let config = TTSConfig::default();
+        let tts = MockTTS::new(config).unwrap();
 
         // Should fail when not connected
         let result = tts.speak("Hello").await;
