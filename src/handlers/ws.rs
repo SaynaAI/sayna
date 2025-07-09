@@ -187,7 +187,7 @@
 //!         }
 //!     });
 //!
-//!     write.send(Message::Text(config.to_string())).await?;
+//!     write.send(Message::Text(config.to_string().into())).await?;
 //!
 //!     // Handle incoming messages
 //!     while let Some(message) = read.next().await {
@@ -204,7 +204,7 @@
 //!                             "text": "Hello from Rust!",
 //!                             "flush": true
 //!                         });
-//!                         write.send(Message::Text(speak_msg.to_string())).await?;
+//!                         write.send(Message::Text(speak_msg.to_string().into())).await?;
 //!                     }
 //!                     Some("stt_result") => {
 //!                         println!("STT Result: {}", parsed["transcript"]);
