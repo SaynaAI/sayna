@@ -86,13 +86,13 @@
 //!     voice_manager.receive_audio(audio_data).await?;
 //!
 //!     // Example: Synthesize speech
-//!     voice_manager.speak("Hello, this is a test message").await?;
+//!     voice_manager.speak("Hello, this is a test message", true).await?;
 //!     voice_manager.flush_tts().await?; // Ensure immediate processing
 //!
 //!     // Example: Multiple speech requests
-//!     voice_manager.speak("First message.").await?;
-//!     voice_manager.speak("Second message.").await?;
-//!     voice_manager.speak("Third message.").await?;
+//!     voice_manager.speak("First message.", false).await?;
+//!     voice_manager.speak("Second message.", false).await?;
+//!     voice_manager.speak("Third message.", true).await?;
 //!
 //!     // Clear any pending TTS requests
 //!     voice_manager.clear_tts().await?;
@@ -128,10 +128,24 @@
 //!
 //! ```rust,no_run
 //! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+//! use sayna::core::stt::STTConfig;
+//! use sayna::core::tts::TTSConfig;
 //! use tokio::sync::mpsc;
 //! use std::sync::Arc;
 //!
 //! async fn realtime_voice_processing() -> Result<(), Box<dyn std::error::Error>> {
+//!     let config = VoiceManagerConfig {
+//!         stt_config: STTConfig {
+//!             provider: "deepgram".to_string(),
+//!             api_key: "your-stt-api-key".to_string(),
+//!             ..Default::default()
+//!         },
+//!         tts_config: TTSConfig {
+//!             provider: "deepgram".to_string(),
+//!             api_key: "your-tts-api-key".to_string(),
+//!             ..Default::default()
+//!         },
+//!     };
 //!     let voice_manager = Arc::new(VoiceManager::new(config)?);
 //!     let vm = voice_manager.clone();
 //!     
@@ -142,13 +156,14 @@
 //!     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 //!
 //!     // Set up STT callback for real-time transcription
+//!     let vm_clone = vm.clone();
 //!     vm.on_stt_result(move |result| {
-//!         let vm = vm.clone();
+//!         let vm = vm_clone.clone();
 //!         Box::pin(async move {
 //!             if result.is_final && !result.transcript.trim().is_empty() {
 //!                 // Echo the transcription back as speech
 //!                 let response = format!("You said: {}", result.transcript);
-//!                 if let Err(e) = vm.speak(&response).await {
+//!                 if let Err(e) = vm.speak(&response, true).await {
 //!                     eprintln!("Failed to speak response: {}", e);
 //!                 }
 //!             }
@@ -178,7 +193,23 @@
 //! ### Error Handling and Recovery
 //!
 //! ```rust,no_run
+//! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+//! use sayna::core::stt::STTConfig;
+//! use sayna::core::tts::TTSConfig;
+//!
 //! async fn robust_voice_processing() -> Result<(), Box<dyn std::error::Error>> {
+//!     let config = VoiceManagerConfig {
+//!         stt_config: STTConfig {
+//!             provider: "deepgram".to_string(),
+//!             api_key: "your-stt-api-key".to_string(),
+//!             ..Default::default()
+//!         },
+//!         tts_config: TTSConfig {
+//!             provider: "deepgram".to_string(),
+//!             api_key: "your-tts-api-key".to_string(),
+//!             ..Default::default()
+//!         },
+//!     };
 //!     let voice_manager = VoiceManager::new(config)?;
 //!     
 //!     // Start with error handling
@@ -210,7 +241,7 @@
 //!     }
 //!
 //!     // Process with error recovery
-//!     match voice_manager.speak("Test message").await {
+//!     match voice_manager.speak("Test message", true).await {
 //!         Ok(_) => println!("Speech synthesis successful"),
 //!         Err(e) => {
 //!             eprintln!("Speech synthesis failed: {}", e);
@@ -365,20 +396,23 @@ impl VoiceManager {
     /// use sayna::core::stt::STTConfig;
     /// use sayna::core::tts::TTSConfig;
     ///
-    /// let config = VoiceManagerConfig {
-    ///     stt_config: STTConfig {
-    ///         provider: "deepgram".to_string(),
-    ///         api_key: "your-api-key".to_string(),
-    ///         ..Default::default()
-    ///     },
-    ///     tts_config: TTSConfig {
-    ///         provider: "deepgram".to_string(),
-    ///         api_key: "your-api-key".to_string(),
-    ///         ..Default::default()
-    ///     },
-    /// };
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let config = VoiceManagerConfig {
+    ///         stt_config: STTConfig {
+    ///             provider: "deepgram".to_string(),
+    ///             api_key: "your-api-key".to_string(),
+    ///             ..Default::default()
+    ///         },
+    ///         tts_config: TTSConfig {
+    ///             provider: "deepgram".to_string(),
+    ///             api_key: "your-api-key".to_string(),
+    ///             ..Default::default()
+    ///         },
+    ///     };
     ///
-    /// let voice_manager = VoiceManager::new(config)?;
+    ///     let voice_manager = VoiceManager::new(config)?;
+    ///     Ok(())
+    /// }
     /// ```
     pub fn new(config: VoiceManagerConfig) -> VoiceManagerResult<Self> {
         let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
@@ -404,9 +438,19 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// voice_manager.start().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn start(&self) -> VoiceManagerResult<()> {
         // Connect STT provider
@@ -444,9 +488,19 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// voice_manager.stop().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn stop(&self) -> VoiceManagerResult<()> {
         // Disconnect STT provider
@@ -475,11 +529,21 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// if voice_manager.is_ready().await {
     ///     println!("VoiceManager is ready!");
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn is_ready(&self) -> bool {
         let stt_ready = {
@@ -505,10 +569,20 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// let audio_data = vec![0u8; 1024]; // Your audio data
     /// voice_manager.receive_audio(audio_data).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn receive_audio(&self, audio: Vec<u8>) -> VoiceManagerResult<()> {
         // Update statistics
@@ -540,7 +614,15 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// // Queue text without immediate processing
     /// voice_manager.speak("Hello, world!", false).await?;
@@ -548,6 +630,8 @@ impl VoiceManager {
     ///
     /// // Send and immediately process
     /// voice_manager.speak("Final message", true).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn speak(&self, text: &str, flush: bool) -> VoiceManagerResult<()> {
         // Update statistics
@@ -597,11 +681,23 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// voice_manager.on_stt_result(|result| {
-    ///     println!("Transcription: {}", result.transcript);
+    ///     Box::pin(async move {
+    ///         println!("Transcription: {}", result.transcript);
+    ///     })
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn on_stt_result<F>(&self, callback: F) -> VoiceManagerResult<()>
     where
@@ -654,11 +750,23 @@ impl VoiceManager {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use sayna::core::voice_manager::VoiceManager;
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
     /// # let voice_manager = VoiceManager::new(config)?;
     /// voice_manager.on_tts_audio(|audio_data| {
-    ///     println!("Received {} bytes of audio", audio_data.data.len());
+    ///     Box::pin(async move {
+    ///         println!("Received {} bytes of audio", audio_data.data.len());
+    ///     })
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn on_tts_audio<F>(&self, callback: F) -> VoiceManagerResult<()>
     where

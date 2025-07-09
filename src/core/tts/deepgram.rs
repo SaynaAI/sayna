@@ -29,7 +29,7 @@
 //!     
 //!     let mut tts = DeepgramTTS::new(config)?;
 //!     tts.connect().await?;
-//!     tts.speak("Hello from Deepgram!").await?;
+//!     tts.speak("Hello from Deepgram!", true).await?;
 //!     tts.disconnect().await?;
 //!     
 //!     Ok(())
