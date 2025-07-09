@@ -340,7 +340,7 @@ mod base64_serde {
         let encoded = String::deserialize(deserializer)?;
         BASE64
             .decode(encoded)
-            .map_err(|e| serde::de::Error::custom(format!("Invalid base64: {}", e)))
+            .map_err(|e| serde::de::Error::custom(format!("Invalid base64: {e}")))
     }
 }
 
@@ -418,7 +418,7 @@ async fn handle_voice_socket(socket: WebSocket) {
             Err(e) => {
                 warn!("WebSocket error: {}", e);
                 let _ = outgoing_tx.send(OutgoingMessage::Error {
-                    message: format!("WebSocket error: {}", e),
+                    message: format!("WebSocket error: {e}"),
                 });
                 break;
             }
@@ -453,7 +453,7 @@ async fn process_message(
                 Err(e) => {
                     error!("Failed to parse incoming message: {}", e);
                     let _ = outgoing_tx.send(OutgoingMessage::Error {
-                        message: format!("Invalid message format: {}", e),
+                        message: format!("Invalid message format: {e}"),
                     });
                     return true;
                 }
@@ -543,7 +543,7 @@ async fn handle_config_message(
         Err(e) => {
             error!("Failed to create voice manager: {}", e);
             let _ = outgoing_tx.send(OutgoingMessage::Error {
-                message: format!("Failed to create voice manager: {}", e),
+                message: format!("Failed to create voice manager: {e}"),
             });
             return true;
         }
@@ -553,7 +553,7 @@ async fn handle_config_message(
     if let Err(e) = voice_manager.start().await {
         error!("Failed to start voice manager: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to start voice manager: {}", e),
+            message: format!("Failed to start voice manager: {e}"),
         });
         return true;
     }
@@ -577,7 +577,7 @@ async fn handle_config_message(
     {
         error!("Failed to set up STT callback: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up STT callback: {}", e),
+            message: format!("Failed to set up STT callback: {e}"),
         });
         return true;
     }
@@ -611,7 +611,7 @@ async fn handle_config_message(
     {
         error!("Failed to set up TTS audio callback: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up TTS audio callback: {}", e),
+            message: format!("Failed to set up TTS audio callback: {e}"),
         });
         return true;
     }
@@ -623,7 +623,7 @@ async fn handle_config_message(
             let outgoing_tx = outgoing_tx_clone.clone();
             Box::pin(async move {
                 let msg = OutgoingMessage::Error {
-                    message: format!("TTS error: {}", error),
+                    message: format!("TTS error: {error}"),
                 };
                 let _ = outgoing_tx.send(msg);
             })
@@ -632,7 +632,7 @@ async fn handle_config_message(
     {
         error!("Failed to set up TTS error callback: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up TTS error callback: {}", e),
+            message: format!("Failed to set up TTS error callback: {e}"),
         });
         return true;
     }
@@ -690,7 +690,7 @@ async fn handle_audio_message(
     if let Err(e) = voice_manager.receive_audio(audio_data).await {
         error!("Failed to process audio: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to process audio: {}", e),
+            message: format!("Failed to process audio: {e}"),
         });
     }
 
@@ -728,7 +728,7 @@ async fn handle_speak_message(
     if let Err(e) = voice_manager.speak(&text, should_flush).await {
         error!("Failed to synthesize speech: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to synthesize speech: {}", e),
+            message: format!("Failed to synthesize speech: {e}"),
         });
     } else {
         debug!(
@@ -766,7 +766,7 @@ async fn handle_clear_message(
     if let Err(e) = voice_manager.clear_tts().await {
         error!("Failed to clear TTS provider: {}", e);
         let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to clear TTS provider: {}", e),
+            message: format!("Failed to clear TTS provider: {e}"),
         });
     }
 
