@@ -12,7 +12,6 @@
 //! - **Error Handling**: Comprehensive error handling with proper error propagation
 //! - **Callback System**: Event-driven architecture for handling results
 //! - **Thread Safety**: Safe concurrent access using Arc<RwLock<>>
-//! - **Statistics**: Built-in performance monitoring and statistics
 //! - **Provider Abstraction**: Support for multiple STT and TTS providers
 //!
 //! ## Usage Example
@@ -96,16 +95,6 @@
 //!
 //!     // Clear any pending TTS requests
 //!     voice_manager.clear_tts().await?;
-//!
-//!     // Get performance statistics
-//!     let stats = voice_manager.get_stats().await;
-//!     println!("Statistics:");
-//!     println!("  STT audio chunks processed: {}", stats.stt_audio_chunks_processed);
-//!     println!("  STT results received: {}", stats.stt_results_received);
-//!     println!("  TTS requests sent: {}", stats.tts_requests_sent);
-//!     println!("  TTS audio chunks received: {}", stats.tts_audio_chunks_received);
-//!     println!("  Total STT audio bytes: {}", stats.total_stt_audio_bytes);
-//!     println!("  Total TTS audio bytes: {}", stats.total_tts_audio_bytes);
 //!
 //!     // Check individual provider status
 //!     println!("STT ready: {}", voice_manager.is_stt_ready().await);
@@ -305,43 +294,17 @@ pub type TTSAudioCallback =
 pub type TTSErrorCallback =
     Arc<dyn Fn(TTSError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-/// Statistics for VoiceManager operations
-#[derive(Debug, Default, Clone)]
-pub struct VoiceManagerStats {
-    /// Number of audio chunks processed by STT
-    pub stt_audio_chunks_processed: u64,
-    /// Number of STT results received
-    pub stt_results_received: u64,
-    /// Number of TTS requests sent
-    pub tts_requests_sent: u64,
-    /// Number of TTS audio chunks received
-    pub tts_audio_chunks_received: u64,
-    /// Total bytes of audio sent to STT
-    pub total_stt_audio_bytes: u64,
-    /// Total bytes of audio received from TTS
-    pub total_tts_audio_bytes: u64,
-}
-
 /// Internal TTS callback implementation for the VoiceManager
 struct VoiceManagerTTSCallback {
     audio_callback: Option<TTSAudioCallback>,
     error_callback: Option<TTSErrorCallback>,
-    stats: Arc<RwLock<VoiceManagerStats>>,
 }
 
 impl AudioCallback for VoiceManagerTTSCallback {
     fn on_audio(&self, audio_data: AudioData) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let callback = self.audio_callback.clone();
-        let stats = self.stats.clone();
 
         Box::pin(async move {
-            // Update statistics
-            {
-                let mut stats = stats.write().await;
-                stats.tts_audio_chunks_received += 1;
-                stats.total_tts_audio_bytes += audio_data.data.len() as u64;
-            }
-
             // Call user callback if registered
             if let Some(callback) = callback {
                 callback(audio_data).await;
@@ -370,7 +333,6 @@ impl AudioCallback for VoiceManagerTTSCallback {
 pub struct VoiceManager {
     tts: Arc<RwLock<Box<dyn BaseTTS>>>,
     stt: Arc<RwLock<Box<dyn BaseSTT>>>,
-    stats: Arc<RwLock<VoiceManagerStats>>,
 
     // Callbacks
     stt_callback: Arc<RwLock<Option<STTCallback>>>,
@@ -423,7 +385,6 @@ impl VoiceManager {
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
             stt: Arc::new(RwLock::new(stt)),
-            stats: Arc::new(RwLock::new(VoiceManagerStats::default())),
             stt_callback: Arc::new(RwLock::new(None)),
             tts_audio_callback: Arc::new(RwLock::new(None)),
             tts_error_callback: Arc::new(RwLock::new(None)),
@@ -471,7 +432,6 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback: self.tts_audio_callback.read().await.clone(),
                 error_callback: self.tts_error_callback.read().await.clone(),
-                stats: self.stats.clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -585,13 +545,6 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn receive_audio(&self, audio: Vec<u8>) -> VoiceManagerResult<()> {
-        // Update statistics
-        {
-            let mut stats = self.stats.write().await;
-            stats.stt_audio_chunks_processed += 1;
-            stats.total_stt_audio_bytes += audio.len() as u64;
-        }
-
         // Send audio to STT provider
         {
             let mut stt = self.stt.write().await;
@@ -634,12 +587,6 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn speak(&self, text: &str, flush: bool) -> VoiceManagerResult<()> {
-        // Update statistics
-        {
-            let mut stats = self.stats.write().await;
-            stats.tts_requests_sent += 1;
-        }
-
         // Send text to TTS provider
         {
             let tts = self.tts.read().await;
@@ -703,7 +650,6 @@ impl VoiceManager {
     where
         F: Fn(STTResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
-        let stats = self.stats.clone();
         let callback = Arc::new(callback);
 
         // Store the callback for later use
@@ -712,18 +658,11 @@ impl VoiceManager {
             *stt_callback = Some(callback.clone());
         }
 
-        // Create wrapper callback that updates stats
+        // Create wrapper callback
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
             let callback = callback.clone();
-            let stats = stats.clone();
 
             Box::pin(async move {
-                // Update statistics
-                {
-                    let mut stats = stats.write().await;
-                    stats.stt_results_received += 1;
-                }
-
                 // Call user callback
                 callback(result).await;
             })
@@ -781,7 +720,6 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback: tts_audio_callback.clone(),
                 error_callback: self.tts_error_callback.read().await.clone(),
-                stats: self.stats.clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -811,7 +749,6 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback: self.tts_audio_callback.read().await.clone(),
                 error_callback: tts_error_callback.clone(),
-                stats: self.stats.clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -819,21 +756,6 @@ impl VoiceManager {
         }
 
         Ok(())
-    }
-
-    /// Get current statistics
-    ///
-    /// # Returns
-    /// * `VoiceManagerStats` - Current statistics
-    pub async fn get_stats(&self) -> VoiceManagerStats {
-        let stats = self.stats.read().await;
-        stats.clone()
-    }
-
-    /// Reset statistics
-    pub async fn reset_stats(&self) {
-        let mut stats = self.stats.write().await;
-        *stats = VoiceManagerStats::default();
     }
 
     /// Get the current configuration
@@ -907,30 +829,6 @@ mod tests {
 
         let result = VoiceManager::new(config);
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_voice_manager_stats() {
-        let config = VoiceManagerConfig {
-            stt_config: STTConfig {
-                provider: "deepgram".to_string(),
-                api_key: "test_key".to_string(),
-                ..Default::default()
-            },
-            tts_config: TTSConfig {
-                provider: "deepgram".to_string(),
-                api_key: "test_key".to_string(),
-                ..Default::default()
-            },
-        };
-
-        let voice_manager = VoiceManager::new(config).unwrap();
-        let stats = voice_manager.get_stats().await;
-
-        assert_eq!(stats.stt_audio_chunks_processed, 0);
-        assert_eq!(stats.tts_requests_sent, 0);
-        assert_eq!(stats.stt_results_received, 0);
-        assert_eq!(stats.tts_audio_chunks_received, 0);
     }
 
     #[tokio::test]

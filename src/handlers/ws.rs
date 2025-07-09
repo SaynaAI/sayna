@@ -545,7 +545,7 @@ async fn process_message_optimized(
             debug!("Received binary message: {} bytes", data.len());
 
             // Handle binary audio data directly for optimal performance
-            let audio_data = Bytes::from(data);
+            let audio_data = data;
             handle_audio_message_optimized(audio_data, state, message_tx).await
         }
         Message::Ping(_data) => {
