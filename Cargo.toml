@@ -15,6 +15,7 @@ tower = "0.5.2"
 tower-http = { version = "0.6.6", features = ["trace"] }
 futures = "0.3"
 futures-util = "0.3"
+bytes = "1.8"
 
 # WebSocket client
 tokio-tungstenite = { version = "0.27.0", features = ["rustls-tls-webpki-roots"] }
