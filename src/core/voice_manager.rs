@@ -469,8 +469,8 @@ impl VoiceManager {
         {
             let mut tts = self.tts.write().await;
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: None,
-                error_callback: None,
+                audio_callback: self.tts_audio_callback.read().await.clone(),
+                error_callback: self.tts_error_callback.read().await.clone(),
                 stats: self.stats.clone(),
             });
 

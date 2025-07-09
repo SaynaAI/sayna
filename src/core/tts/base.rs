@@ -94,7 +94,7 @@ pub struct AudioData {
 }
 
 /// TTS-specific error types
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TTSError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),

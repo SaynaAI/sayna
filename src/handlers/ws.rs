@@ -195,7 +195,7 @@
 //!                         
 //!                         // Send binary audio data
 //!                         let audio_data = vec![0u8; 1024]; // Mock audio data
-//!                         write.send(Message::Binary(audio_data)).await?;
+//!                         write.send(Message::Binary(audio_data.into())).await?;
 //!                     }
 //!                     Some("stt_result") => {
 //!                         println!("STT Result: {}", parsed["transcript"]);
