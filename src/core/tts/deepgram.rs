@@ -21,12 +21,6 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = TTSConfig {
-//!         provider_config: serde_json::json!({
-//!             "api_key": "your_deepgram_api_key",
-//!             "model": "aura-asteria-en",
-//!             "encoding": "mp3",
-//!             "sample_rate": 24000
-//!         }),
 //!         voice_id: Some("aura-asteria-en".to_string()),
 //!         audio_format: Some("mp3".to_string()),
 //!         sample_rate: Some(24000),
@@ -42,24 +36,27 @@
 //! }
 //! ```
 
-use crate::core::tts::base::{
-    AudioCallback, AudioData, BaseTTS, ConnectionState, TTSConfig, TTSError, TTSResult,
-};
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{
+        handshake::client::generate_key,
+        http::Request,
         http::header::{AUTHORIZATION, USER_AGENT},
-        http::{HeaderValue, Request},
         protocol::Message,
     },
 };
+use tracing::{debug, error, info, warn};
 use url::Url;
+
+use super::base::{
+    AudioCallback, AudioData, BaseTTS, ConnectionState, TTSConfig, TTSError, TTSResult,
+};
 
 /// Deepgram TTS WebSocket message types
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,9 +123,6 @@ impl DeepgramTTS {
         let mut url = Url::parse("wss://api.deepgram.com/v1/speak")
             .map_err(|e| TTSError::InvalidConfiguration(format!("Invalid base URL: {e}")))?;
 
-        // Extract configuration from provider_config
-        let provider_config = &config.provider_config;
-
         // Add query parameters
         if let Some(encoding) = config.audio_format.as_ref() {
             url.query_pairs_mut().append_pair("encoding", encoding);
@@ -143,34 +137,17 @@ impl DeepgramTTS {
             url.query_pairs_mut().append_pair("model", model);
         }
 
-        // Add provider-specific parameters
-        if let Some(mip_opt_out) = provider_config.get("mip_opt_out") {
-            if let Some(value) = mip_opt_out.as_str() {
-                url.query_pairs_mut().append_pair("mip_opt_out", value);
-            }
-        }
-
         Ok(url)
     }
 
     /// Get authorization header value
     fn get_auth_header(config: &TTSConfig) -> TTSResult<String> {
-        let provider_config = &config.provider_config;
-
-        if let Some(api_key) = provider_config.get("api_key") {
-            if let Some(key) = api_key.as_str() {
-                return Ok(format!("Token {key}"));
-            }
-        }
-
-        if let Some(jwt_token) = provider_config.get("jwt_token") {
-            if let Some(token) = jwt_token.as_str() {
-                return Ok(format!("Bearer {token}"));
-            }
+        if !config.api_key.is_empty() {
+            return Ok(format!("token {}", config.api_key));
         }
 
         Err(TTSError::InvalidConfiguration(
-            "Missing API key or JWT token in provider configuration".to_string(),
+            "Missing API key in provider configuration".to_string(),
         ))
     }
 
@@ -182,12 +159,14 @@ impl DeepgramTTS {
     ) {
         match message {
             Message::Binary(data) => {
-                // Handle binary audio data
+                // Deepgram TTS sends raw binary audio data
+                debug!("Received binary audio data: {} bytes", data.len());
+
                 if let Some(callback) = audio_callback.read().await.as_ref() {
                     let audio_format = config
                         .audio_format
                         .clone()
-                        .unwrap_or_else(|| "mp3".to_string());
+                        .unwrap_or_else(|| "linear16".to_string());
 
                     let sample_rate = config.sample_rate.unwrap_or(24000);
 
@@ -202,31 +181,12 @@ impl DeepgramTTS {
                 }
             }
             Message::Text(text) => {
-                // Handle text control messages
+                // Handle text control messages (errors, metadata, etc.)
+                debug!("Received text message: {}", text);
+
+                // Try to parse as JSON for control messages
                 if let Ok(response) = serde_json::from_str::<DeepgramTTSResponse>(&text) {
                     match response {
-                        DeepgramTTSResponse::Audio { data } => {
-                            // Handle base64 encoded audio data
-                            if let Ok(decoded_data) = STANDARD.decode(&data) {
-                                if let Some(callback) = audio_callback.read().await.as_ref() {
-                                    let audio_format = config
-                                        .audio_format
-                                        .clone()
-                                        .unwrap_or_else(|| "mp3".to_string());
-
-                                    let sample_rate = config.sample_rate.unwrap_or(24000);
-
-                                    let audio_data = AudioData {
-                                        data: decoded_data,
-                                        sample_rate,
-                                        format: audio_format,
-                                        duration_ms: None,
-                                    };
-
-                                    callback.on_audio(audio_data).await;
-                                }
-                            }
-                        }
                         DeepgramTTSResponse::Error { error } => {
                             if let Some(callback) = audio_callback.read().await.as_ref() {
                                 let tts_error = TTSError::ProviderError(error);
@@ -234,25 +194,38 @@ impl DeepgramTTS {
                             }
                         }
                         DeepgramTTSResponse::Close { reason } => {
-                            tracing::info!("WebSocket closed by server: {}", reason);
+                            info!("WebSocket closed by server: {}", reason);
                             if let Some(callback) = audio_callback.read().await.as_ref() {
                                 callback.on_complete().await;
                             }
                         }
                         DeepgramTTSResponse::Control { message } => {
-                            tracing::debug!("Control message: {}", message);
+                            debug!("Control message: {}", message);
+                        }
+                        DeepgramTTSResponse::Audio { data: _ } => {
+                            // This shouldn't happen with the new API - audio comes as binary
+                            warn!("Received unexpected JSON audio data");
                         }
                     }
+                } else {
+                    // Handle non-JSON text messages
+                    debug!("Received non-JSON text message: {}", text);
                 }
             }
             Message::Close(_) => {
-                tracing::info!("WebSocket connection closed");
+                info!("WebSocket connection closed");
                 if let Some(callback) = audio_callback.read().await.as_ref() {
                     callback.on_complete().await;
                 }
             }
-            _ => {
-                tracing::debug!("Received unexpected message type: {:?}", message);
+            Message::Ping(data) => {
+                debug!("Received ping: {} bytes", data.len());
+            }
+            Message::Pong(data) => {
+                debug!("Received pong: {} bytes", data.len());
+            }
+            Message::Frame(_) => {
+                debug!("Received raw frame");
             }
         }
     }
@@ -266,12 +239,15 @@ impl DeepgramTTS {
         state: Arc<RwLock<ConnectionState>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            debug!("TTS WebSocket message handler started");
+
             loop {
                 tokio::select! {
                     // Handle incoming messages from WebSocket
                     message = ws_stream.next() => {
                         match message {
                             Some(Ok(msg)) => {
+                                debug!("Processing WebSocket message: {:?}", msg);
                                 Self::handle_websocket_message(
                                     msg,
                                     audio_callback.clone(),
@@ -279,12 +255,12 @@ impl DeepgramTTS {
                                 ).await;
                             }
                             Some(Err(e)) => {
-                                tracing::error!("WebSocket error: {}", e);
+                                error!("WebSocket error: {}", e);
                                 *state.write().await = ConnectionState::Error(e.to_string());
                                 break;
                             }
                             None => {
-                                tracing::info!("WebSocket stream ended");
+                                info!("WebSocket stream ended");
                                 break;
                             }
                         }
@@ -293,22 +269,24 @@ impl DeepgramTTS {
                     outgoing_message = message_receiver.recv() => {
                         match outgoing_message {
                             Some(msg) => {
+                                debug!("Sending TTS message: {:?}", msg);
                                 let json_msg = match serde_json::to_string(&msg) {
                                     Ok(json) => json,
                                     Err(e) => {
-                                        tracing::error!("Failed to serialize message: {}", e);
+                                        error!("Failed to serialize message: {}", e);
                                         continue;
                                     }
                                 };
 
+                                debug!("Sending JSON: {}", json_msg);
                                 if let Err(e) = ws_stream.send(Message::Text(json_msg.into())).await {
-                                    tracing::error!("Failed to send message: {}", e);
+                                    error!("Failed to send message: {}", e);
                                     *state.write().await = ConnectionState::Error(e.to_string());
                                     break;
                                 }
                             }
                             None => {
-                                tracing::info!("Message receiver closed");
+                                info!("Message receiver closed");
                                 break;
                             }
                         }
@@ -318,6 +296,7 @@ impl DeepgramTTS {
 
             // Clean up connection state
             *state.write().await = ConnectionState::Disconnected;
+            debug!("TTS WebSocket message handler ended");
         })
     }
 }
@@ -347,31 +326,39 @@ impl BaseTTS for DeepgramTTS {
 
         // Build WebSocket URL
         let url = Self::build_websocket_url(&self.config)?;
+        debug!("Connecting to Deepgram TTS WebSocket: {}", url);
 
         // Get authorization header
         let auth_header = Self::get_auth_header(&self.config)?;
+        debug!("Using auth header: {}", auth_header);
 
-        // Create request with headers
-        let mut request = Request::builder()
+        // Create request with WebSocket handshake headers
+        let host = url.host_str().unwrap_or("api.deepgram.com");
+
+        let request = Request::builder()
+            .method("GET")
             .uri(url.as_str())
-            .header("Sec-WebSocket-Protocol", "")
+            .header("Host", host)
+            .header("Upgrade", "websocket")
+            .header("Connection", "upgrade")
+            .header("Sec-WebSocket-Key", generate_key())
+            .header("Sec-WebSocket-Version", "13")
+            .header(AUTHORIZATION, auth_header)
+            .header(USER_AGENT, "sayna-tts/1.0")
             .body(())
             .map_err(|e| TTSError::ConnectionFailed(format!("Failed to create request: {e}")))?;
 
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth_header)
-                .map_err(|e| TTSError::InvalidConfiguration(format!("Invalid auth header: {e}")))?,
-        );
-
-        request
-            .headers_mut()
-            .insert(USER_AGENT, HeaderValue::from_static("sayna-tts/1.0"));
+        debug!("WebSocket request created successfully");
 
         // Connect to WebSocket
-        let (ws_stream, _) = connect_async(request)
+        let (ws_stream, response) = connect_async(request)
             .await
             .map_err(|e| TTSError::ConnectionFailed(format!("WebSocket connection failed: {e}")))?;
+
+        info!(
+            "WebSocket connection established, response status: {:?}",
+            response.status()
+        );
 
         // Create message channel for outgoing messages
         let (message_sender, message_receiver) = mpsc::unbounded_channel();
@@ -394,6 +381,7 @@ impl BaseTTS for DeepgramTTS {
 
         // Update state to connected
         *self.state.write().await = ConnectionState::Connected;
+        info!("Deepgram TTS WebSocket connection ready");
 
         Ok(())
     }
@@ -437,7 +425,7 @@ impl BaseTTS for DeepgramTTS {
         }
     }
 
-    async fn speak(&self, text: &str) -> TTSResult<()> {
+    async fn speak(&self, text: &str, flush: bool) -> TTSResult<()> {
         if !self.is_ready() {
             return Err(TTSError::ProviderNotReady(
                 "Deepgram TTS provider not connected".to_string(),
@@ -446,13 +434,25 @@ impl BaseTTS for DeepgramTTS {
 
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            let message = DeepgramTTSMessage::Speak {
+            // Send the speak message
+            let speak_message = DeepgramTTSMessage::Speak {
                 text: text.to_string(),
             };
 
-            sender.send(message).map_err(|e| {
+            sender.send(speak_message).map_err(|e| {
                 TTSError::InternalError(format!("Failed to send speak message: {e}"))
             })?;
+
+            // Conditionally flush to trigger audio generation if requested
+            if flush {
+                let flush_message = DeepgramTTSMessage::Flush;
+                sender.send(flush_message).map_err(|e| {
+                    TTSError::InternalError(format!("Failed to send flush message: {e}"))
+                })?;
+                debug!("Sent speak message with immediate flush for text: {}", text);
+            } else {
+                debug!("Sent speak message (queued, no flush) for text: {}", text);
+            }
         } else {
             return Err(TTSError::ProviderNotReady(
                 "Message sender not available".to_string(),
@@ -544,24 +544,14 @@ impl BaseTTS for DeepgramTTS {
             "documentation": "https://developers.deepgram.com/reference/text-to-speech-api/speak-streaming"
         })
     }
-
-    async fn set_options(&mut self, options: serde_json::Value) -> TTSResult<()> {
-        // Merge options into provider_config
-        if let serde_json::Value::Object(ref mut provider_config) = self.config.provider_config {
-            if let serde_json::Value::Object(new_options) = options {
-                for (key, value) in new_options {
-                    provider_config.insert(key, value);
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::tts::base::ChannelAudioCallback;
+    use std::future::Future;
+    use std::pin::Pin;
     // use tokio::time::{Duration, timeout}; // Unused for now
 
     #[tokio::test]
@@ -599,24 +589,12 @@ mod tests {
     #[tokio::test]
     async fn test_auth_header_generation() {
         let config = TTSConfig {
-            provider_config: serde_json::json!({
-                "api_key": "test_key"
-            }),
+            api_key: "test_key".to_string(),
             ..Default::default()
         };
 
         let auth_header = DeepgramTTS::get_auth_header(&config).unwrap();
-        assert_eq!(auth_header, "Token test_key");
-
-        let jwt_config = TTSConfig {
-            provider_config: serde_json::json!({
-                "jwt_token": "test_jwt"
-            }),
-            ..Default::default()
-        };
-
-        let jwt_header = DeepgramTTS::get_auth_header(&jwt_config).unwrap();
-        assert_eq!(jwt_header, "Bearer test_jwt");
+        assert_eq!(auth_header, "token test_key");
     }
 
     #[tokio::test]
@@ -646,10 +624,110 @@ mod tests {
 
     #[tokio::test]
     async fn test_speak_when_not_ready() {
-        let config = TTSConfig::default();
-        let tts = DeepgramTTS::new(config).unwrap();
-        let result = tts.speak("Hello").await;
+        let config = TTSConfig {
+            provider: "deepgram".to_string(),
+            api_key: "test_key".to_string(),
+            ..Default::default()
+        };
+
+        let tts = <DeepgramTTS as BaseTTS>::new(config).unwrap();
+
+        // Try to speak when not connected
+        let result = tts.speak("Hello, world!", false).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TTSError::ProviderNotReady(_)));
+
+        // Check that the error is the expected type
+        match result.unwrap_err() {
+            TTSError::ProviderNotReady(_) => {}
+            _ => panic!("Expected ProviderNotReady error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tts_message_format() {
+        // Test that our messages serialize correctly to the expected Deepgram format
+        let speak_msg = DeepgramTTSMessage::Speak {
+            text: "Hello, world!".to_string(),
+        };
+
+        let json = serde_json::to_string(&speak_msg).unwrap();
+        assert_eq!(json, r#"{"type":"Speak","text":"Hello, world!"}"#);
+
+        let flush_msg = DeepgramTTSMessage::Flush;
+        let json = serde_json::to_string(&flush_msg).unwrap();
+        assert_eq!(json, r#"{"type":"Flush"}"#);
+
+        let clear_msg = DeepgramTTSMessage::Clear;
+        let json = serde_json::to_string(&clear_msg).unwrap();
+        assert_eq!(json, r#"{"type":"Clear"}"#);
+    }
+
+    #[tokio::test]
+    async fn test_tts_callback_integration() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TTSConfig {
+            provider: "deepgram".to_string(),
+            api_key: "test_key".to_string(),
+            ..Default::default()
+        };
+
+        let mut tts = <DeepgramTTS as BaseTTS>::new(config).unwrap();
+
+        // Create a callback that tracks calls
+        let audio_call_count = Arc::new(AtomicUsize::new(0));
+        let error_call_count = Arc::new(AtomicUsize::new(0));
+        let complete_call_count = Arc::new(AtomicUsize::new(0));
+
+        let audio_counter = audio_call_count.clone();
+        let error_counter = error_call_count.clone();
+        let complete_counter = complete_call_count.clone();
+
+        struct TestCallback {
+            audio_counter: Arc<AtomicUsize>,
+            error_counter: Arc<AtomicUsize>,
+            complete_counter: Arc<AtomicUsize>,
+        }
+
+        impl AudioCallback for TestCallback {
+            fn on_audio(
+                &self,
+                _audio_data: AudioData,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let counter = self.audio_counter.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            }
+
+            fn on_error(&self, _error: TTSError) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let counter = self.error_counter.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            }
+
+            fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let counter = self.complete_counter.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            }
+        }
+
+        let callback = Arc::new(TestCallback {
+            audio_counter,
+            error_counter,
+            complete_counter,
+        });
+
+        // Register the callback
+        let result = tts.on_audio(callback);
+        assert!(result.is_ok());
+
+        // Verify initial counts
+        assert_eq!(audio_call_count.load(Ordering::SeqCst), 0);
+        assert_eq!(error_call_count.load(Ordering::SeqCst), 0);
+        assert_eq!(complete_call_count.load(Ordering::SeqCst), 0);
     }
 }

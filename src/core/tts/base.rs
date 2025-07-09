@@ -70,11 +70,8 @@
 //!     Ok(())
 //! }
 //!
-//! // Factory function example (would be implemented by your provider)
-//! # fn create_tts_provider(_provider_type: &str, _config: TTSConfig) -> Result<Box<dyn BaseTTS>, TTSError> {
-//! #     // This is just a placeholder for the documentation example
-//! #     todo!("Implement your TTS provider factory")
-//! # }
+//! // Factory function is available in the parent module
+//! # use crate::core::tts::create_tts_provider;
 //! ```
 
 use async_trait::async_trait;
@@ -155,10 +152,11 @@ pub trait AudioCallback: Send + Sync {
 }
 
 /// Configuration for TTS providers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TTSConfig {
-    /// Provider-specific configuration (e.g., API key, endpoint URL)
-    pub provider_config: serde_json::Value,
+    pub provider: String,
+    /// API key for the TTS provider
+    pub api_key: String,
     /// Voice ID or name to use for synthesis
     pub voice_id: Option<String>,
     /// Speaking rate (0.25 to 4.0, 1.0 is normal)
@@ -176,11 +174,12 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            provider_config: serde_json::Value::Object(serde_json::Map::new()),
-            voice_id: None,
+            provider: String::new(),
+            api_key: String::new(),
+            voice_id: Some("aura-asteria-en".to_string()),
             speaking_rate: Some(1.0),
-            audio_format: Some("pcm".to_string()),
-            sample_rate: Some(22050),
+            audio_format: Some("linear16".to_string()),
+            sample_rate: Some(24000),
             connection_timeout: Some(30),
             request_timeout: Some(60),
         }
@@ -244,10 +243,11 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Arguments
     /// * `text` - The text to synthesize
+    /// * `flush` - Whether to immediately flush and start processing the text
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the synthesis request
-    async fn speak(&self, text: &str) -> TTSResult<()>;
+    async fn speak(&self, text: &str, flush: bool) -> TTSResult<()>;
 
     /// Clear any queued text from the TTS provider
     ///
@@ -290,15 +290,6 @@ pub trait BaseTTS: Send + Sync {
     /// # Returns
     /// * `serde_json::Value` - Provider-specific information (e.g., supported voices, formats)
     fn get_provider_info(&self) -> serde_json::Value;
-
-    /// Set provider-specific options
-    ///
-    /// # Arguments
-    /// * `options` - Provider-specific options to set
-    ///
-    /// # Returns
-    /// * `TTSResult<()>` - Success or failure of setting options
-    async fn set_options(&mut self, options: serde_json::Value) -> TTSResult<()>;
 }
 
 /// Channel-based audio callback implementation
@@ -431,7 +422,7 @@ mod tests {
             self.state.clone()
         }
 
-        async fn speak(&self, text: &str) -> TTSResult<()> {
+        async fn speak(&self, text: &str, _flush: bool) -> TTSResult<()> {
             if !self.is_ready() {
                 return Err(TTSError::ProviderNotReady(
                     "TTS provider not connected".to_string(),
@@ -486,10 +477,6 @@ mod tests {
                 "supported_formats": ["pcm", "wav"]
             })
         }
-
-        async fn set_options(&mut self, _options: serde_json::Value) -> TTSResult<()> {
-            Ok(())
-        }
     }
 
     #[tokio::test]
@@ -522,7 +509,7 @@ mod tests {
         tts.connect().await.unwrap();
         tts.on_audio(Arc::new(callback)).unwrap();
 
-        tts.speak("Hello, world!").await.unwrap();
+        tts.speak("Hello, world!", true).await.unwrap();
 
         // Check that audio data was received
         let audio_data = audio_receiver.recv().await.unwrap();
@@ -537,7 +524,7 @@ mod tests {
         let tts = MockTTS::new(config).unwrap();
 
         // Should fail when not connected
-        let result = tts.speak("Hello").await;
+        let result = tts.speak("Hello", false).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TTSError::ProviderNotReady(_)));
     }

@@ -5,6 +5,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -142,8 +143,8 @@ pub struct DeepgramSTT {
     ws_sender: Option<mpsc::UnboundedSender<Message>>,
     /// Shutdown signal sender
     shutdown_tx: Option<broadcast::Sender<()>>,
-    /// Result callback
-    result_callback: Option<STTResultCallback>,
+    /// Result callback - shared between main instance and connection task
+    result_callback: Arc<RwLock<Option<STTResultCallback>>>,
     /// Connection handle
     connection_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -204,7 +205,7 @@ impl DeepgramSTT {
     async fn handle_websocket_message(
         &self,
         message: Message,
-        callback: Option<STTResultCallback>,
+        callback: Arc<RwLock<Option<STTResultCallback>>>,
         stats: Arc<RwLock<STTStats>>,
     ) -> Result<(), STTError> {
         match message {
@@ -228,6 +229,8 @@ impl DeepgramSTT {
                                     alternative.confidence,
                                 );
 
+                                println!("Received result: {:?}", stt_result);
+
                                 // Update statistics
                                 {
                                     let mut stats_guard = stats.write().await;
@@ -235,8 +238,13 @@ impl DeepgramSTT {
                                 }
 
                                 // Call the result callback
-                                if let Some(callback) = callback {
-                                    callback(stt_result).await;
+                                {
+                                    let callback_guard = callback.read().await;
+                                    if let Some(ref callback_fn) = *callback_guard {
+                                        callback_fn(stt_result).await;
+                                    } else {
+                                        println!("No callback registered");
+                                    }
                                 }
                             }
                         }
@@ -296,7 +304,7 @@ impl DeepgramSTT {
         // Clone necessary data for the connection task
         let state = self.state.clone();
         let stats = self.stats.clone();
-        let callback = self.result_callback.clone();
+        let callback = self.result_callback.clone(); // Share the callback reference
         let api_key = config.base.api_key.clone();
 
         // Start the connection task
@@ -308,12 +316,38 @@ impl DeepgramSTT {
             }
 
             // Connect to Deepgram
-            let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            let url = match Url::parse(&ws_url) {
+                Ok(url) => url,
+                Err(e) => {
+                    error!("Invalid WebSocket URL: {}", e);
+                    let mut state_guard = state.write().await;
+                    *state_guard = STTConnectionState::Error(format!("Invalid URL: {e}"));
+                    return;
+                }
+            };
+
+            let host = url.host_str().unwrap_or("api.deepgram.com");
+
+            let request = match tokio_tungstenite::tungstenite::http::Request::builder()
+                .method("GET")
                 .uri(&ws_url)
+                .header("Host", host)
+                .header("Upgrade", "websocket")
+                .header("Connection", "upgrade")
+                .header("Sec-WebSocket-Key", generate_key())
+                .header("Sec-WebSocket-Version", "13")
                 .header("Authorization", format!("token {api_key}"))
-                .header("Sec-WebSocket-Protocol", "token")
                 .body(())
-                .unwrap();
+            {
+                Ok(request) => request,
+                Err(e) => {
+                    error!("Failed to create WebSocket request: {}", e);
+                    let mut state_guard = state.write().await;
+                    *state_guard =
+                        STTConnectionState::Error(format!("Request creation failed: {e}"));
+                    return;
+                }
+            };
 
             let (ws_stream, _) = match connect_async(request).await {
                 Ok(result) => result,
@@ -357,7 +391,7 @@ impl DeepgramSTT {
                                     stats: stats.clone(),
                                     ws_sender: None,
                                     shutdown_tx: None,
-                                    result_callback: None,
+                                    result_callback: Arc::new(RwLock::new(None)),
                                     connection_handle: None,
                                 };
                                 if let Err(e) = stt_instance.handle_websocket_message(msg, callback.clone(), stats.clone()).await {
@@ -429,7 +463,7 @@ impl Default for DeepgramSTT {
             stats: Arc::new(RwLock::new(STTStats::default())),
             ws_sender: None,
             shutdown_tx: None,
-            result_callback: None,
+            result_callback: Arc::new(RwLock::new(None)),
             connection_handle: None,
         }
     }
@@ -437,7 +471,7 @@ impl Default for DeepgramSTT {
 
 #[async_trait::async_trait]
 impl BaseSTT for DeepgramSTT {
-    async fn new(config: STTConfig) -> Result<Self, STTError> {
+    fn new(config: STTConfig) -> Result<Self, STTError> {
         // Validate API key
         if config.api_key.is_empty() {
             return Err(STTError::AuthenticationFailed(
@@ -457,7 +491,7 @@ impl BaseSTT for DeepgramSTT {
             stats: Arc::new(RwLock::new(STTStats::default())),
             ws_sender: None,
             shutdown_tx: None,
-            result_callback: None,
+            result_callback: Arc::new(RwLock::new(None)),
             connection_handle: None,
         })
     }
@@ -489,7 +523,12 @@ impl BaseSTT for DeepgramSTT {
         // Clean up
         self.ws_sender = None;
         self.shutdown_tx = None;
-        self.result_callback = None;
+
+        // Clear the callback
+        {
+            let mut callback_guard = self.result_callback.write().await;
+            *callback_guard = None;
+        }
 
         // Update state
         {
@@ -533,7 +572,8 @@ impl BaseSTT for DeepgramSTT {
     }
 
     async fn on_result(&mut self, callback: STTResultCallback) -> Result<(), STTError> {
-        self.result_callback = Some(callback);
+        let mut callback_guard = self.result_callback.write().await;
+        *callback_guard = Some(callback);
         Ok(())
     }
 
@@ -581,6 +621,7 @@ mod tests {
     #[tokio::test]
     async fn test_deepgram_stt_creation() {
         let config = STTConfig {
+            provider: "deepgram".to_string(),
             api_key: "test_key".to_string(),
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -588,7 +629,7 @@ mod tests {
             punctuation: true,
         };
 
-        let stt = <DeepgramSTT as BaseSTT>::new(config).await.unwrap();
+        let stt = <DeepgramSTT as BaseSTT>::new(config).unwrap();
         assert!(!stt.is_ready());
         assert_eq!(stt.get_provider_info(), "Deepgram STT WebSocket v1.0");
     }
@@ -597,6 +638,7 @@ mod tests {
     async fn test_deepgram_stt_config_validation() {
         // Test with empty API key
         let config = STTConfig {
+            provider: "deepgram".to_string(),
             api_key: String::new(),
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -604,7 +646,7 @@ mod tests {
             punctuation: true,
         };
 
-        let result = <DeepgramSTT as BaseSTT>::new(config).await;
+        let result = <DeepgramSTT as BaseSTT>::new(config);
         assert!(result.is_err());
         if let Err(STTError::AuthenticationFailed(msg)) = result {
             assert!(msg.contains("API key is required"));
@@ -618,6 +660,7 @@ mod tests {
         let stt = DeepgramSTT::default();
         let config = DeepgramSTTConfig {
             base: STTConfig {
+                provider: "deepgram".to_string(),
                 api_key: "test_key".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -691,7 +734,11 @@ mod tests {
 
         let message = Message::Text(json_response.to_string().into());
         let result = stt
-            .handle_websocket_message(message, Some(callback), stats.clone())
+            .handle_websocket_message(
+                message,
+                Arc::new(RwLock::new(Some(callback))),
+                stats.clone(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -724,7 +771,9 @@ mod tests {
         "#;
 
         let message = Message::Text(error_response.to_string().into());
-        let result = stt.handle_websocket_message(message, None, stats).await;
+        let result = stt
+            .handle_websocket_message(message, Arc::new(RwLock::new(None)), stats)
+            .await;
 
         assert!(result.is_err());
         if let Err(STTError::ProviderError(msg)) = result {
@@ -733,5 +782,89 @@ mod tests {
         } else {
             panic!("Expected ProviderError");
         }
+    }
+
+    #[tokio::test]
+    async fn test_stt_callback_registration_after_creation() {
+        // This test demonstrates that the STT callback fix is working
+        let mut stt = DeepgramSTT::default();
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+
+        // Register callback after creation (this simulates the VoiceManager flow)
+        let callback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                println!("Callback called with transcript: {}", result.transcript);
+            }) as std::pin::Pin<Box<dyn futures::Future<Output = ()> + Send>>
+        });
+
+        // This should work without issues
+        let result = stt.on_result(callback).await;
+        assert!(result.is_ok());
+
+        // Verify the callback is stored in the shared state
+        let callback_guard = stt.result_callback.read().await;
+        assert!(callback_guard.is_some());
+        println!("STT callback registration test passed!");
+    }
+
+    #[tokio::test]
+    async fn test_stt_callback_shared_state() {
+        // This test verifies that the callback is properly shared between instances
+        let stt = DeepgramSTT::default();
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+
+        let callback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(result.transcript, "Test message");
+            }) as std::pin::Pin<Box<dyn futures::Future<Output = ()> + Send>>
+        });
+
+        // Store callback in shared state
+        {
+            let mut callback_guard = stt.result_callback.write().await;
+            *callback_guard = Some(callback);
+        }
+
+        // Simulate the message handler using the shared callback
+        let json_response = r#"
+        {
+            "type": "Results",
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": "Test message",
+                        "confidence": 0.95,
+                        "words": []
+                    }
+                ]
+            },
+            "is_final": true,
+            "speech_final": true,
+            "duration": 1.0,
+            "start": 0.0
+        }
+        "#;
+
+        let message = Message::Text(json_response.to_string().into());
+        let stats = Arc::new(RwLock::new(STTStats::default()));
+
+        let result = stt
+            .handle_websocket_message(message, stt.result_callback.clone(), stats)
+            .await;
+
+        assert!(result.is_ok());
+
+        // Give the callback time to execute
+        sleep(Duration::from_millis(100)).await;
+
+        // Check that callback was called
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+        println!("STT callback shared state test passed!");
     }
 }

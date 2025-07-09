@@ -799,6 +799,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7160e3e10bf4535308537f3c4e1641468cd0e485175d6163087c0393c7d46643"
 dependencies = [
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -847,6 +848,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "futures-util",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror",
