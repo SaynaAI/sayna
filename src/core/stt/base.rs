@@ -28,8 +28,9 @@ impl STTResult {
 }
 
 /// Configuration for STT providers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct STTConfig {
+    pub provider: String,
     /// API key for the STT provider
     pub api_key: String,
     /// Language code for transcription (e.g., "en-US", "es-ES")
@@ -45,6 +46,7 @@ pub struct STTConfig {
 impl Default for STTConfig {
     fn default() -> Self {
         Self {
+            provider: String::new(),
             api_key: String::new(),
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -87,7 +89,7 @@ pub trait BaseSTT: Send + Sync {
     ///
     /// # Returns
     /// * `Result<Self, STTError>` - New instance or error
-    async fn new(config: STTConfig) -> Result<Self, STTError>
+    fn new(config: STTConfig) -> Result<Self, STTError>
     where
         Self: Sized;
 
@@ -219,7 +221,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BaseSTT for MockSTT {
-        async fn new(config: STTConfig) -> Result<Self, STTError> {
+        fn new(config: STTConfig) -> Result<Self, STTError> {
             Ok(Self {
                 config: Some(config),
                 connected: AtomicBool::new(false),
@@ -286,6 +288,7 @@ mod tests {
     #[tokio::test]
     async fn test_stt_new_function() {
         let config = STTConfig {
+            provider: "mock".to_string(),
             api_key: "test_key".to_string(),
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -293,7 +296,7 @@ mod tests {
             punctuation: true,
         };
 
-        let stt = MockSTT::new(config.clone()).await.unwrap();
+        let stt = MockSTT::new(config.clone()).unwrap();
 
         // Should have config set but not be connected
         assert!(stt.get_config().is_some());
@@ -312,7 +315,7 @@ mod tests {
     async fn test_mock_stt_implementation() {
         // Test creation with config
         let config = STTConfig::default();
-        let mut stt = MockSTT::new(config.clone()).await.unwrap();
+        let mut stt = MockSTT::new(config.clone()).unwrap();
 
         // Test initial state - should not be connected yet
         assert!(!stt.is_ready());

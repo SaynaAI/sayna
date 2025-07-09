@@ -7,6 +7,6 @@ use std::sync::Arc;
 
 pub fn create_ws_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/ws", get(ws::ws_echo_handler))
+        .route("/ws", get(ws::ws_voice_handler))
         .layer(TraceLayer::new_for_http())
 }

@@ -54,6 +54,7 @@ impl std::str::FromStr for STTProvider {
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let config = STTConfig {
+///         provider: "deepgram".to_string(),
 ///         api_key: "your-deepgram-api-key".to_string(),
 ///         language: "en-US".to_string(),
 ///         sample_rate: 16000,
@@ -62,7 +63,7 @@ impl std::str::FromStr for STTProvider {
 ///     };
 ///
 ///     // Create a Deepgram STT provider
-///     let mut stt = create_stt_provider("deepgram", config).await?;
+///     let mut stt = create_stt_provider("deepgram", config)?;
 ///
 ///     // Use the provider
 ///     if stt.is_ready() {
@@ -73,16 +74,15 @@ impl std::str::FromStr for STTProvider {
 ///     Ok(())
 /// }
 /// ```
-pub async fn create_stt_provider(
+pub fn create_stt_provider(
     provider: &str,
     config: STTConfig,
 ) -> Result<Box<dyn BaseSTT>, STTError> {
-    let provider_enum: STTProvider = provider.parse()?;
+    let provider_enum: STTProvider = provider.parse().expect("Invalid STT provider type");
 
     match provider_enum {
         STTProvider::Deepgram => {
-            let mut deepgram_stt = <DeepgramSTT as BaseSTT>::new(config).await?;
-            deepgram_stt.connect().await?;
+            let deepgram_stt = <DeepgramSTT as BaseSTT>::new(config)?;
             Ok(Box::new(deepgram_stt))
         }
     }
@@ -104,6 +104,7 @@ pub async fn create_stt_provider(
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let config = STTConfig {
+///         provider: "deepgram".to_string(),
 ///         api_key: "your-deepgram-api-key".to_string(),
 ///         language: "en-US".to_string(),
 ///         sample_rate: 16000,
@@ -123,8 +124,7 @@ pub async fn create_stt_provider_from_enum(
 ) -> Result<Box<dyn BaseSTT>, STTError> {
     match provider {
         STTProvider::Deepgram => {
-            let mut deepgram_stt = <DeepgramSTT as BaseSTT>::new(config).await?;
-            deepgram_stt.connect().await?;
+            let deepgram_stt = <DeepgramSTT as BaseSTT>::new(config)?;
             Ok(Box::new(deepgram_stt))
         }
     }
@@ -190,6 +190,7 @@ mod factory_tests {
     #[tokio::test]
     async fn test_create_stt_provider_with_invalid_config() {
         let config = STTConfig {
+            provider: "deepgram".to_string(),
             api_key: String::new(), // Empty API key should fail
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -197,7 +198,7 @@ mod factory_tests {
             punctuation: true,
         };
 
-        let result = create_stt_provider("deepgram", config).await;
+        let result = create_stt_provider("deepgram", config);
         assert!(result.is_err());
         if let Err(STTError::AuthenticationFailed(msg)) = result {
             assert!(msg.contains("API key is required"));
@@ -207,6 +208,7 @@ mod factory_tests {
     #[tokio::test]
     async fn test_create_stt_provider_from_enum() {
         let config = STTConfig {
+            provider: "deepgram".to_string(),
             api_key: String::new(), // Empty API key should fail
             language: "en-US".to_string(),
             sample_rate: 16000,
@@ -235,6 +237,7 @@ mod factory_tests {
 /// async fn example_usage() {
 ///     // Configure the provider
 ///     let config = STTConfig {
+///         provider: "deepgram".to_string(),
 ///         api_key: "your-api-key".to_string(),
 ///         language: "en-US".to_string(),
 ///         sample_rate: 16000,
@@ -243,7 +246,7 @@ mod factory_tests {
 ///     };
 ///     
 ///     // Create provider using factory function
-///     let mut stt_provider = create_stt_provider("deepgram", config).await.unwrap();
+///     let mut stt_provider = create_stt_provider("deepgram", config).unwrap();
 ///     
 ///     // Register a callback for results
 ///     let callback = Arc::new(|result: STTResult| {

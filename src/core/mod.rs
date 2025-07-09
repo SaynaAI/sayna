@@ -1,5 +1,6 @@
 pub mod stt;
 pub mod tts;
+pub mod voice_manager;
 
 // Re-export commonly used types for convenience
 pub use stt::{
@@ -11,4 +12,9 @@ pub use stt::{
 pub use tts::{
     AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState,
     DeepgramTTS, TTSConfig, TTSError, TTSFactory, TTSResult, create_tts_provider,
+};
+
+pub use voice_manager::{
+    STTCallback, TTSAudioCallback, TTSErrorCallback, VoiceManager, VoiceManagerConfig,
+    VoiceManagerError, VoiceManagerResult, VoiceManagerStats,
 };
