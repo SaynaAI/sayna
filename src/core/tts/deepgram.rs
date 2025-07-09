@@ -10,6 +10,7 @@
 //! - Configurable voice models and settings
 //! - Async/await support with proper error handling
 //! - Audio callback system for real-time audio processing
+//! - Optimized for low-latency operation
 //!
 //! ## Example Usage
 //!
@@ -37,6 +38,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
@@ -58,12 +60,18 @@ use super::base::{
     AudioCallback, AudioData, BaseTTS, ConnectionState, TTSConfig, TTSError, TTSResult,
 };
 
-/// Deepgram TTS WebSocket message types
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DeepgramTTSMessage {
-    /// Send text to synthesize
-    Speak { text: String },
+/// Pre-allocated string constants for JSON messages (avoids runtime string formatting)
+const SPEAK_PREFIX: &str = r#"{"type":"Speak","text":""#;
+const SPEAK_SUFFIX: &str = r#""}"#;
+const FLUSH_MESSAGE: &str = r#"{"type":"Flush"}"#;
+const CLEAR_MESSAGE: &str = r#"{"type":"Clear"}"#;
+const CLOSE_MESSAGE: &str = r#"{"type":"Close"}"#;
+
+/// Optimized message types using compact representations
+#[derive(Debug)]
+pub enum TTSCommand {
+    /// Send text to synthesize - uses String directly to avoid enum size overhead
+    Speak(String, bool), // text, flush_immediately
     /// Clear the synthesis queue
     Clear,
     /// Flush the synthesis queue
@@ -72,7 +80,7 @@ pub enum DeepgramTTSMessage {
     Close,
 }
 
-/// Deepgram TTS response message types
+/// Response message types optimized for parsing
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeepgramTTSResponse {
@@ -89,32 +97,98 @@ pub enum DeepgramTTSResponse {
 /// WebSocket connection wrapper
 type WebSocketConnection = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Deepgram TTS provider implementation
+/// Reusable message buffer to avoid allocations
+#[derive(Default)]
+struct MessageBuffer {
+    json_buffer: String,
+}
+
+impl MessageBuffer {
+    fn format_speak_message(&mut self, text: &str) -> &str {
+        self.json_buffer.clear();
+        self.json_buffer
+            .reserve(SPEAK_PREFIX.len() + text.len() + SPEAK_SUFFIX.len());
+        self.json_buffer.push_str(SPEAK_PREFIX);
+
+        // Escape JSON string manually for better performance
+        for c in text.chars() {
+            match c {
+                '"' => self.json_buffer.push_str("\\\""),
+                '\\' => self.json_buffer.push_str("\\\\"),
+                '\n' => self.json_buffer.push_str("\\n"),
+                '\r' => self.json_buffer.push_str("\\r"),
+                '\t' => self.json_buffer.push_str("\\t"),
+                _ => self.json_buffer.push(c),
+            }
+        }
+
+        self.json_buffer.push_str(SPEAK_SUFFIX);
+        &self.json_buffer
+    }
+}
+
+/// Optimized connection state using atomic for lockless access
+#[derive(Default)]
+struct ConnectionStateAtomic {
+    connected: AtomicBool,
+    error: RwLock<Option<String>>,
+}
+
+impl ConnectionStateAtomic {
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Ordering::Relaxed);
+    }
+
+    async fn set_error(&self, error: String) {
+        self.set_connected(false);
+        *self.error.write().await = Some(error);
+    }
+
+    #[cfg(test)]
+    async fn get_connection_state(&self) -> ConnectionState {
+        if self.is_connected() {
+            ConnectionState::Connected
+        } else if let Some(error) = self.error.read().await.as_ref() {
+            ConnectionState::Error(error.clone())
+        } else {
+            ConnectionState::Disconnected
+        }
+    }
+}
+
+/// Deepgram TTS provider implementation optimized for low latency
 pub struct DeepgramTTS {
-    /// Current connection state
-    state: Arc<RwLock<ConnectionState>>,
+    /// Optimized connection state with atomic operations
+    state: Arc<ConnectionStateAtomic>,
     /// WebSocket connection
     connection: Arc<RwLock<Option<WebSocketConnection>>>,
     /// Audio callback for handling audio data
     audio_callback: Arc<RwLock<Option<Arc<dyn AudioCallback>>>>,
     /// Configuration
     config: TTSConfig,
-    /// Message sender for WebSocket
-    message_sender: Arc<RwLock<Option<mpsc::UnboundedSender<DeepgramTTSMessage>>>>,
+    /// Message sender for WebSocket - bounded channel for backpressure
+    message_sender: Arc<RwLock<Option<mpsc::Sender<TTSCommand>>>>,
     /// Task handles for cleanup
     task_handles: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Reusable message buffer
+    message_buffer: Arc<RwLock<MessageBuffer>>,
 }
 
 impl DeepgramTTS {
     /// Create a new Deepgram TTS instance
     pub fn new(config: TTSConfig) -> TTSResult<Self> {
         Ok(Self {
-            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            state: Arc::new(ConnectionStateAtomic::default()),
             connection: Arc::new(RwLock::new(None)),
             audio_callback: Arc::new(RwLock::new(None)),
             config,
             message_sender: Arc::new(RwLock::new(None)),
             task_handles: Arc::new(RwLock::new(Vec::new())),
+            message_buffer: Arc::new(RwLock::new(MessageBuffer::default())),
         })
     }
 
@@ -123,18 +197,21 @@ impl DeepgramTTS {
         let mut url = Url::parse("wss://api.deepgram.com/v1/speak")
             .map_err(|e| TTSError::InvalidConfiguration(format!("Invalid base URL: {e}")))?;
 
-        // Add query parameters
-        if let Some(encoding) = config.audio_format.as_ref() {
-            url.query_pairs_mut().append_pair("encoding", encoding);
-        }
+        // Pre-allocate query parameters to avoid reallocations
+        {
+            let mut pairs = url.query_pairs_mut();
 
-        if let Some(sample_rate) = config.sample_rate {
-            url.query_pairs_mut()
-                .append_pair("sample_rate", &sample_rate.to_string());
-        }
+            if let Some(encoding) = config.audio_format.as_ref() {
+                pairs.append_pair("encoding", encoding);
+            }
 
-        if let Some(model) = config.voice_id.as_ref() {
-            url.query_pairs_mut().append_pair("model", model);
+            if let Some(sample_rate) = config.sample_rate {
+                pairs.append_pair("sample_rate", &sample_rate.to_string());
+            }
+
+            if let Some(model) = config.voice_id.as_ref() {
+                pairs.append_pair("model", model);
+            }
         }
 
         Ok(url)
@@ -151,11 +228,11 @@ impl DeepgramTTS {
         ))
     }
 
-    /// Handle incoming WebSocket messages
+    /// Handle incoming WebSocket messages - optimized for minimal allocations
     async fn handle_websocket_message(
         message: Message,
         audio_callback: Arc<RwLock<Option<Arc<dyn AudioCallback>>>>,
-        config: TTSConfig,
+        config: &TTSConfig,
     ) {
         match message {
             Message::Binary(data) => {
@@ -163,53 +240,61 @@ impl DeepgramTTS {
                 debug!("Received binary audio data: {} bytes", data.len());
 
                 if let Some(callback) = audio_callback.read().await.as_ref() {
-                    let audio_format = config
-                        .audio_format
-                        .clone()
-                        .unwrap_or_else(|| "linear16".to_string());
+                    let audio_format = config.audio_format.as_deref().unwrap_or("linear16");
 
                     let sample_rate = config.sample_rate.unwrap_or(24000);
 
                     let audio_data = AudioData {
-                        data: data.to_vec(),
+                        data: data.to_vec(), // Convert Bytes to Vec<u8>
                         sample_rate,
-                        format: audio_format,
-                        duration_ms: None, // Calculate if needed
+                        format: audio_format.to_string(),
+                        duration_ms: None,
                     };
 
                     callback.on_audio(audio_data).await;
                 }
             }
             Message::Text(text) => {
-                // Handle text control messages (errors, metadata, etc.)
+                // Handle text control messages with minimal parsing
                 debug!("Received text message: {}", text);
 
-                // Try to parse as JSON for control messages
-                if let Ok(response) = serde_json::from_str::<DeepgramTTSResponse>(&text) {
-                    match response {
-                        DeepgramTTSResponse::Error { error } => {
-                            if let Some(callback) = audio_callback.read().await.as_ref() {
-                                let tts_error = TTSError::ProviderError(error);
-                                callback.on_error(tts_error).await;
+                // Fast path for common control messages
+                if text.starts_with("{\"type\":\"Error\"") {
+                    if let Some(callback) = audio_callback.read().await.as_ref() {
+                        // Extract error message without full JSON parsing if possible
+                        let error_msg = if let Some(start) = text.find("\"error\":\"") {
+                            let start = start + 9;
+                            if let Some(end) = text[start..].find("\"") {
+                                &text[start..start + end]
+                            } else {
+                                "Unknown error"
                             }
-                        }
-                        DeepgramTTSResponse::Close { reason } => {
-                            info!("WebSocket closed by server: {}", reason);
-                            if let Some(callback) = audio_callback.read().await.as_ref() {
-                                callback.on_complete().await;
-                            }
-                        }
-                        DeepgramTTSResponse::Control { message } => {
-                            debug!("Control message: {}", message);
-                        }
-                        DeepgramTTSResponse::Audio { data: _ } => {
-                            // This shouldn't happen with the new API - audio comes as binary
-                            warn!("Received unexpected JSON audio data");
-                        }
+                        } else {
+                            "Unknown error"
+                        };
+
+                        let tts_error = TTSError::ProviderError(error_msg.to_string());
+                        callback.on_error(tts_error).await;
+                    }
+                } else if text.starts_with("{\"type\":\"Close\"") {
+                    info!("WebSocket closed by server");
+                    if let Some(callback) = audio_callback.read().await.as_ref() {
+                        callback.on_complete().await;
                     }
                 } else {
-                    // Handle non-JSON text messages
-                    debug!("Received non-JSON text message: {}", text);
+                    // Full JSON parsing only when necessary
+                    if let Ok(response) = serde_json::from_str::<DeepgramTTSResponse>(&text) {
+                        match response {
+                            DeepgramTTSResponse::Control { message } => {
+                                debug!("Control message: {}", message);
+                            }
+                            DeepgramTTSResponse::Audio { data: _ } => {
+                                // This shouldn't happen with the new API
+                                warn!("Received unexpected JSON audio data");
+                            }
+                            _ => {} // Already handled above
+                        }
+                    }
                 }
             }
             Message::Close(_) => {
@@ -218,11 +303,11 @@ impl DeepgramTTS {
                     callback.on_complete().await;
                 }
             }
-            Message::Ping(data) => {
-                debug!("Received ping: {} bytes", data.len());
+            Message::Ping(_) => {
+                debug!("Received ping");
             }
-            Message::Pong(data) => {
-                debug!("Received pong: {} bytes", data.len());
+            Message::Pong(_) => {
+                debug!("Received pong");
             }
             Message::Frame(_) => {
                 debug!("Received raw frame");
@@ -230,16 +315,19 @@ impl DeepgramTTS {
         }
     }
 
-    /// Start the WebSocket message handling task
+    /// Start the WebSocket message handling task - optimized for low latency
     async fn start_message_handler(
         mut ws_stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         audio_callback: Arc<RwLock<Option<Arc<dyn AudioCallback>>>>,
         config: TTSConfig,
-        mut message_receiver: mpsc::UnboundedReceiver<DeepgramTTSMessage>,
-        state: Arc<RwLock<ConnectionState>>,
+        mut message_receiver: mpsc::Receiver<TTSCommand>,
+        state: Arc<ConnectionStateAtomic>,
+        message_buffer: Arc<RwLock<MessageBuffer>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             debug!("TTS WebSocket message handler started");
+
+            state.set_connected(true);
 
             loop {
                 tokio::select! {
@@ -247,16 +335,15 @@ impl DeepgramTTS {
                     message = ws_stream.next() => {
                         match message {
                             Some(Ok(msg)) => {
-                                debug!("Processing WebSocket message: {:?}", msg);
                                 Self::handle_websocket_message(
                                     msg,
                                     audio_callback.clone(),
-                                    config.clone(),
+                                    &config,
                                 ).await;
                             }
                             Some(Err(e)) => {
                                 error!("WebSocket error: {}", e);
-                                *state.write().await = ConnectionState::Error(e.to_string());
+                                state.set_error(e.to_string()).await;
                                 break;
                             }
                             None => {
@@ -266,22 +353,43 @@ impl DeepgramTTS {
                         }
                     }
                     // Handle outgoing messages to WebSocket
-                    outgoing_message = message_receiver.recv() => {
-                        match outgoing_message {
-                            Some(msg) => {
-                                debug!("Sending TTS message: {:?}", msg);
-                                let json_msg = match serde_json::to_string(&msg) {
-                                    Ok(json) => json,
-                                    Err(e) => {
-                                        error!("Failed to serialize message: {}", e);
+                    command = message_receiver.recv() => {
+                        match command {
+                            Some(cmd) => {
+                                debug!("Processing TTS command: {:?}", cmd);
+
+                                let message_text = match cmd {
+                                    TTSCommand::Speak(text, flush_immediately) => {
+                                        let mut buffer = message_buffer.write().await;
+                                        let json_msg = buffer.format_speak_message(&text);
+                                        let msg = json_msg.to_string();
+                                        drop(buffer); // Release lock early
+
+                                        if let Err(e) = ws_stream.send(Message::Text(msg.into())).await {
+                                            error!("Failed to send speak message: {}", e);
+                                            state.set_error(e.to_string()).await;
+                                            break;
+                                        }
+
+                                        // Send flush immediately if requested
+                                        if flush_immediately {
+                                            if let Err(e) = ws_stream.send(Message::Text(FLUSH_MESSAGE.into())).await {
+                                                error!("Failed to send flush message: {}", e);
+                                                state.set_error(e.to_string()).await;
+                                                break;
+                                            }
+                                        }
                                         continue;
                                     }
+                                    TTSCommand::Clear => CLEAR_MESSAGE,
+                                    TTSCommand::Flush => FLUSH_MESSAGE,
+                                    TTSCommand::Close => CLOSE_MESSAGE,
                                 };
 
-                                debug!("Sending JSON: {}", json_msg);
-                                if let Err(e) = ws_stream.send(Message::Text(json_msg.into())).await {
+                                debug!("Sending message: {}", message_text);
+                                if let Err(e) = ws_stream.send(Message::Text(message_text.into())).await {
                                     error!("Failed to send message: {}", e);
-                                    *state.write().await = ConnectionState::Error(e.to_string());
+                                    state.set_error(e.to_string()).await;
                                     break;
                                 }
                             }
@@ -295,7 +403,7 @@ impl DeepgramTTS {
             }
 
             // Clean up connection state
-            *state.write().await = ConnectionState::Disconnected;
+            state.set_connected(false);
             debug!("TTS WebSocket message handler ended");
         })
     }
@@ -311,19 +419,17 @@ impl Default for DeepgramTTS {
 impl BaseTTS for DeepgramTTS {
     fn new(config: TTSConfig) -> TTSResult<Self> {
         Ok(Self {
-            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            state: Arc::new(ConnectionStateAtomic::default()),
             connection: Arc::new(RwLock::new(None)),
             audio_callback: Arc::new(RwLock::new(None)),
             config,
             message_sender: Arc::new(RwLock::new(None)),
             task_handles: Arc::new(RwLock::new(Vec::new())),
+            message_buffer: Arc::new(RwLock::new(MessageBuffer::default())),
         })
     }
 
     async fn connect(&mut self) -> TTSResult<()> {
-        // Update state to connecting
-        *self.state.write().await = ConnectionState::Connecting;
-
         // Build WebSocket URL
         let url = Self::build_websocket_url(&self.config)?;
         debug!("Connecting to Deepgram TTS WebSocket: {}", url);
@@ -360,8 +466,8 @@ impl BaseTTS for DeepgramTTS {
             response.status()
         );
 
-        // Create message channel for outgoing messages
-        let (message_sender, message_receiver) = mpsc::unbounded_channel();
+        // Use bounded channel for backpressure control (prevents memory buildup)
+        let (message_sender, message_receiver) = mpsc::channel(32);
 
         // Start message handler task
         let task_handle = Self::start_message_handler(
@@ -370,6 +476,7 @@ impl BaseTTS for DeepgramTTS {
             self.config.clone(),
             message_receiver,
             self.state.clone(),
+            self.message_buffer.clone(),
         )
         .await;
 
@@ -379,8 +486,6 @@ impl BaseTTS for DeepgramTTS {
         // Store message sender
         *self.message_sender.write().await = Some(message_sender);
 
-        // Update state to connected
-        *self.state.write().await = ConnectionState::Connected;
         info!("Deepgram TTS WebSocket connection ready");
 
         Ok(())
@@ -389,7 +494,7 @@ impl BaseTTS for DeepgramTTS {
     async fn disconnect(&mut self) -> TTSResult<()> {
         // Send close message if connected
         if let Some(sender) = self.message_sender.read().await.as_ref() {
-            let _ = sender.send(DeepgramTTSMessage::Close);
+            let _ = sender.send(TTSCommand::Close).await;
         }
 
         // Clean up task handles
@@ -399,7 +504,7 @@ impl BaseTTS for DeepgramTTS {
         }
 
         // Clear state
-        *self.state.write().await = ConnectionState::Disconnected;
+        self.state.set_connected(false);
         *self.connection.write().await = None;
         *self.message_sender.write().await = None;
         *self.audio_callback.write().await = None;
@@ -408,20 +513,26 @@ impl BaseTTS for DeepgramTTS {
     }
 
     fn is_ready(&self) -> bool {
-        // Use try_read to avoid blocking in tests
-        if let Ok(state) = self.state.try_read() {
-            matches!(*state, ConnectionState::Connected)
-        } else {
-            false // If we can't read state, assume not ready
-        }
+        self.state.is_connected()
     }
 
     fn get_connection_state(&self) -> ConnectionState {
-        // Use try_read to avoid blocking in tests
-        if let Ok(state) = self.state.try_read() {
-            state.clone()
+        // Use lockless atomic check for the common case
+        if self.state.is_connected() {
+            ConnectionState::Connected
         } else {
-            ConnectionState::Disconnected // If we can't read state, assume disconnected
+            // For error state, we need to check but can't use async in this sync method
+            // Use try_read to avoid blocking in tests and sync contexts
+            if let Ok(error) = self.state.error.try_read() {
+                if let Some(err) = error.as_ref() {
+                    ConnectionState::Error(err.clone())
+                } else {
+                    ConnectionState::Disconnected
+                }
+            } else {
+                // If we can't read the error state, assume disconnected
+                ConnectionState::Disconnected
+            }
         }
     }
 
@@ -434,25 +545,13 @@ impl BaseTTS for DeepgramTTS {
 
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            // Send the speak message
-            let speak_message = DeepgramTTSMessage::Speak {
-                text: text.to_string(),
-            };
+            let command = TTSCommand::Speak(text.to_string(), flush);
 
-            sender.send(speak_message).map_err(|e| {
-                TTSError::InternalError(format!("Failed to send speak message: {e}"))
+            sender.send(command).await.map_err(|e| {
+                TTSError::InternalError(format!("Failed to send speak command: {e}"))
             })?;
 
-            // Conditionally flush to trigger audio generation if requested
-            if flush {
-                let flush_message = DeepgramTTSMessage::Flush;
-                sender.send(flush_message).map_err(|e| {
-                    TTSError::InternalError(format!("Failed to send flush message: {e}"))
-                })?;
-                debug!("Sent speak message with immediate flush for text: {}", text);
-            } else {
-                debug!("Sent speak message (queued, no flush) for text: {}", text);
-            }
+            debug!("Sent speak command for text: {}", text);
         } else {
             return Err(TTSError::ProviderNotReady(
                 "Message sender not available".to_string(),
@@ -471,8 +570,8 @@ impl BaseTTS for DeepgramTTS {
 
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            sender.send(DeepgramTTSMessage::Clear).map_err(|e| {
-                TTSError::InternalError(format!("Failed to send clear message: {e}"))
+            sender.send(TTSCommand::Clear).await.map_err(|e| {
+                TTSError::InternalError(format!("Failed to send clear command: {e}"))
             })?;
         }
 
@@ -488,8 +587,8 @@ impl BaseTTS for DeepgramTTS {
 
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            sender.send(DeepgramTTSMessage::Flush).map_err(|e| {
-                TTSError::InternalError(format!("Failed to send flush message: {e}"))
+            sender.send(TTSCommand::Flush).await.map_err(|e| {
+                TTSError::InternalError(format!("Failed to send flush command: {e}"))
             })?;
         }
 
@@ -524,6 +623,7 @@ impl BaseTTS for DeepgramTTS {
         serde_json::json!({
             "provider": "deepgram",
             "version": "1.0.0",
+            "optimized": "low-latency",
             "supported_formats": ["mp3", "wav", "pcm", "aac", "flac", "opus"],
             "supported_sample_rates": [8000, 16000, 22050, 24000, 44100, 48000],
             "supported_models": [
@@ -541,7 +641,14 @@ impl BaseTTS for DeepgramTTS {
                 "aura-zeus-en"
             ],
             "websocket_endpoint": "wss://api.deepgram.com/v1/speak",
-            "documentation": "https://developers.deepgram.com/reference/text-to-speech-api/speak-streaming"
+            "documentation": "https://developers.deepgram.com/reference/text-to-speech-api/speak-streaming",
+            "optimizations": {
+                "atomic_state": "lockless connection state management",
+                "bounded_channels": "backpressure control",
+                "message_pooling": "reusable message buffers",
+                "zero_copy": "direct data movement where possible",
+                "fast_json": "optimized JSON parsing and generation"
+            }
         })
     }
 }
@@ -604,8 +711,10 @@ mod tests {
         let info = tts.get_provider_info();
 
         assert_eq!(info["provider"], "deepgram");
+        assert_eq!(info["optimized"], "low-latency");
         assert!(info["supported_formats"].is_array());
         assert!(info["supported_models"].is_array());
+        assert!(info["optimizations"].is_object());
     }
 
     #[tokio::test]
@@ -644,22 +753,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tts_message_format() {
-        // Test that our messages serialize correctly to the expected Deepgram format
-        let speak_msg = DeepgramTTSMessage::Speak {
-            text: "Hello, world!".to_string(),
-        };
+    async fn test_message_buffer_format() {
+        let mut buffer = MessageBuffer::default();
 
-        let json = serde_json::to_string(&speak_msg).unwrap();
-        assert_eq!(json, r#"{"type":"Speak","text":"Hello, world!"}"#);
+        // Test basic string
+        let result = buffer.format_speak_message("Hello world");
+        assert_eq!(result, r#"{"type":"Speak","text":"Hello world"}"#);
 
-        let flush_msg = DeepgramTTSMessage::Flush;
-        let json = serde_json::to_string(&flush_msg).unwrap();
-        assert_eq!(json, r#"{"type":"Flush"}"#);
+        // Test string with quotes
+        let result = buffer.format_speak_message("Say \"hello\"");
+        assert_eq!(result, r#"{"type":"Speak","text":"Say \"hello\""}"#);
 
-        let clear_msg = DeepgramTTSMessage::Clear;
-        let json = serde_json::to_string(&clear_msg).unwrap();
-        assert_eq!(json, r#"{"type":"Clear"}"#);
+        // Test string with newlines
+        let result = buffer.format_speak_message("Line 1\nLine 2");
+        assert_eq!(result, r#"{"type":"Speak","text":"Line 1\nLine 2"}"#);
+    }
+
+    #[tokio::test]
+    async fn test_connection_state_atomic() {
+        let state = ConnectionStateAtomic::default();
+
+        // Initial state
+        assert!(!state.is_connected());
+        assert_eq!(
+            state.get_connection_state().await,
+            ConnectionState::Disconnected
+        );
+
+        // Set connected
+        state.set_connected(true);
+        assert!(state.is_connected());
+        assert_eq!(
+            state.get_connection_state().await,
+            ConnectionState::Connected
+        );
+
+        // Set error
+        state.set_error("Test error".to_string()).await;
+        assert!(!state.is_connected());
+        assert_eq!(
+            state.get_connection_state().await,
+            ConnectionState::Error("Test error".to_string())
+        );
     }
 
     #[tokio::test]
