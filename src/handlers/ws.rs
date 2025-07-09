@@ -15,7 +15,7 @@
 //! ### Message Types
 //!
 //! **Incoming Messages:**
-//! - `{"type": "config", "stt_config": {...}, "tts_config": {...}}` - Initialize voice providers
+//! - `{"type": "config", "stt_config": {...}, "tts_config": {...}}` - Initialize voice providers (without API keys)
 //! - `{"type": "audio", "data": "base64_audio_data"}` - Send audio for transcription
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
@@ -34,12 +34,11 @@
 //! // Connect to the WebSocket
 //! const ws = new WebSocket('ws://localhost:3000/ws/voice');
 //!
-//! // Configuration for STT and TTS providers
+//! // Configuration for STT and TTS providers (no API keys needed)
 //! const config = {
 //!   type: 'config',
 //!   stt_config: {
 //!     provider: 'deepgram',
-//!     api_key: 'your-deepgram-stt-key',
 //!     language: 'en-US',
 //!     sample_rate: 16000,
 //!     channels: 1,
@@ -47,11 +46,10 @@
 //!   },
 //!   tts_config: {
 //!     provider: 'deepgram',
-//!     api_key: 'your-deepgram-tts-key',
-//!     voice_id: 'aura-luna-en',
+//!     voice_id: 'aura-asteria-en',
 //!     speaking_rate: 1.0,
-//!     audio_format: 'pcm',
-//!     sample_rate: 22050,
+//!     audio_format: 'linear16',
+//!     sample_rate: 24000,
 //!     connection_timeout: 30,
 //!     request_timeout: 60
 //!   }
@@ -164,12 +162,11 @@
 //!     let (ws_stream, _) = connect_async("ws://localhost:3000/ws/voice").await?;
 //!     let (mut write, mut read) = ws_stream.split();
 //!
-//!     // Send configuration
+//!     // Send configuration (no API keys needed)
 //!     let config = json!({
 //!         "type": "config",
 //!         "stt_config": {
 //!             "provider": "deepgram",
-//!             "api_key": "your-deepgram-stt-key",
 //!             "language": "en-US",
 //!             "sample_rate": 16000,
 //!             "channels": 1,
@@ -177,11 +174,10 @@
 //!         },
 //!         "tts_config": {
 //!             "provider": "deepgram",
-//!             "api_key": "your-deepgram-tts-key",
-//!             "voice_id": "aura-luna-en",
+//!             "voice_id": "aura-asteria-en",
 //!             "speaking_rate": 1.0,
-//!             "audio_format": "pcm",
-//!             "sample_rate": 22050,
+//!             "audio_format": "linear16",
+//!             "sample_rate": 24000,
 //!             "connection_timeout": 30,
 //!             "request_timeout": 60
 //!         }
@@ -272,14 +268,94 @@ use crate::{
     state::AppState,
 };
 
+/// STT configuration for WebSocket messages (without API key)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct STTWebSocketConfig {
+    /// Provider name (e.g., "deepgram")
+    pub provider: String,
+    /// Language code for transcription (e.g., "en-US", "es-ES")
+    pub language: String,
+    /// Sample rate of the audio in Hz
+    pub sample_rate: u32,
+    /// Number of audio channels (1 for mono, 2 for stereo)
+    pub channels: u16,
+    /// Enable punctuation in results
+    pub punctuation: bool,
+}
+
+impl STTWebSocketConfig {
+    /// Convert WebSocket STT config to full STT config with API key
+    ///
+    /// # Arguments
+    /// * `api_key` - The API key to use for this provider
+    ///
+    /// # Returns
+    /// * `STTConfig` - Full STT configuration
+    pub fn to_stt_config(&self, api_key: String) -> STTConfig {
+        STTConfig {
+            provider: self.provider.clone(),
+            api_key,
+            language: self.language.clone(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            punctuation: self.punctuation,
+        }
+    }
+}
+
+/// TTS configuration for WebSocket messages (without API key)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TTSWebSocketConfig {
+    /// Provider name (e.g., "deepgram")
+    pub provider: String,
+    /// Voice ID or name to use for synthesis
+    pub voice_id: Option<String>,
+    /// Speaking rate (0.25 to 4.0, 1.0 is normal)
+    pub speaking_rate: Option<f32>,
+    /// Audio format preference
+    pub audio_format: Option<String>,
+    /// Sample rate preference
+    pub sample_rate: Option<u32>,
+    /// Connection timeout in seconds
+    pub connection_timeout: Option<u64>,
+    /// Request timeout in seconds
+    pub request_timeout: Option<u64>,
+}
+
+impl TTSWebSocketConfig {
+    /// Convert WebSocket TTS config to full TTS config with API key and proper defaults
+    ///
+    /// # Arguments
+    /// * `api_key` - The API key to use for this provider
+    ///
+    /// # Returns
+    /// * `TTSConfig` - Full TTS configuration with defaults applied
+    pub fn to_tts_config(&self, api_key: String) -> TTSConfig {
+        // Start with defaults
+        let defaults = TTSConfig::default();
+
+        TTSConfig {
+            provider: self.provider.clone(),
+            api_key,
+            // Use provided values or fall back to defaults
+            voice_id: self.voice_id.clone().or(defaults.voice_id),
+            speaking_rate: self.speaking_rate.or(defaults.speaking_rate),
+            audio_format: self.audio_format.clone().or(defaults.audio_format),
+            sample_rate: self.sample_rate.or(defaults.sample_rate),
+            connection_timeout: self.connection_timeout.or(defaults.connection_timeout),
+            request_timeout: self.request_timeout.or(defaults.request_timeout),
+        }
+    }
+}
+
 /// WebSocket message types for incoming messages
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
     #[serde(rename = "config")]
     Config {
-        stt_config: STTConfig,
-        tts_config: TTSConfig,
+        stt_config: STTWebSocketConfig,
+        tts_config: TTSWebSocketConfig,
     },
     #[serde(rename = "audio")]
     Audio {
@@ -365,15 +441,15 @@ impl ConnectionState {
 /// Upgrades the HTTP connection to WebSocket for real-time voice processing
 pub async fn ws_voice_handler(
     ws: WebSocketUpgrade,
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Response {
     info!("WebSocket voice connection upgrade requested");
-    ws.on_upgrade(handle_voice_socket)
+    ws.on_upgrade(move |socket| handle_voice_socket(socket, state))
 }
 
 /// Handle WebSocket voice connection
 /// This function manages the entire WebSocket session for voice processing
-async fn handle_voice_socket(socket: WebSocket) {
+async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     info!("WebSocket voice connection established");
 
     // Split the socket into sender and receiver
@@ -410,7 +486,7 @@ async fn handle_voice_socket(socket: WebSocket) {
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(msg) => {
-                let should_continue = process_message(msg, &state, &outgoing_tx).await;
+                let should_continue = process_message(msg, &state, &outgoing_tx, &app_state).await;
                 if !should_continue {
                     break;
                 }
@@ -443,6 +519,7 @@ async fn process_message(
     msg: Message,
     state: &Arc<RwLock<ConnectionState>>,
     outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    app_state: &Arc<AppState>,
 ) -> bool {
     match msg {
         Message::Text(text) => {
@@ -459,7 +536,7 @@ async fn process_message(
                 }
             };
 
-            handle_incoming_message(incoming_msg, state, outgoing_tx).await
+            handle_incoming_message(incoming_msg, state, outgoing_tx, app_state).await
         }
         Message::Binary(data) => {
             debug!("Received binary message: {} bytes", data.len());
@@ -468,7 +545,7 @@ async fn process_message(
             let audio_msg = IncomingMessage::Audio {
                 data: data.to_vec(),
             };
-            handle_incoming_message(audio_msg, state, outgoing_tx).await
+            handle_incoming_message(audio_msg, state, outgoing_tx, app_state).await
         }
         Message::Ping(_data) => {
             debug!("Received ping message");
@@ -491,12 +568,13 @@ async fn handle_incoming_message(
     msg: IncomingMessage,
     state: &Arc<RwLock<ConnectionState>>,
     outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    app_state: &Arc<AppState>,
 ) -> bool {
     match msg {
         IncomingMessage::Config {
             stt_config,
             tts_config,
-        } => handle_config_message(stt_config, tts_config, state, outgoing_tx).await,
+        } => handle_config_message(stt_config, tts_config, state, outgoing_tx, app_state).await,
         IncomingMessage::Audio { data } => handle_audio_message(data, state, outgoing_tx).await,
         IncomingMessage::Speak { text, flush } => {
             handle_speak_message(text, flush, state, outgoing_tx).await
@@ -507,29 +585,40 @@ async fn handle_incoming_message(
 
 /// Handle configuration message
 async fn handle_config_message(
-    stt_config: STTConfig,
-    mut tts_config: TTSConfig,
+    stt_ws_config: STTWebSocketConfig,
+    tts_ws_config: TTSWebSocketConfig,
     state: &Arc<RwLock<ConnectionState>>,
     outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    app_state: &Arc<AppState>,
 ) -> bool {
     info!(
         "Configuring voice manager with STT provider: {} and TTS provider: {}",
-        stt_config.provider, tts_config.provider
+        stt_ws_config.provider, tts_ws_config.provider
     );
 
-    // WORKAROUND: Force correct TTS config values
-    if tts_config.provider == "deepgram" {
-        if tts_config.voice_id.is_none() {
-            tts_config.voice_id = Some("aura-asteria-en".to_string());
+    // Get API keys from server config using utility function
+    let stt_api_key = match app_state.config.get_api_key(&stt_ws_config.provider) {
+        Ok(key) => key,
+        Err(error_msg) => {
+            error!("{}", error_msg);
+            let _ = outgoing_tx.send(OutgoingMessage::Error { message: error_msg });
+            return true;
         }
-        if tts_config.audio_format.is_none() || tts_config.audio_format == Some("pcm".to_string()) {
-            tts_config.audio_format = Some("linear16".to_string());
+    };
+
+    let tts_api_key = match app_state.config.get_api_key(&tts_ws_config.provider) {
+        Ok(key) => key,
+        Err(error_msg) => {
+            error!("{}", error_msg);
+            let _ = outgoing_tx.send(OutgoingMessage::Error { message: error_msg });
+            return true;
         }
-        if tts_config.sample_rate.is_none() || tts_config.sample_rate == Some(22050) {
-            tts_config.sample_rate = Some(24000);
-        }
-        info!("Applied TTS config workaround: {:?}", tts_config);
-    }
+    };
+
+    // Create full configs with API keys
+    let stt_config = stt_ws_config.to_stt_config(stt_api_key);
+
+    let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
     // Create voice manager configuration
     let voice_config = VoiceManagerConfig {
@@ -784,23 +873,54 @@ async fn handle_clear_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{stt::STTConfig, tts::TTSConfig};
+    // Test imports - STT and TTS config types are now defined in this file
+
+    #[test]
+    fn test_ws_config_serialization() {
+        // Test STT WebSocket config
+        let stt_ws_config = STTWebSocketConfig {
+            provider: "deepgram".to_string(),
+            language: "en-US".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+        };
+
+        let json = serde_json::to_string(&stt_ws_config).unwrap();
+        assert!(json.contains("\"provider\":\"deepgram\""));
+        assert!(json.contains("\"language\":\"en-US\""));
+        assert!(!json.contains("api_key")); // Should not contain API key
+
+        // Test TTS WebSocket config
+        let tts_ws_config = TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: Some("aura-luna-en".to_string()),
+            speaking_rate: Some(1.0),
+            audio_format: Some("pcm".to_string()),
+            sample_rate: Some(22050),
+            connection_timeout: Some(30),
+            request_timeout: Some(60),
+        };
+
+        let json = serde_json::to_string(&tts_ws_config).unwrap();
+        assert!(json.contains("\"provider\":\"deepgram\""));
+        assert!(json.contains("\"voice_id\":\"aura-luna-en\""));
+        assert!(!json.contains("api_key")); // Should not contain API key
+    }
 
     #[test]
     fn test_incoming_message_serialization() {
         // Test config message
         let config_msg = IncomingMessage::Config {
-            stt_config: STTConfig {
+            stt_config: STTWebSocketConfig {
                 provider: "deepgram".to_string(),
-                api_key: "test_key".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
                 channels: 1,
                 punctuation: true,
             },
-            tts_config: TTSConfig {
+            tts_config: TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
-                api_key: "test_key".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
                 audio_format: Some("pcm".to_string()),
@@ -812,6 +932,7 @@ mod tests {
 
         let json = serde_json::to_string(&config_msg).unwrap();
         assert!(json.contains("\"type\":\"config\""));
+        assert!(!json.contains("api_key")); // Should not contain API key
 
         // Test speak message
         let speak_msg = IncomingMessage::Speak {
@@ -899,5 +1020,103 @@ mod tests {
         } else {
             panic!("Expected Audio message");
         }
+    }
+
+    #[test]
+    fn test_stt_ws_config_conversion() {
+        let stt_ws_config = STTWebSocketConfig {
+            provider: "deepgram".to_string(),
+            language: "en-US".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+        };
+
+        let api_key = "test_api_key".to_string();
+        let stt_config = stt_ws_config.to_stt_config(api_key.clone());
+
+        assert_eq!(stt_config.provider, "deepgram");
+        assert_eq!(stt_config.api_key, api_key);
+        assert_eq!(stt_config.language, "en-US");
+        assert_eq!(stt_config.sample_rate, 16000);
+        assert_eq!(stt_config.channels, 1);
+        assert_eq!(stt_config.punctuation, true);
+    }
+
+    #[test]
+    fn test_tts_ws_config_conversion_with_all_values() {
+        let tts_ws_config = TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: Some("custom-voice".to_string()),
+            speaking_rate: Some(1.5),
+            audio_format: Some("wav".to_string()),
+            sample_rate: Some(22050),
+            connection_timeout: Some(60),
+            request_timeout: Some(120),
+        };
+
+        let api_key = "test_api_key".to_string();
+        let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+
+        assert_eq!(tts_config.provider, "deepgram");
+        assert_eq!(tts_config.api_key, api_key);
+        assert_eq!(tts_config.voice_id, Some("custom-voice".to_string()));
+        assert_eq!(tts_config.speaking_rate, Some(1.5));
+        assert_eq!(tts_config.audio_format, Some("wav".to_string()));
+        assert_eq!(tts_config.sample_rate, Some(22050));
+        assert_eq!(tts_config.connection_timeout, Some(60));
+        assert_eq!(tts_config.request_timeout, Some(120));
+    }
+
+    #[test]
+    fn test_tts_ws_config_conversion_with_defaults() {
+        let tts_ws_config = TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: None,
+            speaking_rate: None,
+            audio_format: None,
+            sample_rate: None,
+            connection_timeout: None,
+            request_timeout: None,
+        };
+
+        let api_key = "test_api_key".to_string();
+        let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+
+        assert_eq!(tts_config.provider, "deepgram");
+        assert_eq!(tts_config.api_key, api_key);
+
+        // Should use default values
+        assert_eq!(tts_config.voice_id, Some("aura-asteria-en".to_string()));
+        assert_eq!(tts_config.speaking_rate, Some(1.0));
+        assert_eq!(tts_config.audio_format, Some("linear16".to_string()));
+        assert_eq!(tts_config.sample_rate, Some(24000));
+        assert_eq!(tts_config.connection_timeout, Some(30));
+        assert_eq!(tts_config.request_timeout, Some(60));
+    }
+
+    #[test]
+    fn test_tts_ws_config_conversion_mixed_values() {
+        let tts_ws_config = TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: Some("custom-voice".to_string()),
+            speaking_rate: None, // Should use default
+            audio_format: Some("pcm".to_string()),
+            sample_rate: None, // Should use default
+            connection_timeout: Some(45),
+            request_timeout: None, // Should use default
+        };
+
+        let api_key = "test_api_key".to_string();
+        let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+
+        assert_eq!(tts_config.provider, "deepgram");
+        assert_eq!(tts_config.api_key, api_key);
+        assert_eq!(tts_config.voice_id, Some("custom-voice".to_string()));
+        assert_eq!(tts_config.speaking_rate, Some(1.0)); // Default
+        assert_eq!(tts_config.audio_format, Some("pcm".to_string()));
+        assert_eq!(tts_config.sample_rate, Some(24000)); // Default
+        assert_eq!(tts_config.connection_timeout, Some(45));
+        assert_eq!(tts_config.request_timeout, Some(60)); // Default
     }
 }
