@@ -11,7 +11,7 @@ pub use stt::{
 
 pub use tts::{
     AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState,
-    DeepgramTTS, TTSConfig, TTSError, TTSFactory, TTSResult, create_tts_provider,
+    DeepgramTTS, ElevenLabsTTS, TTSConfig, TTSError, TTSFactory, TTSResult, create_tts_provider,
 };
 
 pub use voice_manager::{
