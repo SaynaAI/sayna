@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -160,8 +161,8 @@ pub struct DeepgramSTT {
     result_tx: Option<mpsc::UnboundedSender<STTResult>>,
     /// Connection handle
     connection_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Simplified callback storage (one callback only for simplicity)
-    result_callback: Option<AsyncSTTCallback>,
+    /// Shared callback storage for async access
+    result_callback: Arc<Mutex<Option<AsyncSTTCallback>>>,
 }
 
 impl DeepgramSTT {
@@ -262,7 +263,8 @@ impl DeepgramSTT {
         // Create channels for communication
         let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-        let (result_tx, _result_rx) = mpsc::unbounded_channel::<STTResult>();
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel::<STTResult>();
+        let (connected_tx, connected_rx) = oneshot::channel::<()>();
 
         // Store channels
         self.ws_sender = Some(ws_tx);
@@ -270,13 +272,12 @@ impl DeepgramSTT {
         self.result_tx = Some(result_tx.clone());
 
         // Clone necessary data for the connection task
-        let state_notify = self.state_notify.clone();
         let api_key = config.base.api_key.clone();
 
         // Start the connection task
         let connection_handle = tokio::spawn(async move {
-            // Update state to connecting
-            state_notify.notify_waiters();
+            // Update state to connecting (this will be set by the main thread)
+            // state_notify.notify_waiters() - don't notify here, main thread handles connecting state
 
             // Connect to Deepgram
             let host = "api.deepgram.com";
@@ -307,7 +308,9 @@ impl DeepgramSTT {
             };
 
             info!("Connected to Deepgram WebSocket");
-            state_notify.notify_waiters();
+
+            // Signal successful connection
+            let _ = connected_tx.send(());
 
             let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -356,28 +359,41 @@ impl DeepgramSTT {
 
         self.connection_handle = Some(connection_handle);
 
-        // Update state and wait for connection
-        self.state = ConnectionState::Connecting;
-
-        // Wait for connection to be established with timeout
-        let connection_timeout = timeout(Duration::from_secs(10), async {
-            loop {
-                self.state_notify.notified().await;
-                if matches!(self.state, ConnectionState::Connected) {
-                    break;
+        // Start result forwarding task with shared callback
+        let callback_ref = self.result_callback.clone();
+        let _result_forwarding_handle = tokio::spawn(async move {
+            while let Some(result) = result_rx.recv().await {
+                if let Some(callback) = callback_ref.lock().await.as_ref() {
+                    callback(result).await;
+                } else {
+                    // Log the result if no callback is set
+                    debug!(
+                        "Received STT result: {} (confidence: {})",
+                        result.transcript, result.confidence
+                    );
                 }
             }
         });
 
-        match connection_timeout.await {
-            Ok(_) => {
+        // Store the result forwarding handle (we'll need to clean it up later)
+        // For now, we'll just let it run and clean up when the connection is closed
+
+        // Update state and wait for connection
+        self.state = ConnectionState::Connecting;
+
+        // Wait for connection to be established with timeout
+        match timeout(Duration::from_secs(10), connected_rx).await {
+            Ok(Ok(())) => {
                 self.state = ConnectionState::Connected;
-
-                // Store the result receiver for manual result handling
-                // The callback will be invoked when we manually call handle_results()
-                // This is a simpler approach that avoids cloning issues
-
+                self.state_notify.notify_waiters();
+                info!("Successfully connected to Deepgram STT");
                 Ok(())
+            }
+            Ok(Err(_)) => {
+                self.state = ConnectionState::Error(());
+                Err(STTError::ConnectionFailed(
+                    "Connection channel closed".to_string(),
+                ))
             }
             Err(_) => {
                 self.state = ConnectionState::Error(());
@@ -397,7 +413,7 @@ impl Default for DeepgramSTT {
             shutdown_tx: None,
             result_tx: None,
             connection_handle: None,
-            result_callback: None,
+            result_callback: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -426,7 +442,7 @@ impl BaseSTT for DeepgramSTT {
             shutdown_tx: None,
             result_tx: None,
             connection_handle: None,
-            result_callback: None,
+            result_callback: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -437,10 +453,7 @@ impl BaseSTT for DeepgramSTT {
         })?;
 
         // Start the connection
-        self.start_connection(config.clone()).await?;
-
-        info!("Successfully connected to Deepgram STT");
-        Ok(())
+        self.start_connection(config.clone()).await
     }
 
     async fn disconnect(&mut self) -> Result<(), STTError> {
@@ -457,7 +470,7 @@ impl BaseSTT for DeepgramSTT {
         // Clean up
         self.ws_sender = None;
         self.result_tx = None;
-        self.result_callback = None;
+        *self.result_callback.lock().await = None;
 
         // Update state
         self.state = ConnectionState::Disconnected;
@@ -493,7 +506,7 @@ impl BaseSTT for DeepgramSTT {
     }
 
     async fn on_result(&mut self, callback: STTResultCallback) -> Result<(), STTError> {
-        self.result_callback = Some(Box::new(move |result| {
+        *self.result_callback.lock().await = Some(Box::new(move |result| {
             let cb = callback.clone();
             Box::pin(async move {
                 cb(result).await;
