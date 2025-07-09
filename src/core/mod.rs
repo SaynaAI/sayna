@@ -16,5 +16,5 @@ pub use tts::{
 
 pub use voice_manager::{
     STTCallback, TTSAudioCallback, TTSErrorCallback, VoiceManager, VoiceManagerConfig,
-    VoiceManagerError, VoiceManagerResult, VoiceManagerStats,
+    VoiceManagerError, VoiceManagerResult,
 };

@@ -63,7 +63,7 @@ impl ServerConfig {
             "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
                 "ElevenLabs API key not configured in server environment".to_string()
             }),
-            _ => Err(format!("Unsupported provider: {}", provider)),
+            _ => Err(format!("Unsupported provider: {provider}")),
         }
     }
 }
