@@ -845,6 +845,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "dotenvy",
  "futures",
  "futures-util",

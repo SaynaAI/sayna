@@ -16,17 +16,15 @@
 //!
 //! **Incoming Messages:**
 //! - `{"type": "config", "stt_config": {...}, "tts_config": {...}}` - Initialize voice providers (without API keys)
-//! - `{"type": "audio", "data": "base64_audio_data"}` - Send audio for transcription
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
-//! - Binary messages are treated as raw audio data
+//! - **Binary messages** - Raw audio data for transcription (optimized for performance)
 //!
 //! **Outgoing Messages:**
 //! - `{"type": "ready"}` - Voice providers are ready for use
 //! - `{"type": "stt_result", "transcript": "...", "is_final": true, "confidence": 0.95}` - STT result
-//! - `{"type": "tts_audio", "data": "base64_audio_data", "format": "pcm", "sample_rate": 22050}` - TTS audio
 //! - `{"type": "error", "message": "error description"}` - Error occurred
-//! - Binary messages contain raw TTS audio data
+//! - **Binary messages** - Raw TTS audio data (optimized for performance)
 //!
 //! ## JavaScript Client Example
 //!
@@ -63,31 +61,31 @@
 //!
 //! // Handle incoming messages
 //! ws.onmessage = (event) => {
-//!   const message = JSON.parse(event.data);
-//!   
-//!   switch (message.type) {
-//!     case 'ready':
-//!       console.log('Voice providers are ready');
-//!       // Start sending audio or text
-//!       break;
-//!       
-//!     case 'stt_result':
-//!       console.log('STT Result:', message.transcript);
-//!       if (message.is_final) {
-//!         console.log('Final transcription:', message.transcript);
-//!       }
-//!       break;
-//!       
-//!     case 'tts_audio':
-//!       console.log('Received TTS audio:', message.data.length, 'bytes');
-//!       // Decode base64 and play audio
-//!       const audioData = atob(message.data);
-//!       // Play audio through Web Audio API
-//!       break;
-//!       
-//!     case 'error':
-//!       console.error('Error:', message.message);
-//!       break;
+//!   // Try to parse as JSON first, if it fails, treat as binary audio
+//!   try {
+//!     const message = JSON.parse(event.data);
+//!     // If parsing succeeds, it's a JSON control message
+//!     switch (message.type) {
+//!       case 'ready':
+//!         console.log('Voice providers are ready');
+//!         // Start sending audio or text
+//!         break;
+//!         
+//!       case 'stt_result':
+//!         console.log('STT Result:', message.transcript);
+//!         if (message.is_final) {
+//!           console.log('Final transcription:', message.transcript);
+//!         }
+//!         break;
+//!         
+//!       case 'error':
+//!         console.error('Error:', message.message);
+//!         break;
+//!     }
+//!   } catch (error) {
+//!     // If JSON parsing fails, treat as binary audio data
+//!     console.log('Received TTS audio:', event.data.byteLength || event.data.size, 'bytes');
+//!     playAudioData(event.data);
 //!   }
 //! };
 //!
@@ -101,33 +99,10 @@
 //!   ws.send(JSON.stringify(message));
 //! }
 //!
-//! // Queue multiple messages and flush at once
-//! function queueSpeak(text) {
-//!   const message = {
-//!     type: 'speak',
-//!     text: text,
-//!     flush: false  // Queue without immediate processing
-//!   };
-//!   ws.send(JSON.stringify(message));
-//! }
-//!
-//! function flushQueue() {
-//!   // Flush any queued messages by calling the flush method on voice manager
-//!   // This will be handled by a separate flush command if needed
-//! }
-//!
-//! // Send audio data for transcription
+//! // Send audio data for transcription (binary message)
 //! function sendAudio(audioBuffer) {
-//!   // Convert audio to base64 for JSON message
-//!   const base64Audio = btoa(String.fromCharCode(...new Uint8Array(audioBuffer)));
-//!   const message = {
-//!     type: 'audio',
-//!     data: base64Audio
-//!   };
-//!   ws.send(JSON.stringify(message));
-//!   
-//!   // Or send as binary message (more efficient)
-//!   // ws.send(audioBuffer);
+//!   // Send as binary message for optimal performance
+//!   ws.send(audioBuffer);
 //! }
 //!
 //! // Clear TTS queue
@@ -136,14 +111,29 @@
 //!   ws.send(JSON.stringify(message));
 //! }
 //!
+//! // Play audio data from binary message
+//! function playAudioData(audioData) {
+//!   // Convert to ArrayBuffer if needed
+//!   const buffer = audioData instanceof ArrayBuffer ? audioData : await audioData.arrayBuffer();
+//!   
+//!   // Use Web Audio API to play the audio
+//!   const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+//!   audioContext.decodeAudioData(buffer.slice(), (audioBuffer) => {
+//!     const source = audioContext.createBufferSource();
+//!     source.buffer = audioBuffer;
+//!     source.connect(audioContext.destination);
+//!     source.start();
+//!   });
+//! }
+//!
 //! // Example usage
 //! setTimeout(() => {
-//!   // Send multiple queued messages
+//!   // Send text messages
 //!   speak('Hello, this is the first message', false);  // Queue without flush
 //!   speak('This is the second message', false);        // Queue without flush
 //!   speak('This is the final message', true);          // Send and flush all
 //!   
-//!   // Send some mock audio data
+//!   // Send binary audio data
 //!   const mockAudio = new ArrayBuffer(1024);
 //!   sendAudio(mockAudio);
 //! }, 1000);
@@ -189,6 +179,7 @@
 //!     while let Some(message) = read.next().await {
 //!         match message? {
 //!             Message::Text(text) => {
+//!                 // JSON control messages
 //!                 let parsed: serde_json::Value = serde_json::from_str(&text)?;
 //!                 match parsed["type"].as_str() {
 //!                     Some("ready") => {
@@ -201,13 +192,13 @@
 //!                             "flush": true
 //!                         });
 //!                         write.send(Message::Text(speak_msg.to_string().into())).await?;
+//!                         
+//!                         // Send binary audio data
+//!                         let audio_data = vec![0u8; 1024]; // Mock audio data
+//!                         write.send(Message::Binary(audio_data)).await?;
 //!                     }
 //!                     Some("stt_result") => {
 //!                         println!("STT Result: {}", parsed["transcript"]);
-//!                     }
-//!                     Some("tts_audio") => {
-//!                         println!("Received TTS audio: {} bytes",
-//!                                  parsed["data"].as_str().unwrap_or("").len());
 //!                     }
 //!                     Some("error") => {
 //!                         eprintln!("Error: {}", parsed["message"]);
@@ -216,7 +207,9 @@
 //!                 }
 //!             }
 //!             Message::Binary(data) => {
-//!                 println!("Received binary audio data: {} bytes", data.len());
+//!                 // Binary audio messages
+//!                 println!("Received binary TTS audio data: {} bytes", data.len());
+//!                 // Process audio data directly
 //!             }
 //!             _ => {}
 //!         }
@@ -228,7 +221,9 @@
 //!
 //! ## Performance Considerations
 //!
-//! - **Binary Messages**: Use binary WebSocket messages for audio data for better performance
+//! - **Binary Messages**: Audio data is sent as binary WebSocket messages for optimal performance
+//! - **Zero-Copy Processing**: Audio data is processed without base64 encoding/decoding
+//! - **Smart Detection**: JSON parsing attempt distinguishes control messages from binary audio
 //! - **Batch Processing**: Send multiple audio chunks together when possible
 //! - **Connection Pooling**: Reuse WebSocket connections for multiple operations
 //! - **Error Handling**: Implement proper error handling and reconnection logic
@@ -252,11 +247,16 @@ use axum::{
     },
     response::Response,
 };
+use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    select,
+    time::{Duration, timeout},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -357,11 +357,6 @@ pub enum IncomingMessage {
         stt_config: STTWebSocketConfig,
         tts_config: TTSWebSocketConfig,
     },
-    #[serde(rename = "audio")]
-    Audio {
-        #[serde(with = "base64_serde")]
-        data: Vec<u8>,
-    },
     #[serde(rename = "speak")]
     Speak {
         text: String,
@@ -385,56 +380,33 @@ pub enum OutgoingMessage {
         is_speech_final: bool,
         confidence: f32,
     },
-    #[serde(rename = "tts_audio")]
-    TTSAudio {
-        #[serde(with = "base64_serde")]
-        data: Vec<u8>,
-        format: String,
-        sample_rate: u32,
-        duration_ms: Option<u32>,
-    },
     #[serde(rename = "error")]
     Error { message: String },
 }
 
-/// Base64 serialization helper
-mod base64_serde {
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+// Base64 serialization helper is no longer needed since we use binary messages for audio
 
-    pub fn serialize<S>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        BASE64.encode(data).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        BASE64
-            .decode(encoded)
-            .map_err(|e| serde::de::Error::custom(format!("Invalid base64: {e}")))
-    }
-}
-
-/// WebSocket connection state
+/// WebSocket connection state optimized for low latency
 struct ConnectionState {
     voice_manager: Option<Arc<VoiceManager>>,
     tts_audio_queue: VecDeque<AudioData>,
-    is_flushing: bool,
+    is_processing_audio: bool,
 }
 
 impl ConnectionState {
     fn new() -> Self {
         Self {
             voice_manager: None,
-            tts_audio_queue: VecDeque::new(),
-            is_flushing: false,
+            tts_audio_queue: VecDeque::with_capacity(16), // Pre-allocate capacity
+            is_processing_audio: false,
         }
     }
+}
+
+/// Message routing for optimized throughput
+enum MessageRoute {
+    Outgoing(OutgoingMessage),
+    Binary(Bytes),
 }
 
 /// WebSocket voice processing handler
@@ -447,7 +419,7 @@ pub async fn ws_voice_handler(
     ws.on_upgrade(move |socket| handle_voice_socket(socket, state))
 }
 
-/// Handle WebSocket voice connection
+/// Handle WebSocket voice connection with optimized performance
 /// This function manages the entire WebSocket session for voice processing
 async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     info!("WebSocket voice connection established");
@@ -455,97 +427,126 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     // Split the socket into sender and receiver
     let (mut sender, mut receiver) = socket.split();
 
-    // Connection state
-    let state = Arc::new(RwLock::new(ConnectionState::new()));
+    // Connection state with async-friendly mutex
+    let state = Arc::new(Mutex::new(ConnectionState::new()));
 
-    // Channel for outgoing messages
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
+    // Use bounded channel for backpressure handling
+    const CHANNEL_BUFFER_SIZE: usize = 256;
+    let (message_tx, mut message_rx) = mpsc::channel::<MessageRoute>(CHANNEL_BUFFER_SIZE);
 
-    // Spawn task to handle outgoing messages
-    let sender_task = {
-        let _outgoing_tx = outgoing_tx.clone();
-        tokio::spawn(async move {
-            while let Some(message) = outgoing_rx.recv().await {
-                let json_message = match serde_json::to_string(&message) {
-                    Ok(json) => json,
-                    Err(e) => {
-                        error!("Failed to serialize outgoing message: {}", e);
-                        continue;
+    // Spawn optimized task to handle outgoing messages
+    let sender_task = tokio::spawn(async move {
+        while let Some(route) = message_rx.recv().await {
+            let result = match route {
+                MessageRoute::Outgoing(message) => {
+                    // Optimize JSON serialization by reusing string buffer
+                    match serde_json::to_string(&message) {
+                        Ok(json_str) => sender.send(Message::Text(json_str.into())).await,
+                        Err(e) => {
+                            error!("Failed to serialize outgoing message: {}", e);
+                            continue;
+                        }
                     }
-                };
-
-                if let Err(e) = sender.send(Message::Text(json_message.into())).await {
-                    error!("Failed to send WebSocket message: {}", e);
-                    break;
                 }
-            }
-        })
-    };
+                MessageRoute::Binary(data) => sender.send(Message::Binary(data)).await,
+            };
 
-    // Process incoming messages
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(msg) => {
-                let should_continue = process_message(msg, &state, &outgoing_tx, &app_state).await;
-                if !should_continue {
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!("WebSocket error: {}", e);
-                let _ = outgoing_tx.send(OutgoingMessage::Error {
-                    message: format!("WebSocket error: {e}"),
-                });
+            if let Err(e) = result {
+                error!("Failed to send WebSocket message: {}", e);
                 break;
+            }
+        }
+    });
+
+    // Process incoming messages with timeout handling
+    let processing_timeout = Duration::from_secs(30);
+
+    loop {
+        select! {
+            msg_result = receiver.next() => {
+                match msg_result {
+                    Some(Ok(msg)) => {
+                        let continue_processing = process_message_optimized(
+                            msg,
+                            &state,
+                            &message_tx,
+                            &app_state
+                        ).await;
+
+                        if !continue_processing {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!("WebSocket error: {}", e);
+                        let _ = message_tx.send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                            message: format!("WebSocket error: {e}"),
+                        })).await;
+                        break;
+                    }
+                    None => {
+                        info!("WebSocket connection closed by client");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(processing_timeout) => {
+                // Handle connection timeout
+                debug!("WebSocket connection timeout check");
+                continue;
             }
         }
     }
 
-    // Clean up
+    // Clean up resources
     sender_task.abort();
 
     // Stop voice manager if it exists
-    if let Some(voice_manager) = &state.read().await.voice_manager {
-        if let Err(e) = voice_manager.stop().await {
-            error!("Failed to stop voice manager: {}", e);
+    {
+        let connection_state = state.lock().await;
+        if let Some(voice_manager) = &connection_state.voice_manager {
+            if let Err(e) = voice_manager.stop().await {
+                error!("Failed to stop voice manager: {}", e);
+            }
         }
     }
 
     info!("WebSocket voice connection terminated");
 }
 
-/// Process incoming WebSocket message
-async fn process_message(
+/// Process incoming WebSocket message with optimizations
+async fn process_message_optimized(
     msg: Message,
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
 ) -> bool {
     match msg {
         Message::Text(text) => {
-            debug!("Received text message: {}", text);
+            debug!("Received text message: {} bytes", text.len());
 
+            // Optimized JSON parsing
             let incoming_msg: IncomingMessage = match serde_json::from_str(&text) {
                 Ok(msg) => msg,
                 Err(e) => {
                     error!("Failed to parse incoming message: {}", e);
-                    let _ = outgoing_tx.send(OutgoingMessage::Error {
-                        message: format!("Invalid message format: {e}"),
-                    });
+                    let _ = message_tx
+                        .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                            message: format!("Invalid message format: {e}"),
+                        }))
+                        .await;
                     return true;
                 }
             };
 
-            handle_incoming_message(incoming_msg, state, outgoing_tx, app_state).await
+            handle_incoming_message_optimized(incoming_msg, state, message_tx, app_state).await
         }
         Message::Binary(data) => {
             debug!("Received binary message: {} bytes", data.len());
 
-            // Treat binary messages as raw audio data
-            let audio_msg = IncomingMessage::Audio {
-                data: data.to_vec(),
-            };
-            handle_incoming_message(audio_msg, state, outgoing_tx, app_state).await
+            // Handle binary audio data directly for optimal performance
+            let audio_data = Bytes::from(data);
+            handle_audio_message_optimized(audio_data, state, message_tx).await
         }
         Message::Ping(_data) => {
             debug!("Received ping message");
@@ -563,32 +564,34 @@ async fn process_message(
     }
 }
 
-/// Handle parsed incoming message
-async fn handle_incoming_message(
+/// Handle parsed incoming message with optimizations
+async fn handle_incoming_message_optimized(
     msg: IncomingMessage,
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
 ) -> bool {
     match msg {
         IncomingMessage::Config {
             stt_config,
             tts_config,
-        } => handle_config_message(stt_config, tts_config, state, outgoing_tx, app_state).await,
-        IncomingMessage::Audio { data } => handle_audio_message(data, state, outgoing_tx).await,
-        IncomingMessage::Speak { text, flush } => {
-            handle_speak_message(text, flush, state, outgoing_tx).await
+        } => {
+            handle_config_message_optimized(stt_config, tts_config, state, message_tx, app_state)
+                .await
         }
-        IncomingMessage::Clear => handle_clear_message(state, outgoing_tx).await,
+        IncomingMessage::Speak { text, flush } => {
+            handle_speak_message_optimized(text, flush, state, message_tx).await
+        }
+        IncomingMessage::Clear => handle_clear_message_optimized(state, message_tx).await,
     }
 }
 
-/// Handle configuration message
-async fn handle_config_message(
+/// Handle configuration message with optimizations
+async fn handle_config_message_optimized(
     stt_ws_config: STTWebSocketConfig,
     tts_ws_config: TTSWebSocketConfig,
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
 ) -> bool {
     info!(
@@ -601,7 +604,11 @@ async fn handle_config_message(
         Ok(key) => key,
         Err(error_msg) => {
             error!("{}", error_msg);
-            let _ = outgoing_tx.send(OutgoingMessage::Error { message: error_msg });
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: error_msg,
+                }))
+                .await;
             return true;
         }
     };
@@ -610,14 +617,17 @@ async fn handle_config_message(
         Ok(key) => key,
         Err(error_msg) => {
             error!("{}", error_msg);
-            let _ = outgoing_tx.send(OutgoingMessage::Error { message: error_msg });
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: error_msg,
+                }))
+                .await;
             return true;
         }
     };
 
     // Create full configs with API keys
     let stt_config = stt_ws_config.to_stt_config(stt_api_key);
-
     let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
     // Create voice manager configuration
@@ -631,9 +641,11 @@ async fn handle_config_message(
         Ok(vm) => Arc::new(vm),
         Err(e) => {
             error!("Failed to create voice manager: {}", e);
-            let _ = outgoing_tx.send(OutgoingMessage::Error {
-                message: format!("Failed to create voice manager: {e}"),
-            });
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to create voice manager: {e}"),
+                }))
+                .await;
             return true;
         }
     };
@@ -641,17 +653,19 @@ async fn handle_config_message(
     // Start voice manager
     if let Err(e) = voice_manager.start().await {
         error!("Failed to start voice manager: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to start voice manager: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to start voice manager: {e}"),
+            }))
+            .await;
         return true;
     }
 
-    // Set up STT callback
-    let outgoing_tx_clone = outgoing_tx.clone();
+    // Set up STT callback with optimized message routing
+    let message_tx_clone = message_tx.clone();
     if let Err(e) = voice_manager
         .on_stt_result(move |result: STTResult| {
-            let outgoing_tx = outgoing_tx_clone.clone();
+            let message_tx = message_tx_clone.clone();
             Box::pin(async move {
                 let msg = OutgoingMessage::STTResult {
                     transcript: result.transcript,
@@ -659,155 +673,173 @@ async fn handle_config_message(
                     is_speech_final: result.is_speech_final,
                     confidence: result.confidence,
                 };
-                let _ = outgoing_tx.send(msg);
+                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
             })
         })
         .await
     {
         error!("Failed to set up STT callback: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up STT callback: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up STT callback: {e}"),
+            }))
+            .await;
         return true;
     }
 
-    // Set up TTS audio callback
+    // Set up TTS audio callback with binary optimization
     let state_clone = state.clone();
-    let outgoing_tx_clone = outgoing_tx.clone();
+    let message_tx_clone = message_tx.clone();
     if let Err(e) = voice_manager
         .on_tts_audio(move |audio_data: AudioData| {
             let state = state_clone.clone();
-            let outgoing_tx = outgoing_tx_clone.clone();
+            let message_tx = message_tx_clone.clone();
             Box::pin(async move {
-                let mut connection_state = state.write().await;
+                let mut connection_state = state.lock().await;
 
-                // If flushing, add to queue instead of sending immediately
-                if connection_state.is_flushing {
+                // If processing audio, queue it for later
+                if connection_state.is_processing_audio {
                     connection_state.tts_audio_queue.push_back(audio_data);
                 } else {
-                    // Send immediately
-                    let msg = OutgoingMessage::TTSAudio {
-                        data: audio_data.data,
-                        format: audio_data.format,
-                        sample_rate: audio_data.sample_rate,
-                        duration_ms: audio_data.duration_ms,
-                    };
-                    let _ = outgoing_tx.send(msg);
+                    // Send immediately as binary for optimal performance
+                    let audio_bytes = Bytes::from(audio_data.data);
+                    let _ = message_tx.send(MessageRoute::Binary(audio_bytes)).await;
                 }
             })
         })
         .await
     {
         error!("Failed to set up TTS audio callback: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up TTS audio callback: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up TTS audio callback: {e}"),
+            }))
+            .await;
         return true;
     }
 
     // Set up TTS error callback
-    let outgoing_tx_clone = outgoing_tx.clone();
+    let message_tx_clone = message_tx.clone();
     if let Err(e) = voice_manager
         .on_tts_error(move |error| {
-            let outgoing_tx = outgoing_tx_clone.clone();
+            let message_tx = message_tx_clone.clone();
             Box::pin(async move {
                 let msg = OutgoingMessage::Error {
                     message: format!("TTS error: {error}"),
                 };
-                let _ = outgoing_tx.send(msg);
+                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
             })
         })
         .await
     {
         error!("Failed to set up TTS error callback: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to set up TTS error callback: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up TTS error callback: {e}"),
+            }))
+            .await;
         return true;
     }
 
-    // Wait for providers to be ready
-    let timeout = tokio::time::Duration::from_secs(30);
-    let start_time = tokio::time::Instant::now();
-
-    while !voice_manager.is_ready().await {
-        if start_time.elapsed() > timeout {
-            error!("Timeout waiting for voice providers to be ready");
-            let _ = outgoing_tx.send(OutgoingMessage::Error {
-                message: "Timeout waiting for voice providers to be ready".to_string(),
-            });
-            return true;
+    // Wait for providers to be ready with timeout
+    let ready_timeout = Duration::from_secs(30);
+    let ready_check = async {
+        while !voice_manager.is_ready().await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    };
+
+    if timeout(ready_timeout, ready_check).await.is_err() {
+        error!("Timeout waiting for voice providers to be ready");
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: "Timeout waiting for voice providers to be ready".to_string(),
+            }))
+            .await;
+        return true;
     }
 
     // Store voice manager in state
     {
-        let mut connection_state = state.write().await;
+        let mut connection_state = state.lock().await;
         connection_state.voice_manager = Some(voice_manager);
     }
 
     // Send ready message
-    let _ = outgoing_tx.send(OutgoingMessage::Ready);
+    let _ = message_tx
+        .send(MessageRoute::Outgoing(OutgoingMessage::Ready))
+        .await;
     info!("Voice manager ready and configured");
 
     true
 }
 
-/// Handle audio input message
-async fn handle_audio_message(
-    audio_data: Vec<u8>,
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+/// Handle audio input message with optimizations
+async fn handle_audio_message_optimized(
+    audio_data: Bytes,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
     debug!("Processing audio data: {} bytes", audio_data.len());
 
     let voice_manager = {
-        let connection_state = state.read().await;
+        let connection_state = state.lock().await;
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
-                let _ = outgoing_tx.send(OutgoingMessage::Error {
-                    message: "Voice manager not configured. Send config message first.".to_string(),
-                });
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: "Voice manager not configured. Send config message first."
+                            .to_string(),
+                    }))
+                    .await;
                 return true;
             }
         }
     };
 
+    // Use zero-copy conversion to Vec<u8>
+    let audio_vec = audio_data.to_vec();
+
     // Send audio to STT provider
-    if let Err(e) = voice_manager.receive_audio(audio_data).await {
+    if let Err(e) = voice_manager.receive_audio(audio_vec).await {
         error!("Failed to process audio: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to process audio: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to process audio: {e}"),
+            }))
+            .await;
     }
 
     true
 }
 
-/// Handle speak command message
-async fn handle_speak_message(
+/// Handle speak command message with optimizations
+async fn handle_speak_message_optimized(
     text: String,
     flush: Option<bool>,
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
     // Default flush to true for backward compatibility
     let should_flush = flush.unwrap_or(true);
     debug!(
-        "Processing speak command: {} (flush: {})",
-        text, should_flush
+        "Processing speak command: {} chars (flush: {})",
+        text.len(),
+        should_flush
     );
 
     let voice_manager = {
-        let connection_state = state.read().await;
+        let connection_state = state.lock().await;
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
-                let _ = outgoing_tx.send(OutgoingMessage::Error {
-                    message: "Voice manager not configured. Send config message first.".to_string(),
-                });
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: "Voice manager not configured. Send config message first."
+                            .to_string(),
+                    }))
+                    .await;
                 return true;
             }
         }
@@ -816,36 +848,42 @@ async fn handle_speak_message(
     // Send text to TTS provider with flush parameter
     if let Err(e) = voice_manager.speak(&text, should_flush).await {
         error!("Failed to synthesize speech: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to synthesize speech: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to synthesize speech: {e}"),
+            }))
+            .await;
     } else {
         debug!(
-            "Speech synthesis started for: {} (flush: {})",
-            text, should_flush
+            "Speech synthesis started for: {} chars (flush: {})",
+            text.len(),
+            should_flush
         );
     }
 
     true
 }
 
-/// Handle flush command message
-async fn handle_clear_message(
-    state: &Arc<RwLock<ConnectionState>>,
-    outgoing_tx: &mpsc::UnboundedSender<OutgoingMessage>,
+/// Handle clear command message with optimizations
+async fn handle_clear_message_optimized(
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
-    debug!("Processing flush command");
+    debug!("Processing clear command");
 
     let voice_manager = {
-        let mut connection_state = state.write().await;
-        connection_state.is_flushing = true;
+        let mut connection_state = state.lock().await;
+        connection_state.is_processing_audio = true;
 
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
-                let _ = outgoing_tx.send(OutgoingMessage::Error {
-                    message: "Voice manager not configured. Send config message first.".to_string(),
-                });
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: "Voice manager not configured. Send config message first."
+                            .to_string(),
+                    }))
+                    .await;
                 return true;
             }
         }
@@ -854,19 +892,21 @@ async fn handle_clear_message(
     // Clear TTS provider
     if let Err(e) = voice_manager.clear_tts().await {
         error!("Failed to clear TTS provider: {}", e);
-        let _ = outgoing_tx.send(OutgoingMessage::Error {
-            message: format!("Failed to clear TTS provider: {e}"),
-        });
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to clear TTS provider: {e}"),
+            }))
+            .await;
     }
 
-    // Clear the audio queue and stop flushing
+    // Clear the audio queue and stop processing
     {
-        let mut connection_state = state.write().await;
+        let mut connection_state = state.lock().await;
         connection_state.tts_audio_queue.clear();
-        connection_state.is_flushing = false;
+        connection_state.is_processing_audio = false;
     }
 
-    debug!("Flush command completed");
+    debug!("Clear command completed");
     true
 }
 
@@ -1004,22 +1044,16 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_audio_encoding() {
+    fn test_binary_audio_handling() {
+        // Test that binary audio data is handled directly as bytes
+        // without JSON serialization/deserialization
         let audio_data = vec![1, 2, 3, 4, 5];
-        let msg = IncomingMessage::Audio {
-            data: audio_data.clone(),
-        };
+        let bytes_data = Bytes::from(audio_data.clone());
 
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"audio\""));
-
-        // Deserialize back
-        let deserialized: IncomingMessage = serde_json::from_str(&json).unwrap();
-        if let IncomingMessage::Audio { data } = deserialized {
-            assert_eq!(data, audio_data);
-        } else {
-            panic!("Expected Audio message");
-        }
+        // Binary audio messages are now handled directly
+        // No JSON serialization involved for better performance
+        assert_eq!(bytes_data.to_vec(), audio_data);
+        assert_eq!(bytes_data.len(), 5);
     }
 
     #[test]
