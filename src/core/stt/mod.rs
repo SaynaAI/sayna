@@ -61,6 +61,7 @@ impl std::str::FromStr for STTProvider {
 ///         channels: 1,
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
+///         model: "nova-3".to_string(),
 ///     };
 ///
 ///     // Create a Deepgram STT provider
@@ -112,6 +113,7 @@ pub fn create_stt_provider(
 ///         channels: 1,
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
+///         model: "nova-3".to_string(),
 ///     };
 ///
 ///     // Create a Deepgram STT provider using enum
@@ -192,6 +194,7 @@ mod factory_tests {
     #[tokio::test]
     async fn test_create_stt_provider_with_invalid_config() {
         let config = STTConfig {
+            model: "nova-3".to_string(),
             provider: "deepgram".to_string(),
             api_key: String::new(), // Empty API key should fail
             language: "en-US".to_string(),
@@ -211,6 +214,7 @@ mod factory_tests {
     #[tokio::test]
     async fn test_create_stt_provider_from_enum() {
         let config = STTConfig {
+            model: "nova-3".to_string(),
             provider: "deepgram".to_string(),
             api_key: String::new(), // Empty API key should fail
             language: "en-US".to_string(),
@@ -241,6 +245,7 @@ mod factory_tests {
 /// async fn example_usage() {
 ///     // Configure the provider
 ///     let config = STTConfig {
+///         model: "nova-3".to_string(),
 ///         provider: "deepgram".to_string(),
 ///         api_key: "your-api-key".to_string(),
 ///         language: "en-US".to_string(),

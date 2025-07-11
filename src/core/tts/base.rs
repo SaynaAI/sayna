@@ -159,6 +159,8 @@ pub struct TTSConfig {
     pub api_key: String,
     /// Voice ID or name to use for synthesis
     pub voice_id: Option<String>,
+    /// Model to use for TTS
+    pub model: String,
     /// Speaking rate (0.25 to 4.0, 1.0 is normal)
     pub speaking_rate: Option<f32>,
     /// Audio format preference
@@ -174,6 +176,7 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
+            model: "".to_string(),
             provider: String::new(),
             api_key: String::new(),
             voice_id: Some("aura-asteria-en".to_string()),
