@@ -43,11 +43,14 @@ pub struct STTConfig {
     pub punctuation: bool,
     /// Encoding of the audio
     pub encoding: String,
+    /// Model to use for transcription
+    pub model: String,
 }
 
 impl Default for STTConfig {
     fn default() -> Self {
         Self {
+            model: "nova-3".to_string(),
             provider: String::new(),
             api_key: String::new(),
             language: "en-US".to_string(),
@@ -291,6 +294,7 @@ mod tests {
     #[tokio::test]
     async fn test_stt_new_function() {
         let config = STTConfig {
+            model: "nova-3".to_string(),
             provider: "mock".to_string(),
             api_key: "test_key".to_string(),
             language: "en-US".to_string(),

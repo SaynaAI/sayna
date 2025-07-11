@@ -282,6 +282,8 @@ pub struct STTWebSocketConfig {
     pub punctuation: bool,
     /// Encoding of the audio
     pub encoding: String,
+    /// Model to use for transcription
+    pub model: String,
 }
 
 impl STTWebSocketConfig {
@@ -301,6 +303,7 @@ impl STTWebSocketConfig {
             channels: self.channels,
             punctuation: self.punctuation,
             encoding: self.encoding.clone(),
+            model: self.model.clone(),
         }
     }
 }
@@ -322,6 +325,8 @@ pub struct TTSWebSocketConfig {
     pub connection_timeout: Option<u64>,
     /// Request timeout in seconds
     pub request_timeout: Option<u64>,
+    /// Model to use for TTS
+    pub model: String,
 }
 
 impl TTSWebSocketConfig {
@@ -339,6 +344,7 @@ impl TTSWebSocketConfig {
         TTSConfig {
             provider: self.provider.clone(),
             api_key,
+            model: self.model.clone(),
             // Use provided values or fall back to defaults
             voice_id: self.voice_id.clone().or(defaults.voice_id),
             speaking_rate: self.speaking_rate.or(defaults.speaking_rate),
@@ -907,6 +913,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            model: "nova-3".to_string(),
         };
 
         let json = serde_json::to_string(&stt_ws_config).unwrap();
@@ -923,6 +930,7 @@ mod tests {
             sample_rate: Some(22050),
             connection_timeout: Some(30),
             request_timeout: Some(60),
+            model: "".to_string(), // Model is in Voice ID for Deepgram
         };
 
         let json = serde_json::to_string(&tts_ws_config).unwrap();
@@ -942,6 +950,7 @@ mod tests {
                 channels: 1,
                 punctuation: true,
                 encoding: "linear16".to_string(),
+                model: "nova-3".to_string(),
             },
             tts_config: TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
@@ -951,6 +960,7 @@ mod tests {
                 sample_rate: Some(22050),
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
+                model: "".to_string(), // Model is in Voice ID for Deepgram
             },
         };
 
@@ -1049,6 +1059,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            model: "nova-3".to_string(),
         };
 
         let api_key = "test_api_key".to_string();
@@ -1072,6 +1083,7 @@ mod tests {
             sample_rate: Some(22050),
             connection_timeout: Some(60),
             request_timeout: Some(120),
+            model: "".to_string(), // Model is in Voice ID for Deepgram
         };
 
         let api_key = "test_api_key".to_string();
@@ -1097,6 +1109,7 @@ mod tests {
             sample_rate: None,
             connection_timeout: None,
             request_timeout: None,
+            model: "".to_string(), // Model is in Voice ID for Deepgram
         };
 
         let api_key = "test_api_key".to_string();
@@ -1124,6 +1137,7 @@ mod tests {
             sample_rate: None, // Should use default
             connection_timeout: Some(45),
             request_timeout: None, // Should use default
+            model: "".to_string(), // Model is in Voice ID for Deepgram
         };
 
         let api_key = "test_api_key".to_string();

@@ -33,8 +33,6 @@ enum ConnectionState {
 pub struct DeepgramSTTConfig {
     /// Base STT configuration
     pub base: STTConfig,
-    /// Deepgram model to use (e.g., "nova-2", "whisper")
-    pub model: String,
     /// Enable punctuation in transcription
     pub punctuation: bool,
     /// Enable speaker diarization
@@ -65,7 +63,6 @@ impl Default for DeepgramSTTConfig {
     fn default() -> Self {
         Self {
             base: STTConfig::default(),
-            model: "nova-2".to_string(),
             punctuation: true,
             diarize: false,
             interim_results: true,
@@ -173,7 +170,7 @@ impl DeepgramSTT {
     fn build_websocket_url(&self, config: &DeepgramSTTConfig) -> Result<String, STTError> {
         let mut url = String::with_capacity(256); // Pre-allocate expected size
         url.push_str("wss://api.deepgram.com/v1/listen?model=");
-        url.push_str(&config.model);
+        url.push_str(&config.base.model);
         url.push_str("&language=");
         url.push_str(&config.base.language);
         url.push_str("&sample_rate=");
@@ -585,6 +582,7 @@ mod tests {
     #[tokio::test]
     async fn test_deepgram_stt_creation() {
         let config = STTConfig {
+            model: "nova-3".to_string(),
             provider: "deepgram".to_string(),
             api_key: "test_key".to_string(),
             language: "en-US".to_string(),
@@ -606,6 +604,7 @@ mod tests {
     async fn test_deepgram_stt_config_validation() {
         // Test with empty API key
         let config = STTConfig {
+            model: "nova-3".to_string(),
             provider: "deepgram".to_string(),
             api_key: String::new(),
             language: "en-US".to_string(),
@@ -629,6 +628,7 @@ mod tests {
         let stt = DeepgramSTT::default();
         let config = DeepgramSTTConfig {
             base: STTConfig {
+                model: "nova-3".to_string(),
                 provider: "deepgram".to_string(),
                 api_key: "test_key".to_string(),
                 language: "en-US".to_string(),
@@ -637,7 +637,6 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
             },
-            model: "nova-3".to_string(),
             punctuation: false,
             interim_results: true,
             smart_format: false,

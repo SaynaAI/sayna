@@ -380,8 +380,13 @@ impl ElevenLabsTTS {
                 query_pairs.append_pair("inactivity_timeout", &timeout.to_string());
             }
 
+            // Add model
+            if !config.model.is_empty() {
+                query_pairs.append_pair("model_id", &config.model);
+            }
+
             // Add other parameters
-            query_pairs.append_pair("enable_logging", "true");
+            query_pairs.append_pair("enable_logging", "false");
             query_pairs.append_pair("enable_ssml_parsing", "false");
             query_pairs.append_pair("sync_alignment", "true");
         }
@@ -546,8 +551,6 @@ impl ElevenLabsTTS {
         audio_callback: &Arc<RwLock<Option<Arc<dyn AudioCallback>>>>,
         message_buffer: &mut MessageBuffer,
     ) -> TTSResult<()> {
-        tracing::debug!("Received ElevenLabs message: {}", message);
-
         // Quick check for audio messages to avoid full JSON parsing
         if message.contains("\"audio\"") {
             if let Ok(audio_output) = serde_json::from_str::<AudioOutput>(&message) {
@@ -935,6 +938,7 @@ mod tests {
             sample_rate: Some(22050),
             audio_format: Some("pcm".to_string()),
             connection_timeout: Some(30),
+            model: "eleven_multilingual_v2".to_string(),
             ..Default::default()
         };
 
@@ -942,7 +946,8 @@ mod tests {
         assert!(url.contains("test_voice_id"));
         assert!(url.contains("output_format=pcm_22050"));
         assert!(url.contains("inactivity_timeout=30"));
-        assert!(url.contains("enable_logging=true"));
+        assert!(url.contains("enable_logging=false"));
+        assert!(url.contains("model_id=eleven_multilingual_v2"));
     }
 
     #[test]

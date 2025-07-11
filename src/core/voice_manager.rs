@@ -34,6 +34,7 @@
 //!             channels: 1,
 //!             punctuation: true,
 //!             encoding: "linear16".to_string(),
+//!             model: "nova-3".to_string(),
 //!         },
 //!         tts_config: TTSConfig {
 //!             provider: "deepgram".to_string(),
