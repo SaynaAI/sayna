@@ -41,6 +41,8 @@ pub struct STTConfig {
     pub channels: u16,
     /// Enable punctuation in results
     pub punctuation: bool,
+    /// Encoding of the audio
+    pub encoding: String,
 }
 
 impl Default for STTConfig {
@@ -52,6 +54,7 @@ impl Default for STTConfig {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         }
     }
 }
@@ -294,6 +297,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let stt = MockSTT::new(config.clone()).unwrap();

@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{Instant, interval, timeout};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
@@ -57,6 +57,8 @@ pub struct DeepgramSTTConfig {
     pub endpointing: Option<u32>,
     /// Custom tags for request identification
     pub tag: Option<String>,
+    /// Utterance end timeout in milliseconds
+    pub utterance_end_ms: Option<u32>,
 }
 
 impl Default for DeepgramSTTConfig {
@@ -73,8 +75,9 @@ impl Default for DeepgramSTTConfig {
             keywords: Vec::new(),
             redact: Vec::new(),
             vad_events: false,
-            endpointing: Some(10),
+            endpointing: Some(300),
             tag: None,
+            utterance_end_ms: Some(1000),
         }
     }
 }
@@ -183,6 +186,8 @@ impl DeepgramSTT {
         url.push_str(&config.interim_results.to_string());
         url.push_str("&smart_format=");
         url.push_str(&config.smart_format.to_string());
+        url.push_str("&encoding=");
+        url.push_str(&config.base.encoding);
 
         // Add optional parameters only if they're set
         if let Some(endpointing) = config.endpointing {
@@ -314,6 +319,12 @@ impl DeepgramSTT {
 
             let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
+            // Keep-alive mechanism to prevent connection timeout
+            // Deepgram connections timeout after 10 seconds of inactivity
+            // Send keep-alive messages every 1 second when no audio is being sent
+            let mut keepalive_timer = interval(Duration::from_secs(1));
+            let mut last_activity = Instant::now();
+
             // Main event loop
             loop {
                 tokio::select! {
@@ -324,6 +335,8 @@ impl DeepgramSTT {
                             error!("Failed to send WebSocket message: {}", e);
                             break;
                         }
+                        // Update last activity time when audio is sent
+                        last_activity = Instant::now();
                     }
 
                     // Handle incoming messages
@@ -343,6 +356,20 @@ impl DeepgramSTT {
                                 info!("WebSocket stream ended");
                                 break;
                             }
+                        }
+                    }
+
+                    // Handle keep-alive timer
+                    _ = keepalive_timer.tick() => {
+                        // Check if we need to send a keep-alive message
+                        // Only send if no audio was sent in the last second
+                        if last_activity.elapsed() >= Duration::from_secs(1) {
+                            let keepalive_message = Message::Text(r#"{"type":"KeepAlive"}"#.into());
+                            if let Err(e) = ws_sink.send(keepalive_message).await {
+                                error!("Failed to send keep-alive message: {}", e);
+                                break;
+                            }
+                            debug!("Sent keep-alive message to Deepgram");
                         }
                     }
 
@@ -564,6 +591,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let stt = <DeepgramSTT as BaseSTT>::new(config).unwrap();
@@ -584,6 +612,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let result = <DeepgramSTT as BaseSTT>::new(config);
@@ -606,27 +635,30 @@ mod tests {
                 sample_rate: 16000,
                 channels: 1,
                 punctuation: true,
+                encoding: "linear16".to_string(),
             },
-            model: "nova-2".to_string(),
-            punctuation: true,
+            model: "nova-3".to_string(),
+            punctuation: false,
             interim_results: true,
-            smart_format: true,
-            keywords: vec!["hello".to_string(), "world".to_string()],
-            endpointing: Some(10),
+            smart_format: false,
+            endpointing: Some(300),
+            utterance_end_ms: Some(1000),
             tag: Some("test-tag".to_string()),
+            keywords: vec!["hello".to_string(), "world".to_string()],
             ..Default::default()
         };
 
         let url = stt.build_websocket_url(&config).unwrap();
         assert!(url.contains("wss://api.deepgram.com/v1/listen"));
-        assert!(url.contains("model=nova-2"));
+        assert!(url.contains("model=nova-3"));
         assert!(url.contains("language=en-US"));
         assert!(url.contains("sample_rate=16000"));
         assert!(url.contains("channels=1"));
-        assert!(url.contains("punctuation=true"));
+        assert!(url.contains("punctuation=false"));
         assert!(url.contains("interim_results=true"));
+        assert!(url.contains("smart_format=false"));
         assert!(url.contains("keywords=hello,world"));
-        assert!(url.contains("endpointing=10"));
+        assert!(url.contains("endpointing=300"));
         assert!(url.contains("tag=test-tag"));
     }
 
@@ -667,5 +699,21 @@ mod tests {
         assert_eq!(received_result.confidence, 0.98);
         assert!(received_result.is_final);
         assert!(received_result.is_speech_final);
+    }
+
+    #[tokio::test]
+    async fn test_keepalive_message_format() {
+        // Test that the keep-alive message format is correct
+        let keepalive_json = r#"{"type":"KeepAlive"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(keepalive_json).unwrap();
+
+        assert_eq!(parsed["type"], "KeepAlive");
+
+        // Test that the message can be created successfully
+        let message = Message::Text(keepalive_json.into());
+        match message {
+            Message::Text(_) => {} // Success
+            _ => panic!("Expected Text message"),
+        }
     }
 }

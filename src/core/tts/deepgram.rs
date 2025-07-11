@@ -543,9 +543,15 @@ impl BaseTTS for DeepgramTTS {
             ));
         }
 
+        let mut send_msg = text.to_string();
+
+        if send_msg.is_empty() {
+            send_msg = " ".to_string();
+        }
+
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            let command = TTSCommand::Speak(text.to_string(), flush);
+            let command = TTSCommand::Speak(send_msg, flush);
 
             sender.send(command).await.map_err(|e| {
                 TTSError::InternalError(format!("Failed to send speak command: {e}"))

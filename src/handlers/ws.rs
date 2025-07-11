@@ -6,7 +6,7 @@
 //! ## WebSocket API
 //!
 //! ### Connection Flow
-//! 1. Client connects to `/ws/voice` endpoint
+//! 1. Client connects to `/ws` endpoint
 //! 2. Client sends configuration message to initialize STT and TTS providers
 //! 3. Server responds with "ready" message when both providers are connected
 //! 4. Client can then send audio data, speak commands, or flush commands
@@ -30,7 +30,7 @@
 //!
 //! ```javascript
 //! // Connect to the WebSocket
-//! const ws = new WebSocket('ws://localhost:3000/ws/voice');
+//! const ws = new WebSocket('ws://localhost:3000/ws');
 //!
 //! // Configuration for STT and TTS providers (no API keys needed)
 //! const config = {
@@ -250,7 +250,6 @@ use axum::{
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::{
@@ -281,6 +280,8 @@ pub struct STTWebSocketConfig {
     pub channels: u16,
     /// Enable punctuation in results
     pub punctuation: bool,
+    /// Encoding of the audio
+    pub encoding: String,
 }
 
 impl STTWebSocketConfig {
@@ -299,6 +300,7 @@ impl STTWebSocketConfig {
             sample_rate: self.sample_rate,
             channels: self.channels,
             punctuation: self.punctuation,
+            encoding: self.encoding.clone(),
         }
     }
 }
@@ -389,16 +391,12 @@ pub enum OutgoingMessage {
 /// WebSocket connection state optimized for low latency
 struct ConnectionState {
     voice_manager: Option<Arc<VoiceManager>>,
-    tts_audio_queue: VecDeque<AudioData>,
-    is_processing_audio: bool,
 }
 
 impl ConnectionState {
     fn new() -> Self {
         Self {
             voice_manager: None,
-            tts_audio_queue: VecDeque::with_capacity(16), // Pre-allocate capacity
-            is_processing_audio: false,
         }
     }
 }
@@ -576,6 +574,7 @@ async fn handle_incoming_message_optimized(
             stt_config,
             tts_config,
         } => {
+            println!("Processing config message");
             handle_config_message_optimized(stt_config, tts_config, state, message_tx, app_state)
                 .await
         }
@@ -688,23 +687,14 @@ async fn handle_config_message_optimized(
     }
 
     // Set up TTS audio callback with binary optimization
-    let state_clone = state.clone();
     let message_tx_clone = message_tx.clone();
     if let Err(e) = voice_manager
         .on_tts_audio(move |audio_data: AudioData| {
-            let state = state_clone.clone();
             let message_tx = message_tx_clone.clone();
             Box::pin(async move {
-                let mut connection_state = state.lock().await;
-
-                // If processing audio, queue it for later
-                if connection_state.is_processing_audio {
-                    connection_state.tts_audio_queue.push_back(audio_data);
-                } else {
-                    // Send immediately as binary for optimal performance
-                    let audio_bytes = Bytes::from(audio_data.data);
-                    let _ = message_tx.send(MessageRoute::Binary(audio_bytes)).await;
-                }
+                // Send immediately as binary for optimal performance
+                let audio_bytes = Bytes::from(audio_data.data);
+                let _ = message_tx.send(MessageRoute::Binary(audio_bytes)).await;
             })
         })
         .await
@@ -872,8 +862,7 @@ async fn handle_clear_message_optimized(
     debug!("Processing clear command");
 
     let voice_manager = {
-        let mut connection_state = state.lock().await;
-        connection_state.is_processing_audio = true;
+        let connection_state = state.lock().await;
 
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
@@ -899,13 +888,6 @@ async fn handle_clear_message_optimized(
             .await;
     }
 
-    // Clear the audio queue and stop processing
-    {
-        let mut connection_state = state.lock().await;
-        connection_state.tts_audio_queue.clear();
-        connection_state.is_processing_audio = false;
-    }
-
     debug!("Clear command completed");
     true
 }
@@ -924,6 +906,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let json = serde_json::to_string(&stt_ws_config).unwrap();
@@ -958,6 +941,7 @@ mod tests {
                 sample_rate: 16000,
                 channels: 1,
                 punctuation: true,
+                encoding: "linear16".to_string(),
             },
             tts_config: TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
@@ -1064,6 +1048,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let api_key = "test_api_key".to_string();
