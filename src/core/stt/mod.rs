@@ -60,6 +60,7 @@ impl std::str::FromStr for STTProvider {
 ///         sample_rate: 16000,
 ///         channels: 1,
 ///         punctuation: true,
+///         encoding: "linear16".to_string(),
 ///     };
 ///
 ///     // Create a Deepgram STT provider
@@ -110,6 +111,7 @@ pub fn create_stt_provider(
 ///         sample_rate: 16000,
 ///         channels: 1,
 ///         punctuation: true,
+///         encoding: "linear16".to_string(),
 ///     };
 ///
 ///     // Create a Deepgram STT provider using enum
@@ -196,6 +198,7 @@ mod factory_tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let result = create_stt_provider("deepgram", config);
@@ -214,6 +217,7 @@ mod factory_tests {
             sample_rate: 16000,
             channels: 1,
             punctuation: true,
+            encoding: "linear16".to_string(),
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Deepgram, config).await;
@@ -243,6 +247,7 @@ mod factory_tests {
 ///         sample_rate: 16000,
 ///         channels: 1,
 ///         punctuation: true,
+///         encoding: "linear16".to_string(),
 ///     };
 ///     
 ///     // Create provider using factory function

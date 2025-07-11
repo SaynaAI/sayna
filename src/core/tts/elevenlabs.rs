@@ -758,23 +758,14 @@ impl BaseTTS for ElevenLabsTTS {
             ));
         }
 
-        if text.is_empty() {
-            // Empty text closes the connection
-            let close_msg = ElevenLabsOutboundMessage::Close(CloseConnection {
-                text: "".to_string(),
-            });
+        let mut send_msg = text.to_string();
 
-            if let Some(tx) = &self.websocket_tx {
-                tx.send(close_msg).await.map_err(|e| {
-                    TTSError::InternalError(format!("Failed to send close message: {e}"))
-                })?;
-            }
-
-            return Ok(());
+        if send_msg.is_empty() {
+            send_msg = " ".to_string();
         }
 
         let send_msg = ElevenLabsOutboundMessage::SendText(SendText {
-            text: text.to_string(),
+            text: send_msg,
             try_trigger_generation: Some(true),
             flush: Some(flush),
             voice_settings: None,

@@ -33,6 +33,7 @@
 //!             sample_rate: 16000,
 //!             channels: 1,
 //!             punctuation: true,
+//!             encoding: "linear16".to_string(),
 //!         },
 //!         tts_config: TTSConfig {
 //!             provider: "deepgram".to_string(),
