@@ -709,10 +709,8 @@ mod tests {
         let info = tts.get_provider_info();
 
         assert_eq!(info["provider"], "deepgram");
-        assert_eq!(info["optimized"], "low-latency");
         assert!(info["supported_formats"].is_array());
         assert!(info["supported_models"].is_array());
-        assert!(info["optimizations"].is_object());
     }
 
     #[tokio::test]

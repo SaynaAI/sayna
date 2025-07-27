@@ -66,7 +66,7 @@ mod manager;
 mod types;
 
 // Re-export public types and traits
-pub use client::{AudioCallback, LiveKitClient};
+pub use client::{AudioCallback, DataCallback, DataMessage, LiveKitClient};
 pub use manager::LiveKitManager;
 pub use types::{
     AudioFrameInfo, ConnectionStatus, LiveKitConfig, LiveKitError, ParticipantInfo, RoomInfo,

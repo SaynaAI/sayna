@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+use std::fmt;
 
 /// Application error type
 #[derive(Debug)]
@@ -43,6 +44,19 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
+            AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
 
 impl From<Box<dyn std::error::Error>> for AppError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
