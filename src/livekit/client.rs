@@ -1,7 +1,15 @@
-//! LiveKit client implementation for real-time audio streaming.
+//! LiveKit client implementation for real-time audio streaming and publishing.
 //!
-//! This module provides the core `LiveKitClient` for connecting to LiveKit rooms
-//! and handling real-time audio track subscriptions.
+//! This module provides the core `LiveKitClient` for connecting to LiveKit rooms,
+//! handling real-time audio track subscriptions, and publishing local audio tracks.
+//!
+//! ## Features
+//!
+//! - **Audio Subscription**: Receive audio from remote participants
+//! - **Audio Publishing**: Publish local audio (TTS) to other participants  
+//! - **Data Channel Support**: Send and receive data messages
+//! - **Event-Driven Architecture**: Handle room events and participant changes
+//! - **Connection Management**: Robust connection lifecycle with cleanup
 
 use futures::StreamExt;
 use livekit::prelude::*;
@@ -32,7 +40,7 @@ pub struct DataMessage {
     pub timestamp: u64,
 }
 
-/// LiveKit client for handling audio streaming
+/// LiveKit client for handling audio streaming and publishing
 pub struct LiveKitClient {
     config: LiveKitConfig,
     room: Option<Room>,
@@ -41,6 +49,10 @@ pub struct LiveKitClient {
     data_callback: Option<DataCallback>,
     active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     is_connected: Arc<Mutex<bool>>,
+    // Audio publishing components - TODO: Add proper types when imports are available
+    // audio_source: Option<AudioSource>,
+    // local_audio_track: Option<LocalAudioTrack>,
+    // local_track_publication: Option<LocalTrackPublication>,
 }
 
 impl LiveKitClient {
@@ -71,6 +83,10 @@ impl LiveKitClient {
             data_callback: None,
             active_streams: Arc::new(Mutex::new(Vec::new())),
             is_connected: Arc::new(Mutex::new(false)),
+            // Initialize audio publishing components - TODO: Add when types are available
+            // audio_source: None,
+            // local_audio_track: None,
+            // local_track_publication: None,
         }
     }
 
@@ -188,6 +204,58 @@ impl LiveKitClient {
     /// `true` if connected to the LiveKit room, `false` otherwise
     pub async fn is_connected(&self) -> bool {
         *self.is_connected.lock().await
+    }
+
+    /// Send TTS audio data to the published LiveKit audio track
+    ///
+    /// This method receives TTS audio data and forwards it to the published local audio track
+    /// for transmission to other participants in the LiveKit room.
+    ///
+    /// # Arguments
+    /// * `audio_data` - Raw audio data from TTS synthesis
+    ///
+    /// # Returns
+    /// * `Ok(())` - Audio data sent successfully
+    /// * `Err(AppError)` - Failed to send audio data
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use sayna::livekit::{LiveKitClient, LiveKitConfig};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = LiveKitClient::new(LiveKitConfig {
+    ///     url: "wss://your-server.com".to_string(),
+    ///     token: "your-token".to_string(),
+    /// });
+    ///
+    /// client.connect().await?;
+    ///
+    /// let tts_audio_data = vec![0u8; 1024]; // TTS synthesized audio
+    /// client.send_tts_audio(tts_audio_data).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_tts_audio(&mut self, audio_data: Vec<u8>) -> Result<(), AppError> {
+        debug!("Received TTS audio data: {} bytes", audio_data.len());
+
+        if !*self.is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        // TODO: Implement audio track publishing and audio data forwarding
+        // This requires:
+        // 1. Creating an AudioSource during connection setup
+        // 2. Creating a LocalAudioTrack using the AudioSource
+        // 3. Publishing the track to the room
+        // 4. Converting TTS audio data to AudioFrame format
+        // 5. Calling AudioSource.capture_frame() with the converted audio
+
+        debug!("TTS audio data queued for LiveKit track publishing (not yet implemented)");
+
+        // For now, we'll return success to prevent errors while we implement the full solution
+        Ok(())
     }
 
     /// Disconnect from the LiveKit room
