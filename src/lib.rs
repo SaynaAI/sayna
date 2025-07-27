@@ -2,6 +2,7 @@ pub mod config;
 pub mod core;
 pub mod errors;
 pub mod handlers;
+pub mod livekit;
 pub mod routes;
 pub mod state;
 pub mod utils;

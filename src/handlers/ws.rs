@@ -15,7 +15,7 @@
 //! ### Message Types
 //!
 //! **Incoming Messages:**
-//! - `{"type": "config", "stt_config": {...}, "tts_config": {...}}` - Initialize voice providers (without API keys)
+//! - `{"type": "config", "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
 //! - **Binary messages** - Raw audio data for transcription
@@ -23,8 +23,24 @@
 //! **Outgoing Messages:**
 //! - `{"type": "ready"}` - Voice providers are ready for use
 //! - `{"type": "stt_result", "transcript": "...", "is_final": true, "confidence": 0.95}` - STT result
+//! - `{"type": "message", "message": {...}}` - Unified message from various sources (LiveKit, etc.)
 //! - `{"type": "error", "message": "error description"}` - Error occurred
 //! - **Binary messages** - Raw TTS audio data (optimized for performance)
+//!
+//! **Unified Message Structure:**
+//! ```json
+//! {
+//!   "type": "message",
+//!   "message": {
+//!     "message": "Hello from LiveKit!", // Optional text content
+//!     "data": "base64encodeddata",      // Optional binary data (base64)
+//!     "identity": "user123",            // Sender identity
+//!     "topic": "chat",                  // Message topic/channel
+//!     "room": "room-name",              // Room/space identifier
+//!     "timestamp": 1234567890           // Unix timestamp
+//!   }
+//! }
+//! ```
 //!
 //! ## JavaScript Client Example
 //!
@@ -50,6 +66,11 @@
 //!     sample_rate: 24000,
 //!     connection_timeout: 30,
 //!     request_timeout: 60
+//!   },
+//!   // Optional: Connect to LiveKit for real-time audio streaming
+//!   livekit: {
+//!     url: 'wss://your-livekit-server.com',
+//!     token: 'your-livekit-jwt-token'  // JWT token for room access
 //!   }
 //! };
 //!
@@ -75,6 +96,19 @@
 //!         console.log('STT Result:', message.transcript);
 //!         if (message.is_final) {
 //!           console.log('Final transcription:', message.transcript);
+//!         }
+//!         break;
+//!         
+//!       case 'message':
+//!         // Handle unified messages from LiveKit or other sources
+//!         const msg = message.message;
+//!         console.log(`Message from ${msg.identity} in ${msg.room}/${msg.topic}:`);
+//!         if (msg.message) {
+//!           console.log('Text:', msg.message);
+//!         }
+//!         if (msg.data) {
+//!           console.log('Binary data:', msg.data); // base64 encoded
+//!           // To decode: const binaryData = atob(msg.data);
 //!         }
 //!         break;
 //!         
@@ -170,6 +204,11 @@
 //!             "sample_rate": 24000,
 //!             "connection_timeout": 30,
 //!             "request_timeout": 60
+//!         },
+//!         // Optional: Connect to LiveKit for real-time audio streaming
+//!         "livekit": {
+//!             "url": "wss://your-livekit-server.com",
+//!             "token": "your-livekit-jwt-token"
 //!         }
 //!     });
 //!
@@ -247,6 +286,7 @@ use axum::{
     },
     response::Response,
 };
+use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -264,6 +304,7 @@ use crate::{
         tts::{AudioData, TTSConfig},
         voice_manager::{VoiceManager, VoiceManagerConfig},
     },
+    livekit::{LiveKitClient, LiveKitConfig},
     state::AppState,
 };
 
@@ -304,6 +345,28 @@ impl STTWebSocketConfig {
             punctuation: self.punctuation,
             encoding: self.encoding.clone(),
             model: self.model.clone(),
+        }
+    }
+}
+
+/// LiveKit configuration for WebSocket messages
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LiveKitWebSocketConfig {
+    /// LiveKit server URL (e.g., "wss://your-livekit-server.com")
+    pub url: String,
+    /// LiveKit JWT token for room access
+    pub token: String,
+}
+
+impl LiveKitWebSocketConfig {
+    /// Convert WebSocket LiveKit config to full LiveKit config
+    ///
+    /// # Returns
+    /// * `LiveKitConfig` - Full LiveKit configuration
+    pub fn to_livekit_config(&self) -> LiveKitConfig {
+        LiveKitConfig {
+            url: self.url.clone(),
+            token: self.token.clone(),
         }
     }
 }
@@ -364,6 +427,9 @@ pub enum IncomingMessage {
     Config {
         stt_config: STTWebSocketConfig,
         tts_config: TTSWebSocketConfig,
+        /// Optional LiveKit configuration for real-time audio streaming
+        #[serde(skip_serializing_if = "Option::is_none")]
+        livekit: Option<LiveKitWebSocketConfig>,
     },
     #[serde(rename = "speak")]
     Speak {
@@ -373,6 +439,25 @@ pub enum IncomingMessage {
     },
     #[serde(rename = "clear")]
     Clear,
+}
+
+/// Unified message structure for all incoming messages from various sources
+#[derive(Debug, Serialize, Clone)]
+pub struct UnifiedMessage {
+    /// Text message content (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Binary data encoded as base64 (optional)  
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Participant/sender identity
+    pub identity: String,
+    /// Topic/channel for the message
+    pub topic: String,
+    /// Room/space identifier
+    pub room: String,
+    /// Timestamp when the message was received
+    pub timestamp: u64,
 }
 
 /// WebSocket message types for outgoing messages
@@ -388,6 +473,11 @@ pub enum OutgoingMessage {
         is_speech_final: bool,
         confidence: f32,
     },
+    #[serde(rename = "message")]
+    Message {
+        /// Unified message structure containing text/data from various sources
+        message: UnifiedMessage,
+    },
     #[serde(rename = "error")]
     Error { message: String },
 }
@@ -397,12 +487,14 @@ pub enum OutgoingMessage {
 /// WebSocket connection state optimized for low latency
 struct ConnectionState {
     voice_manager: Option<Arc<VoiceManager>>,
+    livekit_client: Option<Arc<Mutex<LiveKitClient>>>,
 }
 
 impl ConnectionState {
     fn new() -> Self {
         Self {
             voice_manager: None,
+            livekit_client: None,
         }
     }
 }
@@ -505,12 +597,19 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     // Clean up resources
     sender_task.abort();
 
-    // Stop voice manager if it exists
+    // Stop voice manager and LiveKit client if they exist
     {
         let connection_state = state.lock().await;
         if let Some(voice_manager) = &connection_state.voice_manager {
             if let Err(e) = voice_manager.stop().await {
                 error!("Failed to stop voice manager: {}", e);
+            }
+        }
+
+        if let Some(livekit_client) = &connection_state.livekit_client {
+            let mut client = livekit_client.lock().await;
+            if let Err(e) = client.disconnect().await {
+                error!("Failed to disconnect LiveKit client: {:?}", e);
             }
         }
     }
@@ -579,9 +678,13 @@ async fn handle_incoming_message(
         IncomingMessage::Config {
             stt_config,
             tts_config,
+            livekit,
         } => {
             println!("Processing config message");
-            handle_config_message(stt_config, tts_config, state, message_tx, app_state).await
+            handle_config_message(
+                stt_config, tts_config, livekit, state, message_tx, app_state,
+            )
+            .await
         }
         IncomingMessage::Speak { text, flush } => {
             handle_speak_message(text, flush, state, message_tx).await
@@ -594,6 +697,7 @@ async fn handle_incoming_message(
 async fn handle_config_message(
     stt_ws_config: STTWebSocketConfig,
     tts_ws_config: TTSWebSocketConfig,
+    livekit_ws_config: Option<LiveKitWebSocketConfig>,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
@@ -757,7 +861,104 @@ async fn handle_config_message(
     // Store voice manager in state
     {
         let mut connection_state = state.lock().await;
-        connection_state.voice_manager = Some(voice_manager);
+        connection_state.voice_manager = Some(voice_manager.clone());
+    }
+
+    // Set up LiveKit client if configuration is provided
+    if let Some(livekit_ws_config) = livekit_ws_config {
+        info!(
+            "Setting up LiveKit client with URL: {}",
+            livekit_ws_config.url
+        );
+
+        let livekit_config = livekit_ws_config.to_livekit_config();
+        let mut livekit_client = LiveKitClient::new(livekit_config);
+
+        // Set up LiveKit audio callback to forward audio to STT processing
+        let voice_manager_clone = voice_manager.clone();
+        let message_tx_clone = message_tx.clone();
+
+        livekit_client.set_audio_callback(move |audio_data: Vec<u8>| {
+            let voice_manager = voice_manager_clone.clone();
+            let message_tx = message_tx_clone.clone();
+
+            tokio::spawn(async move {
+                debug!("Received LiveKit audio: {} bytes", audio_data.len());
+
+                // Forward LiveKit audio to the same STT processing pipeline
+                if let Err(e) = voice_manager.receive_audio(audio_data).await {
+                    error!("Failed to process LiveKit audio: {:?}", e);
+                    let _ = message_tx
+                        .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                            message: format!("Failed to process LiveKit audio: {:?}", e),
+                        }))
+                        .await;
+                }
+            });
+        });
+
+        // Set up LiveKit data callback to forward data messages to WebSocket client
+        let message_tx_clone = message_tx.clone();
+        livekit_client.set_data_callback(move |data_message| {
+            let message_tx = message_tx_clone.clone();
+
+            tokio::spawn(async move {
+                debug!(
+                    "Received LiveKit data from {}: {} bytes",
+                    data_message.participant_identity,
+                    data_message.data.len()
+                );
+
+                // Create unified message structure for LiveKit data
+                let unified_message =
+                    if let Ok(text_message) = String::from_utf8(data_message.data.clone()) {
+                        // Data can be decoded as UTF-8 text
+                        UnifiedMessage {
+                            message: Some(text_message),
+                            data: None,
+                            identity: data_message.participant_identity,
+                            topic: data_message.topic.unwrap_or_else(|| "default".to_string()),
+                            room: "livekit".to_string(), // TODO: Get actual room name from LiveKit client
+                            timestamp: data_message.timestamp,
+                        }
+                    } else {
+                        // Binary data - encode as base64
+                        UnifiedMessage {
+                            message: None,
+                            data: Some(general_purpose::STANDARD.encode(&data_message.data)),
+                            identity: data_message.participant_identity,
+                            topic: data_message.topic.unwrap_or_else(|| "default".to_string()),
+                            room: "livekit".to_string(), // TODO: Get actual room name from LiveKit client
+                            timestamp: data_message.timestamp,
+                        }
+                    };
+
+                let outgoing_msg = OutgoingMessage::Message {
+                    message: unified_message,
+                };
+
+                let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
+            });
+        });
+
+        // Connect to LiveKit room
+        if let Err(e) = livekit_client.connect().await {
+            error!("Failed to connect to LiveKit room: {:?}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to connect to LiveKit room: {:?}", e),
+                }))
+                .await;
+            return true;
+        }
+
+        // Store LiveKit client in state
+        {
+            let mut connection_state = state.lock().await;
+            connection_state.livekit_client = Some(Arc::new(Mutex::new(livekit_client)));
+        }
+
+        info!("LiveKit client connected and ready");
     }
 
     // Send ready message
@@ -961,6 +1162,7 @@ mod tests {
                 request_timeout: Some(60),
                 model: "".to_string(), // Model is in Voice ID for Deepgram
             },
+            livekit: None,
         };
 
         let json = serde_json::to_string(&config_msg).unwrap();
@@ -1124,6 +1326,234 @@ mod tests {
         assert_eq!(tts_config.sample_rate, Some(24000));
         assert_eq!(tts_config.connection_timeout, Some(30));
         assert_eq!(tts_config.request_timeout, Some(60));
+    }
+
+    #[test]
+    fn test_livekit_ws_config_serialization() {
+        let livekit_config = LiveKitWebSocketConfig {
+            url: "wss://test-livekit.com".to_string(),
+            token: "test-jwt-token".to_string(),
+        };
+
+        let json = serde_json::to_string(&livekit_config).unwrap();
+        assert!(json.contains("\"url\":\"wss://test-livekit.com\""));
+        assert!(json.contains("\"token\":\"test-jwt-token\""));
+    }
+
+    #[test]
+    fn test_livekit_ws_config_conversion() {
+        let livekit_ws_config = LiveKitWebSocketConfig {
+            url: "wss://test-livekit.com".to_string(),
+            token: "test-jwt-token".to_string(),
+        };
+
+        let livekit_config = livekit_ws_config.to_livekit_config();
+        assert_eq!(livekit_config.url, "wss://test-livekit.com");
+        assert_eq!(livekit_config.token, "test-jwt-token");
+    }
+
+    #[test]
+    fn test_incoming_message_config_with_livekit() {
+        let config_msg = IncomingMessage::Config {
+            stt_config: STTWebSocketConfig {
+                provider: "deepgram".to_string(),
+                language: "en-US".to_string(),
+                sample_rate: 16000,
+                channels: 1,
+                punctuation: true,
+                encoding: "linear16".to_string(),
+                model: "nova-3".to_string(),
+            },
+            tts_config: TTSWebSocketConfig {
+                provider: "deepgram".to_string(),
+                voice_id: Some("aura-luna-en".to_string()),
+                speaking_rate: Some(1.0),
+                audio_format: Some("pcm".to_string()),
+                sample_rate: Some(22050),
+                connection_timeout: Some(30),
+                request_timeout: Some(60),
+                model: "".to_string(),
+            },
+            livekit: Some(LiveKitWebSocketConfig {
+                url: "wss://test-livekit.com".to_string(),
+                token: "test-jwt-token".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&config_msg).unwrap();
+        assert!(json.contains("\"type\":\"config\""));
+        assert!(json.contains("\"url\":\"wss://test-livekit.com\""));
+        assert!(json.contains("\"token\":\"test-jwt-token\""));
+    }
+
+    #[test]
+    fn test_incoming_message_config_without_livekit() {
+        let config_msg = IncomingMessage::Config {
+            stt_config: STTWebSocketConfig {
+                provider: "deepgram".to_string(),
+                language: "en-US".to_string(),
+                sample_rate: 16000,
+                channels: 1,
+                punctuation: true,
+                encoding: "linear16".to_string(),
+                model: "nova-3".to_string(),
+            },
+            tts_config: TTSWebSocketConfig {
+                provider: "deepgram".to_string(),
+                voice_id: Some("aura-luna-en".to_string()),
+                speaking_rate: Some(1.0),
+                audio_format: Some("pcm".to_string()),
+                sample_rate: Some(22050),
+                connection_timeout: Some(30),
+                request_timeout: Some(60),
+                model: "".to_string(),
+            },
+            livekit: None,
+        };
+
+        let json = serde_json::to_string(&config_msg).unwrap();
+        assert!(json.contains("\"type\":\"config\""));
+        // Should not contain livekit field when None
+        assert!(!json.contains("livekit"));
+    }
+
+    #[test]
+    fn test_parse_config_message_with_livekit() {
+        let json = r#"{
+            "type": "config",
+            "stt_config": {
+                "provider": "deepgram",
+                "language": "en-US",
+                "sample_rate": 16000,
+                "channels": 1,
+                "punctuation": true,
+                "encoding": "linear16",
+                "model": "nova-3"
+            },
+            "tts_config": {
+                "provider": "deepgram",
+                "voice_id": "aura-luna-en",
+                "speaking_rate": 1.0,
+                "audio_format": "pcm",
+                "sample_rate": 22050,
+                "connection_timeout": 30,
+                "request_timeout": 60,
+                "model": ""
+            },
+            "livekit": {
+                "url": "wss://test-livekit.com",
+                "token": "test-jwt-token"
+            }
+        }"#;
+
+        let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
+        if let IncomingMessage::Config {
+            stt_config,
+            tts_config,
+            livekit,
+        } = parsed
+        {
+            assert_eq!(stt_config.provider, "deepgram");
+            assert_eq!(tts_config.provider, "deepgram");
+
+            let livekit_config = livekit.unwrap();
+            assert_eq!(livekit_config.url, "wss://test-livekit.com");
+            assert_eq!(livekit_config.token, "test-jwt-token");
+        } else {
+            panic!("Expected Config message");
+        }
+    }
+
+    #[test]
+    fn test_unified_message_text_serialization() {
+        let unified_msg = UnifiedMessage {
+            message: Some("Hello from LiveKit!".to_string()),
+            data: None,
+            identity: "participant123".to_string(),
+            topic: "chat".to_string(),
+            room: "test-room".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let outgoing_msg = OutgoingMessage::Message {
+            message: unified_msg,
+        };
+
+        let json = serde_json::to_string(&outgoing_msg).unwrap();
+        assert!(json.contains("\"type\":\"message\""));
+        assert!(json.contains("\"identity\":\"participant123\""));
+        assert!(json.contains("\"message\":\"Hello from LiveKit!\""));
+        assert!(json.contains("\"topic\":\"chat\""));
+        assert!(json.contains("\"room\":\"test-room\""));
+        assert!(json.contains("\"timestamp\":1234567890"));
+    }
+
+    #[test]
+    fn test_unified_message_data_serialization() {
+        let test_data = vec![1, 2, 3, 4, 5];
+        let unified_msg = UnifiedMessage {
+            message: None,
+            data: Some(general_purpose::STANDARD.encode(&test_data)),
+            identity: "participant123".to_string(),
+            topic: "files".to_string(),
+            room: "test-room".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let outgoing_msg = OutgoingMessage::Message {
+            message: unified_msg,
+        };
+
+        let json = serde_json::to_string(&outgoing_msg).unwrap();
+        assert!(json.contains("\"type\":\"message\""));
+        assert!(json.contains("\"identity\":\"participant123\""));
+        assert!(json.contains("\"topic\":\"files\""));
+        assert!(json.contains("\"room\":\"test-room\""));
+        // Data should be present, message field should not be present (due to serde skip_serializing_if)
+        assert!(json.contains("\"data\":"));
+        assert!(json.contains("\"timestamp\":1234567890"));
+        // message field should not be present (None value with skip_serializing_if)
+        assert!(!json.contains("\"message\":null"));
+    }
+
+    #[test]
+    fn test_parse_config_message_without_livekit() {
+        let json = r#"{
+            "type": "config",
+            "stt_config": {
+                "provider": "deepgram",
+                "language": "en-US",
+                "sample_rate": 16000,
+                "channels": 1,
+                "punctuation": true,
+                "encoding": "linear16",
+                "model": "nova-3"
+            },
+            "tts_config": {
+                "provider": "deepgram",
+                "voice_id": "aura-luna-en",
+                "speaking_rate": 1.0,
+                "audio_format": "pcm",
+                "sample_rate": 22050,
+                "connection_timeout": 30,
+                "request_timeout": 60,
+                "model": ""
+            }
+        }"#;
+
+        let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
+        if let IncomingMessage::Config {
+            stt_config,
+            tts_config,
+            livekit,
+        } = parsed
+        {
+            assert_eq!(stt_config.provider, "deepgram");
+            assert_eq!(tts_config.provider, "deepgram");
+            assert!(livekit.is_none());
+        } else {
+            panic!("Expected Config message");
+        }
     }
 
     #[test]
