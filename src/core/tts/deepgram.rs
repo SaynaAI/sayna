@@ -629,7 +629,6 @@ impl BaseTTS for DeepgramTTS {
         serde_json::json!({
             "provider": "deepgram",
             "version": "1.0.0",
-            "optimized": "low-latency",
             "supported_formats": ["mp3", "wav", "pcm", "aac", "flac", "opus"],
             "supported_sample_rates": [8000, 16000, 22050, 24000, 44100, 48000],
             "supported_models": [
@@ -648,13 +647,6 @@ impl BaseTTS for DeepgramTTS {
             ],
             "websocket_endpoint": "wss://api.deepgram.com/v1/speak",
             "documentation": "https://developers.deepgram.com/reference/text-to-speech-api/speak-streaming",
-            "optimizations": {
-                "atomic_state": "lockless connection state management",
-                "bounded_channels": "backpressure control",
-                "message_pooling": "reusable message buffers",
-                "zero_copy": "direct data movement where possible",
-                "fast_json": "optimized JSON parsing and generation"
-            }
         })
     }
 }

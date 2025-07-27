@@ -561,7 +561,7 @@ impl BaseSTT for DeepgramSTT {
     }
 
     fn get_provider_info(&self) -> &'static str {
-        "Deepgram STT WebSocket v1.0 (Optimized)"
+        "Deepgram STT WebSocket"
     }
 }
 
@@ -594,10 +594,7 @@ mod tests {
 
         let stt = <DeepgramSTT as BaseSTT>::new(config).unwrap();
         assert!(!stt.is_ready());
-        assert_eq!(
-            stt.get_provider_info(),
-            "Deepgram STT WebSocket v1.0 (Optimized)"
-        );
+        assert_eq!(stt.get_provider_info(), "Deepgram STT WebSocket");
     }
 
     #[tokio::test]
@@ -662,7 +659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_optimized_message_handling() {
+    async fn test_message_handling() {
         let (result_tx, mut result_rx) = mpsc::unbounded_channel::<STTResult>();
 
         let json_response = r#"

@@ -855,7 +855,6 @@ impl BaseTTS for ElevenLabsTTS {
         serde_json::json!({
             "provider": "elevenlabs",
             "version": "1.0.0",
-            "optimized": "low-latency",
             "capabilities": {
                 "streaming": true,
                 "voice_settings": true,
@@ -870,14 +869,6 @@ impl BaseTTS for ElevenLabsTTS {
                 "voice_cloning": true,
                 "ssml_support": true
             },
-            "optimizations": {
-                "atomic_state": "lockless connection state management",
-                "bounded_channels": "backpressure control",
-                "buffer_pooling": "reusable base64 decode buffers",
-                "zero_copy": "bytes-based audio operations",
-                "fast_parsing": "pattern-based message detection",
-                "reduced_latency": "50ms connection establishment"
-            }
         })
     }
 }

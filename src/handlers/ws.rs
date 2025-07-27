@@ -18,7 +18,7 @@
 //! - `{"type": "config", "stt_config": {...}, "tts_config": {...}}` - Initialize voice providers (without API keys)
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
-//! - **Binary messages** - Raw audio data for transcription (optimized for performance)
+//! - **Binary messages** - Raw audio data for transcription
 //!
 //! **Outgoing Messages:**
 //! - `{"type": "ready"}` - Voice providers are ready for use
@@ -470,7 +470,7 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
             msg_result = receiver.next() => {
                 match msg_result {
                     Some(Ok(msg)) => {
-                        let continue_processing = process_message_optimized(
+                        let continue_processing = process_message(
                             msg,
                             &state,
                             &message_tx,
@@ -519,7 +519,7 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
 }
 
 /// Process incoming WebSocket message with optimizations
-async fn process_message_optimized(
+async fn process_message(
     msg: Message,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -543,14 +543,14 @@ async fn process_message_optimized(
                 }
             };
 
-            handle_incoming_message_optimized(incoming_msg, state, message_tx, app_state).await
+            handle_incoming_message(incoming_msg, state, message_tx, app_state).await
         }
         Message::Binary(data) => {
             debug!("Received binary message: {} bytes", data.len());
 
             // Handle binary audio data directly for optimal performance
             let audio_data = data;
-            handle_audio_message_optimized(audio_data, state, message_tx).await
+            handle_audio_message(audio_data, state, message_tx).await
         }
         Message::Ping(_data) => {
             debug!("Received ping message");
@@ -569,7 +569,7 @@ async fn process_message_optimized(
 }
 
 /// Handle parsed incoming message with optimizations
-async fn handle_incoming_message_optimized(
+async fn handle_incoming_message(
     msg: IncomingMessage,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -581,18 +581,17 @@ async fn handle_incoming_message_optimized(
             tts_config,
         } => {
             println!("Processing config message");
-            handle_config_message_optimized(stt_config, tts_config, state, message_tx, app_state)
-                .await
+            handle_config_message(stt_config, tts_config, state, message_tx, app_state).await
         }
         IncomingMessage::Speak { text, flush } => {
-            handle_speak_message_optimized(text, flush, state, message_tx).await
+            handle_speak_message(text, flush, state, message_tx).await
         }
-        IncomingMessage::Clear => handle_clear_message_optimized(state, message_tx).await,
+        IncomingMessage::Clear => handle_clear_message(state, message_tx).await,
     }
 }
 
 /// Handle configuration message with optimizations
-async fn handle_config_message_optimized(
+async fn handle_config_message(
     stt_ws_config: STTWebSocketConfig,
     tts_ws_config: TTSWebSocketConfig,
     state: &Arc<Mutex<ConnectionState>>,
@@ -771,7 +770,7 @@ async fn handle_config_message_optimized(
 }
 
 /// Handle audio input message with optimizations
-async fn handle_audio_message_optimized(
+async fn handle_audio_message(
     audio_data: Bytes,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -811,7 +810,7 @@ async fn handle_audio_message_optimized(
 }
 
 /// Handle speak command message with optimizations
-async fn handle_speak_message_optimized(
+async fn handle_speak_message(
     text: String,
     flush: Option<bool>,
     state: &Arc<Mutex<ConnectionState>>,
@@ -861,7 +860,7 @@ async fn handle_speak_message_optimized(
 }
 
 /// Handle clear command message with optimizations
-async fn handle_clear_message_optimized(
+async fn handle_clear_message(
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
