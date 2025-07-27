@@ -1,0 +1,80 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+
+We are using LiveKit Rust SDK [livekit-rust](https://github.com/livekit/livekit-rust) for our real-time communication needs.
+The idea is that we should have a separate folder named `livekit` in the `src` folder. That folder should contain the main logic for connecting to the livekit server and receiving the audio chunks from subscribed tracks.
+
+Basically, user should be able to send the Websocket API message containing the livekit token to connect to the livekit server as a part of the websocket initial message.
+Then after we subscribe to the audio track, for the incoming audio chunks, we should send the received audio chunks to the Websocket audio callback. Similarly, how we process the audio chunks right now using websocket incoming audio chunks with a callback.
+
+### Basic LiveKit Example
+
+This code below connects to the livekit server and subscribes to the audio tracks.
+
+```rust
+use livekit::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let (room, mut room_events) = Room::connect(&url, &token).await?;
+
+    while let Some(event) = room_events.recv().await {
+        match event {
+            RoomEvent::TrackSubscribed { track, publication, participant } => {
+                // ...
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+```
+
+This code below gets the audio chunks from the subscribed track.
+```rust
+...
+use futures::StreamExt; // this trait is required for iterating on audio & video frames
+use livekit::prelude::*;
+
+match event {
+    RoomEvent::TrackSubscribed { track, publication, participant } => {
+        match track {
+            RemoteTrack::Audio(audio_track) => {
+                let rtc_track = audio_track.rtc_track();
+                let mut audio_stream = NativeAudioStream::new(rtc_track);
+                tokio::spawn(async move {
+                    // Receive the audio frames in a new task
+                    while let Some(audio_frame) = audio_stream.next().await {
+                        log::info!("received audio frame - {audio_frame:#?}");
+                    }
+                });
+            },
+        }
+    },
+    _ => {}
+}
+```
+
+## Websocket API Logic that should be implemented
+
+During the initial configuration message, we should have the special JSON field object `livekit` that contains the livekit token and the related configuration as it is displayed below:
+```json
+{
+    ....
+    "livekit": {
+        "token": "livekit_token",
+        "url": "http://localhost:7880",
+    }
+}
+```
+
+After getting this message along side with the initial configuration message, we should do the following:
+1. Connect to the livekit server using the token and the url
+2. Subscribe to the audio track publications
+3. Make sure that the published track is not the current localParticipant track, for not getting the same audio chunks twice
+4. Subscribe to the audio track and get the audio chunks to the same callback where we receive the audio binary chunks from the websocket
+5. When the Livekit User leaves the room, we should unsubscribe from the audio track and disconnect from the livekit server
