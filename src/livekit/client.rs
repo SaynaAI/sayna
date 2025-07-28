@@ -22,6 +22,7 @@ use livekit::{
         prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource},
     },
 };
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
@@ -463,6 +464,142 @@ impl LiveKitClient {
         };
 
         Ok(audio_frame)
+    }
+
+    /// Send a data message to the LiveKit room
+    ///
+    /// This method publishes a JSON data message to the specified topic in the LiveKit room.
+    /// The message is serialized using serde_json::json!() and then converted to bytes.
+    ///
+    /// # Arguments
+    /// * `topic` - The topic/channel to publish the data to
+    /// * `data` - The data to send, typically a JSON object
+    ///
+    /// # Returns
+    /// * `Ok(())` - Data message sent successfully
+    /// * `Err(AppError)` - Failed to send data message
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use sayna::livekit::{LiveKitClient, LiveKitConfig};
+    /// # use serde_json::json;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = LiveKitClient::new(LiveKitConfig {
+    ///     url: "wss://your-server.com".to_string(),
+    ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
+    /// });
+    ///
+    /// client.connect().await?;
+    ///
+    /// let data_message = json!({
+    ///     "type": "command",
+    ///     "command": "start_tts",
+    ///     "text": "Hello, LiveKit!"
+    /// });
+    /// client.send_data_message("tts-commands", data_message).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_data_message(
+        &mut self,
+        topic: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        debug!("Sending data message to topic: {}, data: {:?}", topic, data);
+
+        if !*self.is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        let serialized_data = serde_json::to_vec(&data).map_err(|e| {
+            AppError::InternalServerError(format!("Failed to serialize JSON data: {}", e))
+        })?;
+
+        if let Some(room) = &self.room {
+            let data_packet = DataPacket {
+                payload: serialized_data,
+                topic: Some(topic.to_string()),
+                ..Default::default()
+            };
+            match room.local_participant().publish_data(data_packet).await {
+                Ok(_) => {
+                    debug!("Successfully sent data message to topic: {}", topic);
+                }
+                Err(e) => {
+                    error!("Failed to send data message to topic {}: {:?}", topic, e);
+                    return Err(AppError::InternalServerError(format!(
+                        "Failed to send data message to topic {}: {:?}",
+                        topic, e
+                    )));
+                }
+            }
+        } else {
+            return Err(AppError::InternalServerError(
+                "Room not available for data message publishing".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Send a text message to the LiveKit room in the specified JSON format
+    ///
+    /// This is a convenience method that creates a JSON object with the format:
+    /// `{"message": "your text message here", "role": "custom role"}` and publishes it to the specified topic.
+    ///
+    /// # Arguments
+    /// * `message` - The text message to send
+    /// * `role` - The custom defined string role
+    /// * `topic` - Optional topic/channel (defaults to "messages" if None)
+    ///
+    /// # Returns
+    /// * `Ok(())` - Message sent successfully
+    /// * `Err(AppError)` - Failed to send message
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use sayna::livekit::{LiveKitClient, LiveKitConfig};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = LiveKitClient::new(LiveKitConfig {
+    ///     url: "wss://your-server.com".to_string(),
+    ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
+    /// });
+    ///
+    /// client.connect().await?;
+    ///
+    /// // Send a message to the default "messages" topic
+    /// client.send_message("Hello, everyone!", "user", None).await?;
+    ///
+    /// // Send a message to a specific topic
+    /// client.send_message("TTS synthesis complete", "system", Some("tts-status")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_message(
+        &mut self,
+        message: &str,
+        role: &str,
+        topic: Option<&str>,
+    ) -> Result<(), AppError> {
+        let topic = topic.unwrap_or("messages");
+        let json_message = json!({
+            "message": message,
+            "role": role
+        });
+
+        info!(
+            "Sending message to topic '{}': {} (role: {})",
+            topic, message, role
+        );
+        self.send_data_message(topic, json_message).await
     }
 
     /// Disconnect from the LiveKit room

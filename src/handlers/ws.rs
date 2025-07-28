@@ -18,6 +18,7 @@
 //! - `{"type": "config", "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
+//! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
 //! - **Binary messages** - Raw audio data for transcription
 //!
 //! **Outgoing Messages:**
@@ -167,6 +168,17 @@
 //!   ws.send(JSON.stringify(message));
 //! }
 //!
+//! // Send custom message through LiveKit
+//! function sendMessage(text, role, topic = null) {
+//!   const message = {
+//!     type: 'send_message',
+//!     message: text,
+//!     role: role,
+//!     ...(topic && { topic })  // Include topic only if provided
+//!   };
+//!   ws.send(JSON.stringify(message));
+//! }
+//!
 //! // Play audio data from binary message
 //! function playAudioData(audioData) {
 //!   // Convert to ArrayBuffer if needed
@@ -184,10 +196,14 @@
 //!
 //! // Example usage
 //! setTimeout(() => {
-//!   // Send text messages
+//!   // Send text messages for TTS
 //!   speak('Hello, this is the first message', false);  // Queue without flush
 //!   speak('This is the second message', false);        // Queue without flush
 //!   speak('This is the final message', true);          // Send and flush all
+//!   
+//!   // Send custom messages through LiveKit
+//!   sendMessage('Hello everyone in the room!', 'user');        // Send to default topic
+//!   sendMessage('This is a chat message', 'user', 'chat');     // Send to specific topic
 //!   
 //!   // Send binary audio data
 //!   const mockAudio = new ArrayBuffer(1024);
@@ -477,6 +493,13 @@ pub enum IncomingMessage {
     },
     #[serde(rename = "clear")]
     Clear,
+    #[serde(rename = "send_message")]
+    SendMessage {
+        message: String,
+        role: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        topic: Option<String>,
+    },
 }
 
 /// Unified message structure for all incoming messages from various sources
@@ -747,6 +770,11 @@ async fn handle_incoming_message(
             handle_speak_message(text, flush, state, message_tx).await
         }
         IncomingMessage::Clear => handle_clear_message(state, message_tx).await,
+        IncomingMessage::SendMessage {
+            message,
+            role,
+            topic,
+        } => handle_send_message(message, role, topic, state, message_tx).await,
     }
 }
 
@@ -1228,6 +1256,60 @@ async fn handle_clear_message(
     true
 }
 
+/// Handle send_message command with optimizations
+async fn handle_send_message(
+    message: String,
+    role: String,
+    topic: Option<String>,
+    state: &Arc<Mutex<ConnectionState>>,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) -> bool {
+    debug!(
+        "Processing send_message command: {} chars, role: {}, topic: {:?}",
+        message.len(),
+        role,
+        topic
+    );
+
+    let livekit_client = {
+        let connection_state = state.lock().await;
+        match &connection_state.livekit_client {
+            Some(client) => client.clone(),
+            None => {
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: "LiveKit client not configured. Send config message with livekit configuration first."
+                            .to_string(),
+                    }))
+                    .await;
+                return true;
+            }
+        }
+    };
+
+    // Send message through LiveKit client
+    {
+        let mut client = livekit_client.lock().await;
+        if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
+            error!("Failed to send message via LiveKit: {:?}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to send message via LiveKit: {:?}", e),
+                }))
+                .await;
+        } else {
+            debug!(
+                "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
+                message.len(),
+                role,
+                topic
+            );
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,6 +1418,76 @@ mod tests {
         let clear_msg = IncomingMessage::Clear;
         let json = serde_json::to_string(&clear_msg).unwrap();
         assert!(json.contains("\"type\":\"clear\""));
+
+        // Test send_message message with topic
+        let send_msg = IncomingMessage::SendMessage {
+            message: "Hello from client!".to_string(),
+            role: "user".to_string(),
+            topic: Some("chat".to_string()),
+        };
+        let json = serde_json::to_string(&send_msg).unwrap();
+        assert!(json.contains("\"type\":\"send_message\""));
+        assert!(json.contains("\"message\":\"Hello from client!\""));
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"topic\":\"chat\""));
+
+        // Test send_message message without topic
+        let send_msg_no_topic = IncomingMessage::SendMessage {
+            message: "Hello without topic!".to_string(),
+            role: "user".to_string(),
+            topic: None,
+        };
+        let json = serde_json::to_string(&send_msg_no_topic).unwrap();
+        assert!(json.contains("\"type\":\"send_message\""));
+        assert!(json.contains("\"message\":\"Hello without topic!\""));
+        assert!(json.contains("\"role\":\"user\""));
+        // Should not contain topic field when None (but may contain the word "topic" elsewhere)
+        assert!(!json.contains("\"topic\""));
+
+        // Test parsing send_message JSON with topic
+        let json_with_topic = r#"{"type":"send_message","message":"Hello from JSON!","role":"user","topic":"general"}"#;
+        let parsed: IncomingMessage = serde_json::from_str(json_with_topic).unwrap();
+        if let IncomingMessage::SendMessage {
+            message,
+            role,
+            topic,
+        } = parsed
+        {
+            assert_eq!(message, "Hello from JSON!");
+            assert_eq!(role, "user");
+            assert_eq!(topic, Some("general".to_string()));
+        } else {
+            panic!("Expected SendMessage message");
+        }
+
+        // Test parsing send_message JSON without topic
+        let json_without_topic =
+            r#"{"type":"send_message","message":"Hello without topic!","role":"user"}"#;
+        let parsed: IncomingMessage = serde_json::from_str(json_without_topic).unwrap();
+        if let IncomingMessage::SendMessage {
+            message,
+            role,
+            topic,
+        } = parsed
+        {
+            assert_eq!(message, "Hello without topic!");
+            assert_eq!(role, "user");
+            assert_eq!(topic, None);
+        } else {
+            panic!("Expected SendMessage message");
+        }
+
+        // Test send_message with different role
+        let send_msg_system = IncomingMessage::SendMessage {
+            message: "System notification".to_string(),
+            role: "system".to_string(),
+            topic: Some("notifications".to_string()),
+        };
+        let json = serde_json::to_string(&send_msg_system).unwrap();
+        assert!(json.contains("\"type\":\"send_message\""));
+        assert!(json.contains("\"message\":\"System notification\""));
+        assert!(json.contains("\"role\":\"system\""));
+        assert!(json.contains("\"topic\":\"notifications\""));
     }
 
     #[test]
