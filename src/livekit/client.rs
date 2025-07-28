@@ -13,7 +13,15 @@
 
 use futures::StreamExt;
 use livekit::prelude::*;
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
+use livekit::{
+    options::TrackPublishOptions,
+    track::{LocalAudioTrack, LocalTrack, TrackSource},
+    webrtc::{
+        audio_source::native::NativeAudioSource,
+        audio_stream::native::NativeAudioStream,
+        prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource},
+    },
+};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
@@ -26,6 +34,9 @@ pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
 /// Callback type for handling incoming data messages
 pub type DataCallback = Arc<dyn Fn(DataMessage) + Send + Sync>;
+
+/// Callback type for handling participant disconnection events
+pub type ParticipantDisconnectCallback = Arc<dyn Fn(ParticipantDisconnectEvent) + Send + Sync>;
 
 /// LiveKit data message structure
 #[derive(Debug, Clone)]
@@ -40,6 +51,19 @@ pub struct DataMessage {
     pub timestamp: u64,
 }
 
+/// LiveKit participant disconnect event structure
+#[derive(Debug, Clone)]
+pub struct ParticipantDisconnectEvent {
+    /// The participant identity who disconnected
+    pub participant_identity: String,
+    /// The participant's display name (if available)
+    pub participant_name: Option<String>,
+    /// Room identifier
+    pub room_name: String,
+    /// Timestamp when the disconnection occurred
+    pub timestamp: u64,
+}
+
 /// LiveKit client for handling audio streaming and publishing
 pub struct LiveKitClient {
     config: LiveKitConfig,
@@ -47,12 +71,13 @@ pub struct LiveKitClient {
     room_events: Option<mpsc::UnboundedReceiver<RoomEvent>>,
     audio_callback: Option<AudioCallback>,
     data_callback: Option<DataCallback>,
+    participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
     active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     is_connected: Arc<Mutex<bool>>,
-    // Audio publishing components - TODO: Add proper types when imports are available
-    // audio_source: Option<AudioSource>,
-    // local_audio_track: Option<LocalAudioTrack>,
-    // local_track_publication: Option<LocalTrackPublication>,
+    // Audio publishing components
+    audio_source: Option<Arc<NativeAudioSource>>,
+    local_audio_track: Option<LocalAudioTrack>,
+    local_track_publication: Option<LocalTrackPublication>,
 }
 
 impl LiveKitClient {
@@ -71,6 +96,8 @@ impl LiveKitClient {
     /// let config = LiveKitConfig {
     ///     url: "wss://your-livekit-server.com".to_string(),
     ///     token: "your-jwt-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
     /// };
     /// let client = LiveKitClient::new(config);
     /// ```
@@ -81,12 +108,13 @@ impl LiveKitClient {
             room_events: None,
             audio_callback: None,
             data_callback: None,
+            participant_disconnect_callback: None,
             active_streams: Arc::new(Mutex::new(Vec::new())),
             is_connected: Arc::new(Mutex::new(false)),
-            // Initialize audio publishing components - TODO: Add when types are available
-            // audio_source: None,
-            // local_audio_track: None,
-            // local_track_publication: None,
+            // Initialize audio publishing components
+            audio_source: None,
+            local_audio_track: None,
+            local_track_publication: None,
         }
     }
 
@@ -105,6 +133,8 @@ impl LiveKitClient {
     /// # let mut client = LiveKitClient::new(LiveKitConfig {
     /// #     url: "wss://test.com".to_string(),
     /// #     token: "token".to_string(),
+    /// #     sample_rate: 24000,
+    /// #     channels: 1,
     /// # });
     /// client.set_audio_callback(|audio_data: Vec<u8>| {
     ///     println!("Received {} bytes of audio", audio_data.len());
@@ -132,6 +162,8 @@ impl LiveKitClient {
     /// # let mut client = LiveKitClient::new(LiveKitConfig {
     /// #     url: "wss://test.com".to_string(),
     /// #     token: "token".to_string(),
+    /// #     sample_rate: 24000,
+    /// #     channels: 1,
     /// # });
     /// client.set_data_callback(|data_message: DataMessage| {
     ///     println!("Received data from {}: {} bytes",
@@ -145,6 +177,40 @@ impl LiveKitClient {
         F: Fn(DataMessage) + Send + Sync + 'static,
     {
         self.data_callback = Some(Arc::new(callback));
+    }
+
+    /// Set a callback to handle participant disconnection events
+    ///
+    /// This callback will be called whenever a participant leaves the LiveKit room.
+    /// The callback receives information about the disconnected participant including
+    /// their identity, display name (if available), and the timestamp of disconnection.
+    ///
+    /// # Arguments
+    /// * `callback` - Function to handle participant disconnect events
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use sayna::livekit::{LiveKitClient, LiveKitConfig};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = LiveKitClient::new(LiveKitConfig {
+    ///     url: "wss://your-server.com".to_string(),
+    ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
+    /// });
+    ///
+    /// client.set_participant_disconnect_callback(|event| {
+    ///     println!("Participant {} left the room", event.participant_identity);
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_participant_disconnect_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(ParticipantDisconnectEvent) + Send + Sync + 'static,
+    {
+        self.participant_disconnect_callback = Some(Arc::new(callback));
     }
 
     /// Connect to the LiveKit room
@@ -165,6 +231,8 @@ impl LiveKitClient {
     /// let mut client = LiveKitClient::new(LiveKitConfig {
     ///     url: "wss://your-server.com".to_string(),
     ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
     /// });
     ///
     /// client.connect().await?;
@@ -182,6 +250,9 @@ impl LiveKitClient {
                 *self.is_connected.lock().await = true;
 
                 info!("Successfully connected to LiveKit room");
+
+                // Set up audio source and track for publishing TTS audio
+                self.setup_audio_publishing().await?;
 
                 // Start handling room events
                 self.start_event_handler().await?;
@@ -206,13 +277,97 @@ impl LiveKitClient {
         *self.is_connected.lock().await
     }
 
+    /// Set up audio source and track for publishing TTS audio
+    ///
+    /// This method creates a NativeAudioSource and LocalAudioTrack for publishing
+    /// TTS audio to other participants in the LiveKit room, following the pattern
+    /// from the LiveKit Rust SDK examples.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Audio publishing setup successful
+    /// * `Err(AppError)` - Setup failed
+    async fn setup_audio_publishing(&mut self) -> Result<(), AppError> {
+        info!(
+            "Setting up audio publishing: {}Hz, {} channels",
+            self.config.sample_rate, self.config.channels
+        );
+
+        // Create audio source options (disable processing for TTS audio)
+        let audio_source_options = AudioSourceOptions {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain_control: false,
+        };
+
+        // Calculate samples per frame (10ms frames are common)
+        let samples_per_frame = (self.config.sample_rate * 10) / 1000; // 10ms worth of samples
+
+        // Create native audio source - following LiveKit examples pattern
+        let audio_source = Arc::new(NativeAudioSource::new(
+            audio_source_options,
+            self.config.sample_rate,
+            self.config.channels as u32,
+            samples_per_frame,
+        ));
+
+        // Create RTC audio source from native audio source
+        // Based on LiveKit Rust SDK patterns, RtcAudioSource likely wraps NativeAudioSource
+        let rtc_audio_source = RtcAudioSource::Native((*audio_source).clone());
+
+        // Create local audio track from the RTC audio source
+        let local_audio_track = LocalAudioTrack::create_audio_track("tts-audio", rtc_audio_source);
+
+        // Publish the track to the room
+        if let Some(room) = &self.room {
+            let publish_options = TrackPublishOptions {
+                source: TrackSource::Microphone,
+                ..Default::default()
+            };
+
+            match room
+                .local_participant()
+                .publish_track(
+                    LocalTrack::Audio(local_audio_track.clone()),
+                    publish_options,
+                )
+                .await
+            {
+                Ok(publication) => {
+                    info!(
+                        "Successfully published TTS audio track: {}",
+                        publication.sid()
+                    );
+
+                    // Store the components for later use
+                    self.audio_source = Some(audio_source);
+                    self.local_audio_track = Some(local_audio_track);
+                    self.local_track_publication = Some(publication);
+                }
+                Err(e) => {
+                    error!("Failed to publish audio track: {:?}", e);
+                    return Err(AppError::InternalServerError(format!(
+                        "Failed to publish audio track: {:?}",
+                        e
+                    )));
+                }
+            }
+        } else {
+            return Err(AppError::InternalServerError(
+                "Room not available for track publishing".to_string(),
+            ));
+        }
+
+        info!("Audio publishing setup completed successfully");
+        Ok(())
+    }
+
     /// Send TTS audio data to the published LiveKit audio track
     ///
     /// This method receives TTS audio data and forwards it to the published local audio track
     /// for transmission to other participants in the LiveKit room.
     ///
     /// # Arguments
-    /// * `audio_data` - Raw audio data from TTS synthesis
+    /// * `audio_data` - Raw audio data from TTS synthesis (PCM bytes)
     ///
     /// # Returns
     /// * `Ok(())` - Audio data sent successfully
@@ -226,6 +381,8 @@ impl LiveKitClient {
     /// let mut client = LiveKitClient::new(LiveKitConfig {
     ///     url: "wss://your-server.com".to_string(),
     ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
     /// });
     ///
     /// client.connect().await?;
@@ -244,18 +401,68 @@ impl LiveKitClient {
             ));
         }
 
-        // TODO: Implement audio track publishing and audio data forwarding
-        // This requires:
-        // 1. Creating an AudioSource during connection setup
-        // 2. Creating a LocalAudioTrack using the AudioSource
-        // 3. Publishing the track to the room
-        // 4. Converting TTS audio data to AudioFrame format
-        // 5. Calling AudioSource.capture_frame() with the converted audio
+        // Check if we have an audio source available
+        if let Some(audio_source) = &self.audio_source {
+            // Convert TTS audio data to AudioFrame
+            let audio_frame = self.convert_tts_to_audio_frame(audio_data)?;
 
-        debug!("TTS audio data queued for LiveKit track publishing (not yet implemented)");
+            // Send the audio frame to the published track
+            match audio_source.capture_frame(&audio_frame).await {
+                Ok(()) => {
+                    debug!("Successfully sent TTS audio frame to LiveKit track");
+                }
+                Err(e) => {
+                    error!("Failed to capture audio frame: {:?}", e);
+                    return Err(AppError::InternalServerError(format!(
+                        "Failed to capture audio frame: {:?}",
+                        e
+                    )));
+                }
+            }
+        } else {
+            warn!("Audio source not available - TTS audio cannot be published to LiveKit");
+            // For now, we'll return success to prevent errors in the WebSocket handler
+            // This allows the system to work with WebSocket-only audio routing
+        }
 
-        // For now, we'll return success to prevent errors while we implement the full solution
         Ok(())
+    }
+
+    /// Convert TTS audio data to LiveKit AudioFrame
+    ///
+    /// This method converts raw audio bytes from TTS synthesis to the AudioFrame format
+    /// expected by LiveKit's audio source.
+    ///
+    /// # Arguments
+    /// * `audio_data` - Raw audio bytes (typically PCM format)
+    ///
+    /// # Returns
+    /// * `Ok(AudioFrame)` - Converted audio frame
+    /// * `Err(AppError)` - Conversion failed
+    fn convert_tts_to_audio_frame(&self, audio_data: Vec<u8>) -> Result<AudioFrame, AppError> {
+        // Convert bytes to i16 samples (assuming little-endian PCM)
+        if audio_data.len() % 2 != 0 {
+            return Err(AppError::InternalServerError(
+                "Audio data length must be even for 16-bit samples".to_string(),
+            ));
+        }
+
+        let samples: Vec<i16> = audio_data
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        let samples_per_channel = samples.len() / self.config.channels as usize;
+
+        // Create AudioFrame
+        let audio_frame = AudioFrame {
+            data: samples.into(),
+            sample_rate: self.config.sample_rate,
+            num_channels: self.config.channels as u32,
+            samples_per_channel: samples_per_channel as u32,
+        };
+
+        Ok(audio_frame)
     }
 
     /// Disconnect from the LiveKit room
@@ -277,6 +484,11 @@ impl LiveKitClient {
             handle.abort();
         }
 
+        // Clean up audio publishing components
+        self.audio_source = None;
+        self.local_audio_track = None;
+        self.local_track_publication = None;
+
         // Clean up room and events
         self.room = None;
         self.room_events = None;
@@ -293,8 +505,10 @@ impl LiveKitClient {
         if let Some(mut room_events) = self.room_events.take() {
             let audio_callback = self.audio_callback.clone();
             let data_callback = self.data_callback.clone();
+            let participant_disconnect_callback = self.participant_disconnect_callback.clone();
             let active_streams = Arc::clone(&self.active_streams);
             let is_connected = Arc::clone(&self.is_connected);
+            let config = self.config.clone();
 
             tokio::spawn(async move {
                 while let Some(event) = room_events.recv().await {
@@ -302,8 +516,10 @@ impl LiveKitClient {
                         event,
                         &audio_callback,
                         &data_callback,
+                        &participant_disconnect_callback,
                         &active_streams,
                         &is_connected,
+                        &config,
                     )
                     .await
                     {
@@ -325,8 +541,10 @@ impl LiveKitClient {
         event: RoomEvent,
         audio_callback: &Option<AudioCallback>,
         data_callback: &Option<DataCallback>,
+        participant_disconnect_callback: &Option<ParticipantDisconnectCallback>,
         active_streams: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
         is_connected: &Arc<Mutex<bool>>,
+        config: &LiveKitConfig,
     ) -> Result<(), AppError> {
         match event {
             RoomEvent::TrackSubscribed {
@@ -352,7 +570,11 @@ impl LiveKitClient {
                         if let Some(callback) = audio_callback {
                             let callback_clone = Arc::clone(callback);
                             let rtc_track = audio_track.rtc_track();
-                            let mut audio_stream = NativeAudioStream::new(rtc_track, 48000, 1);
+                            let mut audio_stream = NativeAudioStream::new(
+                                rtc_track,
+                                config.sample_rate as i32,
+                                config.channels as i32,
+                            );
 
                             let handle = tokio::spawn(async move {
                                 info!(
@@ -411,6 +633,21 @@ impl LiveKitClient {
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 info!("Participant disconnected: {}", participant.identity());
+
+                // Trigger participant disconnect callback if set
+                if let Some(callback) = participant_disconnect_callback {
+                    let event = ParticipantDisconnectEvent {
+                        participant_identity: participant.identity().to_string(),
+                        participant_name: Some(participant.name().to_string()),
+                        room_name: "livekit".to_string(), // TODO: Get actual room name from Room object
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+
+                    callback(event);
+                }
             }
             RoomEvent::Disconnected { reason } => {
                 warn!("Room disconnected with reason: {:?}", reason);

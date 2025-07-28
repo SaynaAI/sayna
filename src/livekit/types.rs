@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct LiveKitConfig {
     pub url: String,
     pub token: String,
+    /// Sample rate for audio publishing (from TTS config)
+    pub sample_rate: u32,
+    /// Number of audio channels for publishing (typically 1 for mono)
+    pub channels: u16,
 }
 
 /// LiveKit connection status
