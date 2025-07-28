@@ -24,6 +24,7 @@
 //! - `{"type": "ready"}` - Voice providers are ready for use
 //! - `{"type": "stt_result", "transcript": "...", "is_final": true, "confidence": 0.95}` - STT result
 //! - `{"type": "message", "message": {...}}` - Unified message from various sources (LiveKit, etc.)
+//! - `{"type": "participant_disconnected", "participant": {...}}` - LiveKit participant disconnected from room
 //! - `{"type": "error", "message": "error description"}` - Error occurred
 //! - **Binary messages** - Raw TTS audio data (optimized for performance)
 //!
@@ -38,6 +39,19 @@
 //!     "topic": "chat",                  // Message topic/channel
 //!     "room": "room-name",              // Room/space identifier
 //!     "timestamp": 1234567890           // Unix timestamp
+//!   }
+//! }
+//! ```
+//!
+//! **Participant Disconnected Message Structure:**
+//! ```json
+//! {
+//!   "type": "participant_disconnected",
+//!   "participant": {
+//!     "identity": "user123",            // Participant's unique identity
+//!     "name": "John Doe",               // Optional display name
+//!     "room": "room-name",              // Room/space identifier
+//!     "timestamp": 1234567890           // Unix timestamp of disconnection
 //!   }
 //! }
 //! ```
@@ -110,6 +124,14 @@
 //!           console.log('Binary data:', msg.data); // base64 encoded
 //!           // To decode: const binaryData = atob(msg.data);
 //!         }
+//!         break;
+//!         
+//!       case 'participant_disconnected':
+//!         // Handle participant disconnection from LiveKit room
+//!         const participant = message.participant;
+//!         console.log(`Participant ${participant.identity} left the room:`, participant.name || 'Unknown');
+//!         console.log(`Room: ${participant.room}, Time: ${new Date(participant.timestamp)}`);
+//!         // Update UI to remove participant or show notification
 //!         break;
 //!         
 //!       case 'error':
@@ -239,6 +261,15 @@
 //!                     Some("stt_result") => {
 //!                         println!("STT Result: {}", parsed["transcript"]);
 //!                     }
+//!                     Some("participant_disconnected") => {
+//!                         let participant = &parsed["participant"];
+//!                         println!("Participant {} left the room: {}",
+//!                                  participant["identity"],
+//!                                  participant["name"].as_str().unwrap_or("Unknown"));
+//!                         println!("Room: {}, Timestamp: {}",
+//!                                  participant["room"],
+//!                                  participant["timestamp"]);
+//!                     }
 //!                     Some("error") => {
 //!                         eprintln!("Error: {}", parsed["message"]);
 //!                     }
@@ -359,14 +390,21 @@ pub struct LiveKitWebSocketConfig {
 }
 
 impl LiveKitWebSocketConfig {
-    /// Convert WebSocket LiveKit config to full LiveKit config
+    /// Convert WebSocket LiveKit config to full LiveKit config with audio parameters
+    ///
+    /// # Arguments
+    /// * `tts_config` - TTS configuration containing audio parameters
     ///
     /// # Returns
-    /// * `LiveKitConfig` - Full LiveKit configuration
-    pub fn to_livekit_config(&self) -> LiveKitConfig {
+    /// * `LiveKitConfig` - Full LiveKit configuration with audio parameters
+    pub fn to_livekit_config(&self, tts_config: &TTSWebSocketConfig) -> LiveKitConfig {
         LiveKitConfig {
             url: self.url.clone(),
             token: self.token.clone(),
+            // Use TTS config sample rate, default to 24000 if not specified
+            sample_rate: tts_config.sample_rate.unwrap_or(24000),
+            // Assume mono audio for TTS (1 channel)
+            channels: 1,
         }
     }
 }
@@ -460,6 +498,20 @@ pub struct UnifiedMessage {
     pub timestamp: u64,
 }
 
+/// Participant disconnection information
+#[derive(Debug, Serialize, Clone)]
+pub struct ParticipantDisconnectedInfo {
+    /// Participant's unique identity
+    pub identity: String,
+    /// Participant's display name (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Room identifier
+    pub room: String,
+    /// Timestamp when the disconnection occurred
+    pub timestamp: u64,
+}
+
 /// WebSocket message types for outgoing messages
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -477,6 +529,11 @@ pub enum OutgoingMessage {
     Message {
         /// Unified message structure containing text/data from various sources
         message: UnifiedMessage,
+    },
+    #[serde(rename = "participant_disconnected")]
+    ParticipantDisconnected {
+        /// Information about the participant who disconnected
+        participant: ParticipantDisconnectedInfo,
     },
     #[serde(rename = "error")]
     Error { message: String },
@@ -853,7 +910,7 @@ async fn handle_config_message(
                 livekit_ws_config.url
             );
 
-            let livekit_config = livekit_ws_config.to_livekit_config();
+            let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config);
             let mut livekit_client = LiveKitClient::new(livekit_config);
 
             // Set up LiveKit audio callback to forward audio to STT processing
@@ -917,6 +974,33 @@ async fn handle_config_message(
 
                     let outgoing_msg = OutgoingMessage::Message {
                         message: unified_message,
+                    };
+
+                    let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
+                });
+            });
+
+            // Set up LiveKit participant disconnect callback to forward events to WebSocket client
+            let message_tx_clone = message_tx.clone();
+            livekit_client.set_participant_disconnect_callback(move |disconnect_event| {
+                let message_tx = message_tx_clone.clone();
+
+                tokio::spawn(async move {
+                    debug!(
+                        "Participant {} disconnected from LiveKit room {}",
+                        disconnect_event.participant_identity, disconnect_event.room_name
+                    );
+
+                    // Create participant disconnected info for WebSocket client
+                    let participant_info = ParticipantDisconnectedInfo {
+                        identity: disconnect_event.participant_identity,
+                        name: disconnect_event.participant_name,
+                        room: disconnect_event.room_name,
+                        timestamp: disconnect_event.timestamp,
+                    };
+
+                    let outgoing_msg = OutgoingMessage::ParticipantDisconnected {
+                        participant: participant_info,
                     };
 
                     let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
@@ -1393,9 +1477,22 @@ mod tests {
             token: "test-jwt-token".to_string(),
         };
 
-        let livekit_config = livekit_ws_config.to_livekit_config();
+        let tts_ws_config = TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: Some("aura-luna-en".to_string()),
+            speaking_rate: Some(1.0),
+            audio_format: Some("pcm".to_string()),
+            sample_rate: Some(22050),
+            connection_timeout: Some(30),
+            request_timeout: Some(60),
+            model: "".to_string(),
+        };
+
+        let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config);
         assert_eq!(livekit_config.url, "wss://test-livekit.com");
         assert_eq!(livekit_config.token, "test-jwt-token");
+        assert_eq!(livekit_config.sample_rate, 22050);
+        assert_eq!(livekit_config.channels, 1);
     }
 
     #[test]
@@ -1713,6 +1810,111 @@ mod tests {
         } else {
             panic!("Expected Config message");
         }
+    }
+
+    #[test]
+    fn test_participant_disconnected_info_serialization() {
+        let participant_info = ParticipantDisconnectedInfo {
+            identity: "user123".to_string(),
+            name: Some("John Doe".to_string()),
+            room: "test-room".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&participant_info).unwrap();
+        assert!(json.contains("\"identity\":\"user123\""));
+        assert!(json.contains("\"name\":\"John Doe\""));
+        assert!(json.contains("\"room\":\"test-room\""));
+        assert!(json.contains("\"timestamp\":1234567890"));
+    }
+
+    #[test]
+    fn test_participant_disconnected_info_serialization_without_name() {
+        let participant_info = ParticipantDisconnectedInfo {
+            identity: "user456".to_string(),
+            name: None,
+            room: "test-room".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&participant_info).unwrap();
+        assert!(json.contains("\"identity\":\"user456\""));
+        assert!(json.contains("\"room\":\"test-room\""));
+        assert!(json.contains("\"timestamp\":1234567890"));
+        // Should not contain name field when None due to skip_serializing_if
+        assert!(!json.contains("name"));
+    }
+
+    #[test]
+    fn test_participant_disconnected_outgoing_message() {
+        let participant_info = ParticipantDisconnectedInfo {
+            identity: "participant789".to_string(),
+            name: Some("Alice Smith".to_string()),
+            room: "conference-room".to_string(),
+            timestamp: 9876543210,
+        };
+
+        let outgoing_msg = OutgoingMessage::ParticipantDisconnected {
+            participant: participant_info,
+        };
+
+        let json = serde_json::to_string(&outgoing_msg).unwrap();
+        assert!(json.contains("\"type\":\"participant_disconnected\""));
+        assert!(json.contains("\"identity\":\"participant789\""));
+        assert!(json.contains("\"name\":\"Alice Smith\""));
+        assert!(json.contains("\"room\":\"conference-room\""));
+        assert!(json.contains("\"timestamp\":9876543210"));
+    }
+
+    #[test]
+    fn test_participant_disconnected_json_format() {
+        // Test that the serialized JSON has the expected format
+        let participant_info = ParticipantDisconnectedInfo {
+            identity: "user999".to_string(),
+            name: Some("Bob Wilson".to_string()),
+            room: "meeting-room".to_string(),
+            timestamp: 1111111111,
+        };
+
+        let outgoing_msg = OutgoingMessage::ParticipantDisconnected {
+            participant: participant_info,
+        };
+
+        let json = serde_json::to_string(&outgoing_msg).unwrap();
+
+        // Verify that the JSON contains all expected fields
+        assert!(json.contains("\"type\":\"participant_disconnected\""));
+        assert!(json.contains("\"participant\":{"));
+        assert!(json.contains("\"identity\":\"user999\""));
+        assert!(json.contains("\"name\":\"Bob Wilson\""));
+        assert!(json.contains("\"room\":\"meeting-room\""));
+        assert!(json.contains("\"timestamp\":1111111111"));
+    }
+
+    #[test]
+    fn test_participant_disconnected_message_structure() {
+        // Test the structure matches the documented API format
+        let participant_info = ParticipantDisconnectedInfo {
+            identity: "test-participant".to_string(),
+            name: Some("Test User".to_string()),
+            room: "test-room".to_string(),
+            timestamp: 1000000000,
+        };
+
+        let outgoing_msg = OutgoingMessage::ParticipantDisconnected {
+            participant: participant_info,
+        };
+
+        let json = serde_json::to_string(&outgoing_msg).unwrap();
+
+        // Verify the JSON structure matches the API documentation
+        let parsed_value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed_value["type"], "participant_disconnected");
+        assert_eq!(parsed_value["participant"]["identity"], "test-participant");
+        assert_eq!(parsed_value["participant"]["name"], "Test User");
+        assert_eq!(parsed_value["participant"]["room"], "test-room");
+        assert_eq!(parsed_value["participant"]["timestamp"], 1000000000);
     }
 
     #[test]
