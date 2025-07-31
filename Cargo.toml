@@ -42,5 +42,13 @@ tracing-subscriber = "0.3"
 # LiveKit
 livekit = "0.7.15"
 
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model"] }
+tract-core = "=0.21.5"
+tract-onnx = "=0.21.5"
+tract-pulse = "=0.21.5"
+tract-hir = "=0.21.5"
+time = ">=0.3.35"
+ndarray = "0.15.6"
+
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }

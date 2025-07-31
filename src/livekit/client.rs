@@ -28,7 +28,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use super::types::*;
-use crate::AppError;
+use crate::{AppError, utils::noise_filter::reduce_noise_async};
 
 /// Callback type for handling incoming audio chunks
 pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -731,7 +731,12 @@ impl LiveKitClient {
                                         .iter()
                                         .flat_map(|&sample| sample.to_le_bytes())
                                         .collect();
-                                    callback_clone(audio_data);
+                                    match reduce_noise_async(audio_data.into()).await {
+                                        Ok(audio_data) => callback_clone(audio_data),
+                                        Err(e) => {
+                                            error!("Error reducing noise: {:?}", e)
+                                        }
+                                    };
                                 }
 
                                 info!(
