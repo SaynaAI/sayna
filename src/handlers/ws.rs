@@ -1199,6 +1199,8 @@ async fn handle_speak_message(
         }
     };
 
+    info!("Speaking text (flush: {}): {}", should_flush, text);
+
     // Send text to TTS provider with flush parameter
     if let Err(e) = voice_manager.speak(&text, should_flush).await {
         error!("Failed to synthesize speech: {}", e);

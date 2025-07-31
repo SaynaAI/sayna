@@ -329,6 +329,10 @@ impl DeepgramTTS {
 
             state.set_connected(true);
 
+            // Create channel for delayed messages
+            let (delayed_tx, mut delayed_rx) = mpsc::unbounded_channel::<String>();
+            let delay_ms = 500;
+
             loop {
                 tokio::select! {
                     // Handle incoming messages from WebSocket
@@ -365,19 +369,27 @@ impl DeepgramTTS {
                                         let msg = json_msg.to_string();
                                         drop(buffer); // Release lock early
 
+                                        debug!("Sending message TEXT: {}", msg);
+
                                         if let Err(e) = ws_stream.send(Message::Text(msg.into())).await {
                                             error!("Failed to send speak message: {}", e);
                                             state.set_error(e.to_string()).await;
                                             break;
                                         }
 
-                                        // Send flush immediately if requested
+                                        // Send flush with delay if requested
                                         if flush_immediately {
-                                            if let Err(e) = ws_stream.send(Message::Text(FLUSH_MESSAGE.into())).await {
-                                                error!("Failed to send flush message: {}", e);
-                                                state.set_error(e.to_string()).await;
-                                                break;
-                                            }
+                                            debug!("Scheduling flush message with 500ms delay");
+
+                                            // Spawn task to send flush message with delay
+                                            let delayed_sender = delayed_tx.clone();
+                                            let flush_message = FLUSH_MESSAGE.to_string();
+                                            tokio::spawn(async move {
+                                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                                if let Err(_) = delayed_sender.send(flush_message) {
+                                                    debug!("Failed to send delayed flush message - receiver closed");
+                                                }
+                                            });
                                         }
                                         continue;
                                     }
@@ -386,15 +398,30 @@ impl DeepgramTTS {
                                     TTSCommand::Close => CLOSE_MESSAGE,
                                 };
 
-                                debug!("Sending message: {}", message_text);
-                                if let Err(e) = ws_stream.send(Message::Text(message_text.into())).await {
-                                    error!("Failed to send message: {}", e);
-                                    state.set_error(e.to_string()).await;
-                                    break;
-                                }
+                                debug!("Scheduling message control command with 500ms delay: {}", message_text);
+
+                                let delayed_sender = delayed_tx.clone();
+                                let message_text_clone = message_text.to_string();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                    if let Err(_) = delayed_sender.send(message_text_clone) {
+                                        debug!("Failed to send delayed message - receiver closed");
+                                    }
+                                });
                             }
                             None => {
                                 info!("Message receiver closed");
+                                break;
+                            }
+                        }
+                    }
+                    // Handle delayed messages
+                    delayed_message = delayed_rx.recv() => {
+                        if let Some(message_text) = delayed_message {
+                            debug!("Sending delayed message control command: {}", message_text);
+                            if let Err(e) = ws_stream.send(Message::Text(message_text.into())).await {
+                                error!("Failed to send delayed message: {}", e);
+                                state.set_error(e.to_string()).await;
                                 break;
                             }
                         }
@@ -543,16 +570,14 @@ impl BaseTTS for DeepgramTTS {
             ));
         }
 
-        let mut send_msg = text.to_string();
+        let mut command = TTSCommand::Speak(text.to_string(), flush);
 
-        if send_msg.is_empty() {
-            send_msg = " ".to_string();
+        if text.is_empty() || text == " " {
+            command = TTSCommand::Flush;
         }
 
         let sender = self.message_sender.read().await;
         if let Some(sender) = sender.as_ref() {
-            let command = TTSCommand::Speak(send_msg, flush);
-
             sender.send(command).await.map_err(|e| {
                 TTSError::InternalError(format!("Failed to send speak command: {e}"))
             })?;

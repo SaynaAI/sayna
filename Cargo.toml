@@ -52,3 +52,16 @@ ndarray = "0.15.6"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
+
+# Debug profile optimizations to fix tract codegen issues
+# Disable debug assertions specifically for problematic dependencies
+[profile.dev.package.deep_filter]
+debug-assertions = false
+[profile.dev.package.tract-core]
+debug-assertions = false
+[profile.dev.package.tract-onnx]
+debug-assertions = false
+[profile.dev.package.tract-pulse]
+debug-assertions = false
+[profile.dev.package.tract-hir]
+debug-assertions = false
