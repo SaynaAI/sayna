@@ -602,6 +602,59 @@ impl LiveKitClient {
         self.send_data_message(topic, json_message).await
     }
 
+    /// Clear all pending buffered audio from the published track
+    ///
+    /// This method clears any audio data that has been queued for publishing but hasn't
+    /// been transmitted yet. This is useful for stopping TTS playback immediately when
+    /// a clear command is received.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Audio buffer cleared successfully
+    /// * `Err(AppError)` - Failed to clear audio buffer
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use sayna::livekit::{LiveKitClient, LiveKitConfig};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = LiveKitClient::new(LiveKitConfig {
+    ///     url: "wss://your-server.com".to_string(),
+    ///     token: "your-token".to_string(),
+    ///     sample_rate: 24000,
+    ///     channels: 1,
+    /// });
+    ///
+    /// client.connect().await?;
+    ///
+    /// // Send some TTS audio
+    /// let tts_audio_data = vec![0u8; 1024];
+    /// client.send_tts_audio(tts_audio_data).await?;
+    ///
+    /// // Clear any pending buffered audio
+    /// client.clear_audio().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn clear_audio(&mut self) -> Result<(), AppError> {
+        debug!("Clearing pending buffered audio from LiveKit track");
+
+        if !*self.is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        // Check if we have an audio source available
+        if let Some(_audio_source) = &self.audio_source {
+            _audio_source.clear_buffer();
+        } else {
+            warn!("No audio source available - nothing to clear");
+            // Not an error condition, just nothing to do
+        }
+
+        Ok(())
+    }
+
     /// Disconnect from the LiveKit room
     ///
     /// Gracefully closes the connection, stops all audio streams, and cleans up resources.
@@ -847,5 +900,286 @@ impl Drop for LiveKitClient {
         if self.room.is_some() {
             warn!("LiveKitClient dropped without explicit disconnect call");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    fn create_test_config() -> LiveKitConfig {
+        LiveKitConfig {
+            url: "wss://test-server.com".to_string(),
+            token: "mock-jwt-token".to_string(),
+            sample_rate: 24000,
+            channels: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_creation() {
+        let config = create_test_config();
+        let client = LiveKitClient::new(config);
+
+        assert!(!client.is_connected().await);
+        assert!(client.audio_source.is_none());
+        assert!(client.local_audio_track.is_none());
+        assert!(client.local_track_publication.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_clear_audio_not_connected() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Should fail when not connected
+        let result = client.clear_audio().await;
+        assert!(
+            result.is_err(),
+            "clear_audio should fail when not connected"
+        );
+
+        if let Err(AppError::InternalServerError(msg)) = result {
+            assert!(
+                msg.contains("Not connected"),
+                "Error message should mention not connected"
+            );
+        } else {
+            panic!("Expected InternalServerError about not being connected");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_clear_audio_no_audio_source() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        // Should succeed when connected but no audio source
+        let result = client.clear_audio().await;
+        assert!(
+            result.is_ok(),
+            "clear_audio should succeed when no audio source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_callback_registration() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Test audio callback
+        client.set_audio_callback(|_data| {
+            // Mock callback
+        });
+        assert!(client.audio_callback.is_some());
+
+        // Test data callback
+        client.set_data_callback(|_data| {
+            // Mock callback
+        });
+        assert!(client.data_callback.is_some());
+
+        // Test participant disconnect callback
+        client.set_participant_disconnect_callback(|_event| {
+            // Mock callback
+        });
+        assert!(client.participant_disconnect_callback.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_audio_frame_conversion() {
+        let config = create_test_config();
+        let client = LiveKitClient::new(config);
+
+        // Test audio frame conversion with valid data
+        let audio_data = vec![0u8, 1u8, 2u8, 3u8]; // 2 samples in little-endian
+        let result = client.convert_tts_to_audio_frame(audio_data);
+
+        assert!(
+            result.is_ok(),
+            "Audio frame conversion should succeed with valid data"
+        );
+
+        let audio_frame = result.unwrap();
+        assert_eq!(audio_frame.sample_rate, 24000);
+        assert_eq!(audio_frame.num_channels, 1);
+        assert_eq!(audio_frame.samples_per_channel, 2);
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_audio_frame_conversion_invalid_data() {
+        let config = create_test_config();
+        let client = LiveKitClient::new(config);
+
+        // Test audio frame conversion with invalid data (odd number of bytes)
+        let audio_data = vec![0u8, 1u8, 2u8]; // 3 bytes - not divisible by 2
+        let result = client.convert_tts_to_audio_frame(audio_data);
+
+        assert!(
+            result.is_err(),
+            "Audio frame conversion should fail with invalid data"
+        );
+
+        if let Err(AppError::InternalServerError(msg)) = result {
+            assert!(
+                msg.contains("even"),
+                "Error message should mention even length requirement"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_clear_audio_timing() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        // Test that clear_audio completes within reasonable time
+        let result = timeout(Duration::from_millis(100), client.clear_audio()).await;
+
+        assert!(result.is_ok(), "clear_audio should complete within 100ms");
+        assert!(result.unwrap().is_ok(), "clear_audio should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_send_tts_audio_not_connected() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        let audio_data = vec![0u8; 1024];
+        let result = client.send_tts_audio(audio_data).await;
+
+        assert!(
+            result.is_err(),
+            "send_tts_audio should fail when not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_send_tts_audio_no_source() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        let audio_data = vec![0u8; 1024];
+        let result = client.send_tts_audio(audio_data).await;
+
+        // Should succeed but warn about no audio source
+        assert!(
+            result.is_ok(),
+            "send_tts_audio should succeed when no audio source (with warning)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_multiple_clear_audio_calls() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        // Test multiple clear_audio calls in succession
+        for i in 0..3 {
+            let result = client.clear_audio().await;
+            assert!(result.is_ok(), "clear_audio call {} should succeed", i + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_clear_audio_state_consistency() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        // Verify initial state
+        assert!(client.is_connected().await);
+        assert!(client.audio_source.is_none());
+
+        // Clear audio
+        let result = client.clear_audio().await;
+        assert!(result.is_ok());
+
+        // Verify state is still consistent
+        assert!(client.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_data_message_serialization() {
+        use serde_json::json;
+
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        let test_data = json!({
+            "type": "test",
+            "message": "hello world"
+        });
+
+        let result = client.send_data_message("test-topic", test_data).await;
+
+        // This will fail because no room is set up, but we're testing the serialization path
+        assert!(
+            result.is_err(),
+            "send_data_message should fail without room setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_disconnect_cleanup() {
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set some state for testing
+        *client.is_connected.lock().await = true;
+
+        let result = client.disconnect().await;
+        assert!(result.is_ok(), "Disconnect should succeed");
+
+        // Verify cleanup
+        assert!(!client.is_connected().await);
+        assert!(client.audio_source.is_none());
+        assert!(client.local_audio_track.is_none());
+        assert!(client.local_track_publication.is_none());
+        assert!(client.room.is_none());
+        assert!(client.room_events.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_livekit_client_clear_audio_integration_pattern() {
+        // This test mimics the integration pattern used in the WebSocket handler
+        let config = create_test_config();
+        let mut client = LiveKitClient::new(config);
+
+        // Manually set connected state for testing
+        *client.is_connected.lock().await = true;
+
+        // Simulate the pattern: send some audio, then clear
+        let audio_data = vec![0u8; 1024];
+        let _send_result = client.send_tts_audio(audio_data).await;
+
+        // Clear the audio buffer
+        let clear_result = client.clear_audio().await;
+        assert!(
+            clear_result.is_ok(),
+            "clear_audio should succeed in integration pattern"
+        );
+
+        // Should be able to send more audio after clearing
+        let audio_data2 = vec![1u8; 512];
+        let _send_result2 = client.send_tts_audio(audio_data2).await;
     }
 }

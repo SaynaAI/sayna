@@ -468,7 +468,7 @@ impl ElevenLabsTTS {
                 // Handle incoming WebSocket messages
                 ws_msg = ws_receiver.next() => {
                     match ws_msg {
-                                                Some(Ok(Message::Text(text))) => {
+                        Some(Ok(Message::Text(text))) => {
                             if let Err(e) = Self::handle_inbound_message(
                                 text.to_string(),
                                 &audio_callback,
@@ -730,11 +730,6 @@ impl BaseTTS for ElevenLabsTTS {
         self.websocket_tx = None;
         self.state.set_disconnected();
 
-        // Clear the audio callback
-        if let Ok(mut audio_callback) = self.audio_callback.try_write() {
-            *audio_callback = None;
-        }
-
         Ok(())
     }
 
@@ -784,7 +779,7 @@ impl BaseTTS for ElevenLabsTTS {
         Ok(())
     }
 
-    async fn clear(&self) -> TTSResult<()> {
+    async fn clear(&mut self) -> TTSResult<()> {
         if !self.is_ready() {
             return Err(TTSError::ProviderNotReady(
                 "ElevenLabs TTS not connected".to_string(),
@@ -800,6 +795,10 @@ impl BaseTTS for ElevenLabsTTS {
                 TTSError::InternalError(format!("Failed to send clear message: {e}"))
             })?;
         }
+
+        // Closing the connection will trigger a reconnection
+        self.disconnect().await?;
+        self.connect().await?;
 
         Ok(())
     }

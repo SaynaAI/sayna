@@ -259,7 +259,7 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the clear operation
-    async fn clear(&self) -> TTSResult<()>;
+    async fn clear(&mut self) -> TTSResult<()>;
 
     /// Flush the TTS provider
     ///
@@ -445,7 +445,7 @@ mod tests {
             Ok(())
         }
 
-        async fn clear(&self) -> TTSResult<()> {
+        async fn clear(&mut self) -> TTSResult<()> {
             if !self.is_ready() {
                 return Err(TTSError::ProviderNotReady(
                     "TTS provider not connected".to_string(),

@@ -331,7 +331,7 @@ impl DeepgramTTS {
 
             // Create channel for delayed messages
             let (delayed_tx, mut delayed_rx) = mpsc::unbounded_channel::<String>();
-            let delay_ms = 500;
+            let delay_ms = 700;
 
             loop {
                 tokio::select! {
@@ -379,7 +379,7 @@ impl DeepgramTTS {
 
                                         // Send flush with delay if requested
                                         if flush_immediately {
-                                            debug!("Scheduling flush message with 500ms delay");
+                                            debug!("Scheduling flush message with some delay");
 
                                             // Spawn task to send flush message with delay
                                             let delayed_sender = delayed_tx.clone();
@@ -570,10 +570,11 @@ impl BaseTTS for DeepgramTTS {
             ));
         }
 
-        let mut command = TTSCommand::Speak(text.to_string(), flush);
+        let command = TTSCommand::Speak(text.to_string(), flush);
 
         if text.is_empty() || text == " " {
-            command = TTSCommand::Flush;
+            self.flush().await?;
+            return Ok(());
         }
 
         let sender = self.message_sender.read().await;
@@ -592,7 +593,7 @@ impl BaseTTS for DeepgramTTS {
         Ok(())
     }
 
-    async fn clear(&self) -> TTSResult<()> {
+    async fn clear(&mut self) -> TTSResult<()> {
         if !self.is_ready() {
             return Err(TTSError::ProviderNotReady(
                 "Deepgram TTS provider not connected".to_string(),
