@@ -11,6 +11,7 @@ async fn test_websocket_voice_config() {
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
         port: 0, // Let the OS assign a port
+        livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
     };
@@ -145,6 +146,7 @@ async fn test_websocket_invalid_message() {
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
+        livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
     };

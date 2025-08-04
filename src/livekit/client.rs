@@ -713,6 +713,8 @@ impl LiveKitClient {
                                 config.channels as i32,
                             );
 
+                            let sample_rate = config.sample_rate as u32;
+
                             let handle = tokio::spawn(async move {
                                 info!(
                                     "Starting audio stream processing for participant: {}",
@@ -731,7 +733,7 @@ impl LiveKitClient {
                                         .iter()
                                         .flat_map(|&sample| sample.to_le_bytes())
                                         .collect();
-                                    match reduce_noise_async(audio_data.into()).await {
+                                    match reduce_noise_async(audio_data.into(), sample_rate).await {
                                         Ok(audio_data) => callback_clone(audio_data),
                                         Err(e) => {
                                             error!("Error reducing noise: {:?}", e)

@@ -13,6 +13,7 @@ async fn test_health_check() {
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
         port: 3001,
+        livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: None,
         elevenlabs_api_key: None,
     };

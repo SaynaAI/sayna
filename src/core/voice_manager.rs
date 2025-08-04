@@ -9,6 +9,7 @@
 //!
 //! - **Unified Management**: Coordinate STT and TTS providers through a single interface
 //! - **Real-time Processing**: Optimized for low-latency voice processing
+//! - **Speech Final Timing Control**: Automatic fallback mechanism for delayed `is_speech_final` signals in noisy environments
 //! - **Error Handling**: Comprehensive error handling with proper error propagation
 //! - **Callback System**: Event-driven architecture for handling results
 //! - **Thread Safety**: Safe concurrent access using Arc<RwLock<>>
@@ -248,6 +249,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 
 use crate::core::{
     create_stt_provider, create_tts_provider,
@@ -296,6 +299,21 @@ pub type TTSAudioCallback =
 pub type TTSErrorCallback =
     Arc<dyn Fn(TTSError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// Internal state for managing speech final timing
+#[derive(Debug)]
+struct SpeechFinalState {
+    /// Combined text buffer from STT results
+    text_buffer: String,
+    /// Last seen text for comparison
+    last_text: String,
+    /// Timer handle for speech final timeout
+    timer_handle: Option<JoinHandle<()>>,
+    /// Timestamp when we last saw is_final=true without speech_final
+    last_final_time: Option<Instant>,
+    /// Whether we're currently waiting for speech_final
+    waiting_for_speech_final: bool,
+}
+
 /// Internal TTS callback implementation for the VoiceManager
 struct VoiceManagerTTSCallback {
     audio_callback: Option<TTSAudioCallback>,
@@ -340,6 +358,9 @@ pub struct VoiceManager {
     stt_callback: Arc<RwLock<Option<STTCallback>>>,
     tts_audio_callback: Arc<RwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<RwLock<Option<TTSErrorCallback>>>,
+
+    // Speech final timing control
+    speech_final_state: Arc<RwLock<SpeechFinalState>>,
 
     // Configuration
     config: VoiceManagerConfig,
@@ -390,6 +411,13 @@ impl VoiceManager {
             stt_callback: Arc::new(RwLock::new(None)),
             tts_audio_callback: Arc::new(RwLock::new(None)),
             tts_error_callback: Arc::new(RwLock::new(None)),
+            speech_final_state: Arc::new(RwLock::new(SpeechFinalState {
+                text_buffer: String::new(),
+                last_text: String::new(),
+                timer_handle: None,
+                last_final_time: None,
+                waiting_for_speech_final: false,
+            })),
             config,
         })
     }
@@ -465,6 +493,19 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn stop(&self) -> VoiceManagerResult<()> {
+        // Cancel any pending speech final timer
+        {
+            let mut state = self.speech_final_state.write().await;
+            if let Some(handle) = state.timer_handle.take() {
+                handle.abort();
+            }
+            // Reset speech final state
+            state.text_buffer.clear();
+            state.last_text.clear();
+            state.waiting_for_speech_final = false;
+            state.last_final_time = None;
+        }
+
         // Disconnect STT provider
         {
             let mut stt = self.stt.write().await;
@@ -660,13 +701,29 @@ impl VoiceManager {
             *stt_callback = Some(callback.clone());
         }
 
-        // Create wrapper callback
+        // Create wrapper callback that processes timing before forwarding to user
+        let speech_final_state_clone = self.speech_final_state.clone();
+        let stt_callback_clone = self.stt_callback.clone();
+
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
             let callback = callback.clone();
+            let speech_final_state = speech_final_state_clone.clone();
+            let stt_callback_for_timer = stt_callback_clone.clone();
 
             Box::pin(async move {
-                // Call user callback
-                callback(result).await;
+                // Process result with timing control inline
+                let processed_result = Self::process_stt_result_with_timing_static(
+                    result,
+                    speech_final_state,
+                    stt_callback_for_timer,
+                )
+                .await;
+
+                if let Some(processed_result) = processed_result {
+                    // Call user callback with processed result
+                    callback(processed_result).await;
+                }
+                // If None returned, result was suppressed (interim result while waiting)
             })
         });
 
@@ -803,6 +860,141 @@ impl VoiceManager {
         let tts = self.tts.read().await;
         tts.get_provider_info()
     }
+
+    /// Static method to process STT results with speech final timing control
+    ///
+    /// This method implements the following behavior:
+    /// - Buffers text results until `is_speech_final=true` is received
+    /// - Starts a 1.3s timer when `is_final=true` but no `is_speech_final=true` and text hasn't changed
+    /// - Forces `is_speech_final=true` with buffered text if timer expires
+    /// - Cancels timer if real `is_speech_final=true` arrives or text changes
+    /// - **Important**: `is_speech_final=true` results always contain the full buffered text, then buffer is cleared
+    async fn process_stt_result_with_timing_static(
+        result: STTResult,
+        speech_final_state: Arc<RwLock<SpeechFinalState>>,
+        stt_callback: Arc<RwLock<Option<STTCallback>>>,
+    ) -> Option<STTResult> {
+        let mut state = speech_final_state.write().await;
+
+        // If we get is_speech_final=true, cancel any timer and forward the buffered result
+        if result.is_speech_final {
+            // Cancel any existing timer
+            if let Some(handle) = state.timer_handle.take() {
+                handle.abort();
+            }
+
+            // Create result with full buffered text (if any), otherwise use original
+            let final_transcript = if !state.text_buffer.is_empty() {
+                state.text_buffer.clone()
+            } else {
+                result.transcript.clone()
+            };
+
+            // Reset state for next speech segment
+            state.text_buffer.clear();
+            state.last_text.clear();
+            state.waiting_for_speech_final = false;
+            state.last_final_time = None;
+
+            // Return result with buffered text
+            let final_result = STTResult::new(
+                final_transcript,
+                result.is_final,
+                true, // is_speech_final
+                result.confidence,
+            );
+
+            return Some(final_result);
+        }
+
+        // Update text buffer
+        if !result.transcript.trim().is_empty() {
+            if result.is_final {
+                // Append final text to buffer
+                if !state.text_buffer.is_empty() && !state.text_buffer.ends_with(' ') {
+                    state.text_buffer.push(' ');
+                }
+                state.text_buffer.push_str(&result.transcript);
+            } else {
+                // For interim results, we don't add to buffer but still process
+            }
+        }
+
+        // Check if we should start/update timer logic
+        if result.is_final && !result.is_speech_final {
+            let current_text = state.text_buffer.clone();
+
+            // Check if text has changed since last time
+            let text_changed = current_text != state.last_text;
+
+            if text_changed {
+                // Text changed, cancel existing timer if any
+                if let Some(handle) = state.timer_handle.take() {
+                    handle.abort();
+                }
+                state.waiting_for_speech_final = false;
+            }
+
+            // Update last seen text
+            state.last_text = current_text.clone();
+
+            if !state.waiting_for_speech_final && !current_text.trim().is_empty() {
+                // Start timer for speech final timeout
+                state.waiting_for_speech_final = true;
+                state.last_final_time = Some(Instant::now());
+
+                let speech_final_state_clone = speech_final_state.clone();
+                let stt_callback_clone = stt_callback.clone();
+                let buffered_text = current_text.clone();
+                let result_confidence = result.confidence; // Capture confidence for timer closure
+
+                let timer_handle = tokio::spawn(async move {
+                    // Wait for 1.3 seconds
+                    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+                    // Check if we should still fire the timeout
+                    let mut state = speech_final_state_clone.write().await;
+
+                    // Only fire timeout if we're still waiting and text hasn't changed
+                    if state.waiting_for_speech_final && state.text_buffer == buffered_text {
+                        // Create forced speech final result
+                        let forced_result = STTResult::new(
+                            buffered_text.clone(),
+                            true,
+                            true, // Force is_speech_final
+                            result_confidence,
+                        );
+
+                        // Reset state
+                        state.text_buffer.clear();
+                        state.last_text.clear();
+                        state.waiting_for_speech_final = false;
+                        state.last_final_time = None;
+                        state.timer_handle = None;
+
+                        // Forward to user callback
+                        if let Some(callback) = stt_callback_clone.read().await.as_ref() {
+                            callback(forced_result).await;
+                        }
+                    } else {
+                        // Timer was cancelled or text changed, just clean up
+                        state.timer_handle = None;
+                    }
+                });
+
+                state.timer_handle = Some(timer_handle);
+            }
+        }
+
+        // Always forward the original result (unless it would be redundant)
+        // We only suppress interim results when we're building up the buffer
+        if result.is_final || !state.waiting_for_speech_final {
+            Some(result)
+        } else {
+            // Suppress interim results while waiting for speech final
+            None
+        }
+    }
 }
 
 // Ensure VoiceManager is thread-safe
@@ -893,5 +1085,182 @@ mod tests {
             .await;
 
         assert!(tts_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_speech_final_timing_control() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::mpsc;
+
+        let config = VoiceManagerConfig {
+            stt_config: STTConfig {
+                provider: "deepgram".to_string(),
+                api_key: "test_key".to_string(),
+                ..Default::default()
+            },
+            tts_config: TTSConfig {
+                provider: "deepgram".to_string(),
+                api_key: "test_key".to_string(),
+                ..Default::default()
+            },
+        };
+
+        let voice_manager = VoiceManager::new(config).unwrap();
+
+        // Channel to collect results
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result_counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = result_counter.clone();
+
+        // Register callback to collect results
+        voice_manager
+            .on_stt_result(move |result| {
+                let tx = tx.clone();
+                let counter = counter_clone.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    let _ = tx.send(result);
+                })
+            })
+            .await
+            .unwrap();
+
+        // Test Case 1: Normal speech final behavior
+        {
+            let speech_final_state = voice_manager.speech_final_state.clone();
+            let stt_callback = voice_manager.stt_callback.clone();
+
+            // Send is_final=true without is_speech_final=true
+            let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
+            let processed = VoiceManager::process_stt_result_with_timing_static(
+                result1,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            assert!(processed.is_some());
+            let processed_result = processed.unwrap();
+            assert_eq!(processed_result.transcript, "Hello");
+            assert!(processed_result.is_final);
+            assert!(!processed_result.is_speech_final); // Should still be false, timer started
+        }
+
+        // Test Case 2: Timer should fire after 1.3 seconds if no speech_final received
+        {
+            let speech_final_state = voice_manager.speech_final_state.clone();
+            let stt_callback = voice_manager.stt_callback.clone();
+
+            // Send is_final=true without is_speech_final=true
+            let result1 = STTResult::new("Test message".to_string(), true, false, 0.8);
+            let _processed = VoiceManager::process_stt_result_with_timing_static(
+                result1,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            // Wait slightly longer than the timer (1.3s + buffer)
+            tokio::time::sleep(tokio::time::Duration::from_millis(1400)).await;
+
+            // Check if timer fired - the callback should have been called
+            // Note: In a real test environment, we'd collect the callback results
+            // For now, we just verify the state was reset
+            let state = speech_final_state.read().await;
+            assert!(!state.waiting_for_speech_final); // Should be reset after timer fires
+        }
+
+        // Test Case 3: Real speech_final should cancel timer and return buffered text
+        {
+            let speech_final_state = voice_manager.speech_final_state.clone();
+            let stt_callback = voice_manager.stt_callback.clone();
+
+            // Reset state first
+            {
+                let mut state = speech_final_state.write().await;
+                *state = SpeechFinalState {
+                    text_buffer: String::new(),
+                    last_text: String::new(),
+                    timer_handle: None,
+                    last_final_time: None,
+                    waiting_for_speech_final: false,
+                };
+            }
+
+            // Send multiple is_final=true results to build up buffer
+            let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
+            let _processed1 = VoiceManager::process_stt_result_with_timing_static(
+                result1,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            let result2 = STTResult::new("world".to_string(), true, false, 0.8);
+            let _processed2 = VoiceManager::process_stt_result_with_timing_static(
+                result2,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            // Send is_speech_final=true (should cancel timer and return full buffered text)
+            let result3 = STTResult::new("final".to_string(), true, true, 0.95);
+            let processed3 = VoiceManager::process_stt_result_with_timing_static(
+                result3,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            assert!(processed3.is_some());
+            let final_result = processed3.unwrap();
+            assert!(final_result.is_speech_final);
+            assert!(final_result.is_final);
+            // Should contain the full buffered text, not just the current result
+            assert_eq!(final_result.transcript, "Hello world");
+            assert_eq!(final_result.confidence, 0.95);
+
+            // State should be reset
+            let state = speech_final_state.read().await;
+            assert!(!state.waiting_for_speech_final);
+            assert!(state.text_buffer.is_empty());
+            assert!(state.last_text.is_empty());
+        }
+
+        // Test Case 4: is_speech_final with empty buffer should use original text
+        {
+            let speech_final_state = voice_manager.speech_final_state.clone();
+            let stt_callback = voice_manager.stt_callback.clone();
+
+            // Reset state first
+            {
+                let mut state = speech_final_state.write().await;
+                *state = SpeechFinalState {
+                    text_buffer: String::new(),
+                    last_text: String::new(),
+                    timer_handle: None,
+                    last_final_time: None,
+                    waiting_for_speech_final: false,
+                };
+            }
+
+            // Send is_speech_final=true with no buffered content (direct speech final)
+            let result = STTResult::new("Direct speech final".to_string(), true, true, 0.85);
+            let processed = VoiceManager::process_stt_result_with_timing_static(
+                result,
+                speech_final_state.clone(),
+                stt_callback.clone(),
+            )
+            .await;
+
+            assert!(processed.is_some());
+            let final_result = processed.unwrap();
+            assert!(final_result.is_speech_final);
+            assert!(final_result.is_final);
+            // Should use original text since buffer was empty
+            assert_eq!(final_result.transcript, "Direct speech final");
+            assert_eq!(final_result.confidence, 0.85);
+        }
     }
 }
