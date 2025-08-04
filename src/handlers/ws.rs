@@ -1228,10 +1228,10 @@ async fn handle_clear_message(
 ) -> bool {
     debug!("Processing clear command");
 
-    let voice_manager = {
+    let (voice_manager, livekit_client) = {
         let connection_state = state.lock().await;
 
-        match &connection_state.voice_manager {
+        let vm = match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
                 let _ = message_tx
@@ -1242,7 +1242,10 @@ async fn handle_clear_message(
                     .await;
                 return true;
             }
-        }
+        };
+
+        let livekit = connection_state.livekit_client.clone();
+        (vm, livekit)
     };
 
     // Clear TTS provider
@@ -1253,6 +1256,23 @@ async fn handle_clear_message(
                 message: format!("Failed to clear TTS provider: {e}"),
             }))
             .await;
+    }
+
+    // Clear LiveKit audio buffer if available
+    if let Some(livekit_manager) = livekit_client {
+        match livekit_manager.lock().await.clear_audio().await {
+            Ok(()) => {
+                debug!("Successfully cleared LiveKit audio buffer");
+            }
+            Err(e) => {
+                error!("Failed to clear LiveKit audio buffer: {}", e);
+                // Note: We don't return an error to the client for LiveKit clear failures
+                // since the main TTS clearing might have succeeded
+                warn!("LiveKit audio buffer clear failed, but continuing with clear command");
+            }
+        }
+    } else {
+        debug!("No LiveKit client available - skipping LiveKit audio buffer clear");
     }
 
     debug!("Clear command completed");
@@ -1620,8 +1640,10 @@ mod tests {
         };
 
         let json = serde_json::to_string(&livekit_config).unwrap();
-        assert!(json.contains("\"url\":\"wss://test-livekit.com\""));
+        // LiveKitWebSocketConfig only contains token, URL is provided separately
         assert!(json.contains("\"token\":\"test-jwt-token\""));
+        // Verify the JSON structure is correct
+        assert!(!json.contains("\"url\"")); // URL should not be in WebSocket config
     }
 
     #[test]
@@ -1678,8 +1700,9 @@ mod tests {
 
         let json = serde_json::to_string(&config_msg).unwrap();
         assert!(json.contains("\"type\":\"config\""));
-        assert!(json.contains("\"url\":\"wss://test-livekit.com\""));
+        // LiveKitWebSocketConfig only contains token, URL is provided separately when converting
         assert!(json.contains("\"token\":\"test-jwt-token\""));
+        assert!(json.contains("\"livekit\"")); // Verify LiveKit section is present
     }
 
     #[test]
@@ -1949,8 +1972,9 @@ mod tests {
 
         let json = serde_json::to_string(&config_msg).unwrap();
         assert!(json.contains("\"type\":\"config\""));
-        assert!(json.contains("\"url\":\"wss://test-livekit.com\""));
+        // LiveKitWebSocketConfig only contains token, URL is provided separately when converting
         assert!(json.contains("\"token\":\"test-jwt-token\""));
+        assert!(json.contains("\"livekit\"")); // Verify LiveKit section is present
 
         // Parse back to ensure structure is correct
         let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();

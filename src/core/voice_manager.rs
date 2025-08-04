@@ -646,7 +646,7 @@ impl VoiceManager {
     /// # Returns
     /// * `VoiceManagerResult<()>` - Success or error
     pub async fn clear_tts(&self) -> VoiceManagerResult<()> {
-        let tts = self.tts.read().await;
+        let mut tts = self.tts.write().await;
         tts.clear().await.map_err(VoiceManagerError::TTSError)?;
         Ok(())
     }
