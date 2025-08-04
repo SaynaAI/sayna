@@ -1,0 +1,27 @@
+# ── Build artifacts ─────────────────────────────────────────────
+target/
+**/target/
+
+# Rust compiler intermediates
+*.rlib
+*.rmeta
+
+# ── VCS ─────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Editor / tooling miscellany ─────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+.DS_Store
+
+# ── Local caches, logs, coverage ────────────────────────────────
+.cargo/registry/
+.cargo/git/
+*.log
+coverage/
+tmp/
+temp/

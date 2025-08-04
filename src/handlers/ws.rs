@@ -399,8 +399,6 @@ impl STTWebSocketConfig {
 /// LiveKit configuration for WebSocket messages
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LiveKitWebSocketConfig {
-    /// LiveKit server URL (e.g., "wss://your-livekit-server.com")
-    pub url: String,
     /// LiveKit JWT token for room access
     pub token: String,
 }
@@ -413,9 +411,13 @@ impl LiveKitWebSocketConfig {
     ///
     /// # Returns
     /// * `LiveKitConfig` - Full LiveKit configuration with audio parameters
-    pub fn to_livekit_config(&self, tts_config: &TTSWebSocketConfig) -> LiveKitConfig {
+    pub fn to_livekit_config(
+        &self,
+        tts_config: &TTSWebSocketConfig,
+        livekit_url: &str,
+    ) -> LiveKitConfig {
         LiveKitConfig {
-            url: self.url.clone(),
+            url: livekit_url.to_string(),
             token: self.token.clone(),
             // Use TTS config sample rate, default to 24000 if not specified
             sample_rate: tts_config.sample_rate.unwrap_or(24000),
@@ -792,6 +794,8 @@ async fn handle_config_message(
         stt_ws_config.provider, tts_ws_config.provider
     );
 
+    let livekit_url = app_state.config.livekit_url.clone();
+
     // Get API keys from server config using utility function
     let stt_api_key = match app_state.config.get_api_key(&stt_ws_config.provider) {
         Ok(key) => key,
@@ -933,12 +937,9 @@ async fn handle_config_message(
     // Set up LiveKit client if configuration is provided
     let livekit_client_arc: Option<Arc<Mutex<LiveKitClient>>> =
         if let Some(livekit_ws_config) = livekit_ws_config {
-            info!(
-                "Setting up LiveKit client with URL: {}",
-                livekit_ws_config.url
-            );
+            info!("Setting up LiveKit client with URL: {}", livekit_url);
 
-            let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config);
+            let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config, &livekit_url);
             let mut livekit_client = LiveKitClient::new(livekit_config);
 
             // Set up LiveKit audio callback to forward audio to STT processing
@@ -1615,7 +1616,6 @@ mod tests {
     #[test]
     fn test_livekit_ws_config_serialization() {
         let livekit_config = LiveKitWebSocketConfig {
-            url: "wss://test-livekit.com".to_string(),
             token: "test-jwt-token".to_string(),
         };
 
@@ -1627,7 +1627,6 @@ mod tests {
     #[test]
     fn test_livekit_ws_config_conversion() {
         let livekit_ws_config = LiveKitWebSocketConfig {
-            url: "wss://test-livekit.com".to_string(),
             token: "test-jwt-token".to_string(),
         };
 
@@ -1642,7 +1641,8 @@ mod tests {
             model: "".to_string(),
         };
 
-        let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config);
+        let livekit_url = "wss://test-livekit.com".to_string();
+        let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config, &livekit_url);
         assert_eq!(livekit_config.url, "wss://test-livekit.com");
         assert_eq!(livekit_config.token, "test-jwt-token");
         assert_eq!(livekit_config.sample_rate, 22050);
@@ -1672,7 +1672,6 @@ mod tests {
                 model: "".to_string(),
             },
             livekit: Some(LiveKitWebSocketConfig {
-                url: "wss://test-livekit.com".to_string(),
                 token: "test-jwt-token".to_string(),
             }),
         };
@@ -1754,7 +1753,6 @@ mod tests {
             assert_eq!(tts_config.provider, "deepgram");
 
             let livekit_config = livekit.unwrap();
-            assert_eq!(livekit_config.url, "wss://test-livekit.com");
             assert_eq!(livekit_config.token, "test-jwt-token");
         } else {
             panic!("Expected Config message");
@@ -1945,7 +1943,6 @@ mod tests {
                 model: "".to_string(),
             },
             livekit: Some(LiveKitWebSocketConfig {
-                url: "wss://test-livekit.com".to_string(),
                 token: "test-jwt-token".to_string(),
             }),
         };
@@ -1959,7 +1956,6 @@ mod tests {
         let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
         if let IncomingMessage::Config { livekit, .. } = parsed {
             let livekit_config = livekit.unwrap();
-            assert_eq!(livekit_config.url, "wss://test-livekit.com");
             assert_eq!(livekit_config.token, "test-jwt-token");
         } else {
             panic!("Expected Config message");

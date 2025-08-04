@@ -4,6 +4,7 @@ use std::env;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    pub livekit_url: String,
 
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
@@ -20,12 +21,16 @@ impl ServerConfig {
             .parse::<u16>()
             .map_err(|e| format!("Invalid port number: {e}"))?;
 
+        let livekit_url =
+            env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".to_string());
+
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
 
         Ok(ServerConfig {
             host,
             port,
+            livekit_url,
             deepgram_api_key,
             elevenlabs_api_key,
         })
@@ -77,6 +82,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
         };
@@ -91,6 +97,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
         };
@@ -105,6 +112,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: None,
             elevenlabs_api_key: None,
         };
@@ -122,6 +130,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
         };
@@ -139,6 +148,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
         };
