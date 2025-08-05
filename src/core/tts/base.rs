@@ -243,6 +243,7 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// This method sends text to the target TTS provider for conversion to speech.
     /// The audio will be delivered via the registered audio callback.
+    /// If the provider is not ready, it will attempt to reconnect automatically.
     ///
     /// # Arguments
     /// * `text` - The text to synthesize
@@ -250,7 +251,7 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the synthesis request
-    async fn speak(&self, text: &str, flush: bool) -> TTSResult<()>;
+    async fn speak(&mut self, text: &str, flush: bool) -> TTSResult<()>;
 
     /// Clear any queued text from the TTS provider
     ///
@@ -425,7 +426,7 @@ mod tests {
             self.state.clone()
         }
 
-        async fn speak(&self, text: &str, _flush: bool) -> TTSResult<()> {
+        async fn speak(&mut self, text: &str, _flush: bool) -> TTSResult<()> {
             if !self.is_ready() {
                 return Err(TTSError::ProviderNotReady(
                     "TTS provider not connected".to_string(),
@@ -524,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn test_tts_error_when_not_ready() {
         let config = TTSConfig::default();
-        let tts = MockTTS::new(config).unwrap();
+        let mut tts = MockTTS::new(config).unwrap();
 
         // Should fail when not connected
         let result = tts.speak("Hello", false).await;
