@@ -563,11 +563,12 @@ impl BaseTTS for DeepgramTTS {
         }
     }
 
-    async fn speak(&self, text: &str, flush: bool) -> TTSResult<()> {
+    async fn speak(&mut self, text: &str, flush: bool) -> TTSResult<()> {
         if !self.is_ready() {
-            return Err(TTSError::ProviderNotReady(
-                "Deepgram TTS provider not connected".to_string(),
-            ));
+            // Disconnect and reconnect to ensure fresh connection
+            tracing::info!("Deepgram TTS not ready, attempting to reconnect...");
+            self.disconnect().await?;
+            self.connect().await?;
         }
 
         let command = TTSCommand::Speak(text.to_string(), flush);
@@ -761,7 +762,7 @@ mod tests {
             ..Default::default()
         };
 
-        let tts = <DeepgramTTS as BaseTTS>::new(config).unwrap();
+        let mut tts = <DeepgramTTS as BaseTTS>::new(config).unwrap();
 
         // Try to speak when not connected
         let result = tts.speak("Hello, world!", false).await;

@@ -749,7 +749,14 @@ impl BaseTTS for ElevenLabsTTS {
         }
     }
 
-    async fn speak(&self, text: &str, flush: bool) -> TTSResult<()> {
+    async fn speak(&mut self, text: &str, flush: bool) -> TTSResult<()> {
+        if !self.is_ready() {
+            // Disconnect and reconnect to ensure fresh connection
+            tracing::info!("ElevenLabs TTS not ready, attempting to reconnect...");
+            self.disconnect().await?;
+            self.connect().await?;
+        }
+
         if !self.is_ready() {
             return Err(TTSError::ProviderNotReady(
                 "ElevenLabs TTS not connected".to_string(),
@@ -984,7 +991,7 @@ mod tests {
             ..Default::default()
         };
 
-        let tts = ElevenLabsTTS::new(config).unwrap();
+        let mut tts = ElevenLabsTTS::new(config).unwrap();
 
         // Initially disconnected
         assert!(!tts.is_ready());
