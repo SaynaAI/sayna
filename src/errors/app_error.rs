@@ -48,10 +48,10 @@ impl IntoResponse for AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
-            AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
-            AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
+            AppError::InternalServerError(msg) => write!(f, "Internal server error: {msg}"),
+            AppError::BadRequest(msg) => write!(f, "Bad request: {msg}"),
+            AppError::NotFound(msg) => write!(f, "Not found: {msg}"),
+            AppError::Unauthorized(msg) => write!(f, "Unauthorized: {msg}"),
         }
     }
 }

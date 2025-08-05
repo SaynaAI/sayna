@@ -263,8 +263,7 @@ impl LiveKitClient {
             Err(e) => {
                 error!("Failed to connect to LiveKit room: {:?}", e);
                 Err(AppError::InternalServerError(format!(
-                    "LiveKit connection failed: {:?}",
-                    e
+                    "LiveKit connection failed: {e:?}"
                 )))
             }
         }
@@ -347,8 +346,7 @@ impl LiveKitClient {
                 Err(e) => {
                     error!("Failed to publish audio track: {:?}", e);
                     return Err(AppError::InternalServerError(format!(
-                        "Failed to publish audio track: {:?}",
-                        e
+                        "Failed to publish audio track: {e:?}"
                     )));
                 }
             }
@@ -415,8 +413,7 @@ impl LiveKitClient {
                 Err(e) => {
                     error!("Failed to capture audio frame: {:?}", e);
                     return Err(AppError::InternalServerError(format!(
-                        "Failed to capture audio frame: {:?}",
-                        e
+                        "Failed to capture audio frame: {e:?}"
                     )));
                 }
             }
@@ -517,7 +514,7 @@ impl LiveKitClient {
         }
 
         let serialized_data = serde_json::to_vec(&data).map_err(|e| {
-            AppError::InternalServerError(format!("Failed to serialize JSON data: {}", e))
+            AppError::InternalServerError(format!("Failed to serialize JSON data: {e}"))
         })?;
 
         if let Some(room) = &self.room {
@@ -533,8 +530,7 @@ impl LiveKitClient {
                 Err(e) => {
                     error!("Failed to send data message to topic {}: {:?}", topic, e);
                     return Err(AppError::InternalServerError(format!(
-                        "Failed to send data message to topic {}: {:?}",
-                        topic, e
+                        "Failed to send data message to topic {topic}: {e:?}"
                     )));
                 }
             }
@@ -766,7 +762,7 @@ impl LiveKitClient {
                                 config.channels as i32,
                             );
 
-                            let sample_rate = config.sample_rate as u32;
+                            let sample_rate = config.sample_rate;
 
                             let handle = tokio::spawn(async move {
                                 info!(

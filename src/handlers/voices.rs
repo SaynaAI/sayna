@@ -138,7 +138,7 @@ async fn fetch_elevenlabs_voices(
 
             Voice {
                 id: voice.voice_id,
-                sample: voice.preview_url.unwrap_or_else(|| "".to_string()),
+                sample: voice.preview_url.unwrap_or_default(),
                 name: voice.name,
                 accent,
                 gender,
@@ -158,7 +158,7 @@ async fn fetch_deepgram_voices(
 
     let response = client
         .get("https://api.deepgram.com/v1/models")
-        .header("Authorization", format!("Token {}", api_key))
+        .header("Authorization", format!("Token {api_key}"))
         .send()
         .await?;
 
@@ -177,9 +177,7 @@ async fn fetch_deepgram_voices(
                 .unwrap_or_else(|| "Unknown".to_string());
 
             // Extract sample URL
-            let sample = metadata
-                .and_then(|m| m.sample.clone())
-                .unwrap_or_else(|| "".to_string());
+            let sample = metadata.and_then(|m| m.sample.clone()).unwrap_or_default();
 
             // Determine gender from tags
             let gender = metadata
