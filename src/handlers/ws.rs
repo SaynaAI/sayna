@@ -15,7 +15,7 @@
 //! ### Message Types
 //!
 //! **Incoming Messages:**
-//! - `{"type": "config", "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
+//! - `{"type": "config", "audio": true, "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
 //! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
 //! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
@@ -66,6 +66,7 @@
 //! // Configuration for STT and TTS providers (no API keys needed)
 //! const config = {
 //!   type: 'config',
+//!   audio: true, // Enable audio processing (STT/TTS). Defaults to true if not specified.
 //!   stt_config: {
 //!     provider: 'deepgram',
 //!     language: 'en-US',
@@ -205,10 +206,21 @@
 //!   sendMessage('Hello everyone in the room!', 'user');        // Send to default topic
 //!   sendMessage('This is a chat message', 'user', 'chat');     // Send to specific topic
 //!   
-//!   // Send binary audio data
+//!   // Send binary audio data (only if audio=true)
 //!   const mockAudio = new ArrayBuffer(1024);
 //!   sendAudio(mockAudio);
 //! }, 1000);
+//!
+//! // Example: Configuration for LiveKit-only mode (no audio processing)
+//! const livekitOnlyConfig = {
+//!   type: 'config',
+//!   audio: false, // Disable audio processing - only use LiveKit for messaging
+//!   // stt_config and tts_config are not required when audio=false
+//!   livekit: {
+//!     url: 'wss://your-livekit-server.com',
+//!     token: 'your-livekit-jwt-token'
+//!   }
+//! };
 //! ```
 //!
 //! ## Rust Client Example
@@ -227,6 +239,7 @@
 //!     // Send configuration (no API keys needed)
 //!     let config = json!({
 //!         "type": "config",
+//!         "audio": true, // Enable audio processing (STT/TTS). Defaults to true if not specified.
 //!         "stt_config": {
 //!             "provider": "deepgram",
 //!             "language": "en-US",
@@ -355,6 +368,11 @@ use crate::{
     state::AppState,
 };
 
+/// Default value for audio enabled flag (true)
+fn default_audio_enabled() -> Option<bool> {
+    Some(true)
+}
+
 /// STT configuration for WebSocket messages (without API key)
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct STTWebSocketConfig {
@@ -481,8 +499,18 @@ impl TTSWebSocketConfig {
 pub enum IncomingMessage {
     #[serde(rename = "config")]
     Config {
-        stt_config: STTWebSocketConfig,
-        tts_config: TTSWebSocketConfig,
+        /// Enable audio processing (STT/TTS). Defaults to true if not specified.
+        #[serde(
+            default = "default_audio_enabled",
+            skip_serializing_if = "Option::is_none"
+        )]
+        audio: Option<bool>,
+        /// STT configuration (required only when audio=true)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stt_config: Option<STTWebSocketConfig>,
+        /// TTS configuration (required only when audio=true)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tts_config: Option<TTSWebSocketConfig>,
         /// Optional LiveKit configuration for real-time audio streaming
         #[serde(skip_serializing_if = "Option::is_none")]
         livekit: Option<LiveKitWebSocketConfig>,
@@ -570,6 +598,8 @@ pub enum OutgoingMessage {
 struct ConnectionState {
     voice_manager: Option<Arc<VoiceManager>>,
     livekit_client: Option<Arc<Mutex<LiveKitClient>>>,
+    /// Whether audio processing (STT/TTS) is enabled for this connection
+    audio_enabled: bool,
 }
 
 impl ConnectionState {
@@ -577,6 +607,7 @@ impl ConnectionState {
         Self {
             voice_manager: None,
             livekit_client: None,
+            audio_enabled: false, // Will be set based on config message
         }
     }
 }
@@ -758,13 +789,14 @@ async fn handle_incoming_message(
 ) -> bool {
     match msg {
         IncomingMessage::Config {
+            audio,
             stt_config,
             tts_config,
             livekit,
         } => {
             println!("Processing config message");
             handle_config_message(
-                stt_config, tts_config, livekit, state, message_tx, app_state,
+                audio, stt_config, tts_config, livekit, state, message_tx, app_state,
             )
             .await
         }
@@ -782,24 +814,29 @@ async fn handle_incoming_message(
 
 /// Handle configuration message with optimizations
 async fn handle_config_message(
-    stt_ws_config: STTWebSocketConfig,
-    tts_ws_config: TTSWebSocketConfig,
+    audio: Option<bool>,
+    stt_ws_config: Option<STTWebSocketConfig>,
+    tts_ws_config: Option<TTSWebSocketConfig>,
     livekit_ws_config: Option<LiveKitWebSocketConfig>,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
 ) -> bool {
+    // Determine if audio processing is enabled (default to true)
+    let audio_enabled = audio.unwrap_or(true);
+
     info!(
-        "Configuring voice manager with STT provider: {} and TTS provider: {}",
-        stt_ws_config.provider, tts_ws_config.provider
+        "Configuring connection with audio_enabled: {}, LiveKit: {}",
+        audio_enabled,
+        livekit_ws_config.is_some()
     );
 
     let livekit_url = app_state.config.livekit_url.clone();
 
-    // Get API keys from server config using utility function
-    let stt_api_key = match app_state.config.get_api_key(&stt_ws_config.provider) {
-        Ok(key) => key,
-        Err(error_msg) => {
+    // Validate that required configs are provided when audio is enabled
+    if audio_enabled {
+        if stt_ws_config.is_none() {
+            let error_msg = "STT configuration is required when audio=true".to_string();
             error!("{}", error_msg);
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -808,11 +845,9 @@ async fn handle_config_message(
                 .await;
             return true;
         }
-    };
 
-    let tts_api_key = match app_state.config.get_api_key(&tts_ws_config.provider) {
-        Ok(key) => key,
-        Err(error_msg) => {
+        if tts_ws_config.is_none() {
+            let error_msg = "TTS configuration is required when audio=true".to_string();
             error!("{}", error_msg);
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -821,149 +856,216 @@ async fn handle_config_message(
                 .await;
             return true;
         }
-    };
-
-    // Create full configs with API keys
-    let stt_config = stt_ws_config.to_stt_config(stt_api_key);
-    let tts_config = tts_ws_config.to_tts_config(tts_api_key);
-
-    // Create voice manager configuration
-    let voice_config = VoiceManagerConfig {
-        stt_config,
-        tts_config,
-    };
-
-    // Create voice manager
-    let voice_manager = match VoiceManager::new(voice_config) {
-        Ok(vm) => Arc::new(vm),
-        Err(e) => {
-            error!("Failed to create voice manager: {}", e);
-            let _ = message_tx
-                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: format!("Failed to create voice manager: {e}"),
-                }))
-                .await;
-            return true;
-        }
-    };
-
-    // Start voice manager
-    if let Err(e) = voice_manager.start().await {
-        error!("Failed to start voice manager: {}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to start voice manager: {e}"),
-            }))
-            .await;
-        return true;
     }
 
-    // Set up STT callback with optimized message routing
-    let message_tx_clone = message_tx.clone();
-    if let Err(e) = voice_manager
-        .on_stt_result(move |result: STTResult| {
-            let message_tx = message_tx_clone.clone();
-            Box::pin(async move {
-                let msg = OutgoingMessage::STTResult {
-                    transcript: result.transcript,
-                    is_final: result.is_final,
-                    is_speech_final: result.is_speech_final,
-                    confidence: result.confidence,
-                };
-                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
-            })
-        })
-        .await
-    {
-        error!("Failed to set up STT callback: {}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to set up STT callback: {e}"),
-            }))
-            .await;
-        return true;
-    }
-
-    // We'll set up the TTS audio callback after potentially setting up LiveKit
-    // This ensures we have a single callback that handles both scenarios
-
-    // Set up TTS error callback
-    let message_tx_clone = message_tx.clone();
-    if let Err(e) = voice_manager
-        .on_tts_error(move |error| {
-            let message_tx = message_tx_clone.clone();
-            Box::pin(async move {
-                let msg = OutgoingMessage::Error {
-                    message: format!("TTS error: {error}"),
-                };
-                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
-            })
-        })
-        .await
-    {
-        error!("Failed to set up TTS error callback: {}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to set up TTS error callback: {e}"),
-            }))
-            .await;
-        return true;
-    }
-
-    // Wait for providers to be ready with timeout
-    let ready_timeout = Duration::from_secs(30);
-    let ready_check = async {
-        while !voice_manager.is_ready().await {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-
-    if timeout(ready_timeout, ready_check).await.is_err() {
-        error!("Timeout waiting for voice providers to be ready");
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: "Timeout waiting for voice providers to be ready".to_string(),
-            }))
-            .await;
-        return true;
-    }
-
-    // Store voice manager in state
+    // Store audio_enabled flag in connection state first
     {
         let mut connection_state = state.lock().await;
-        connection_state.voice_manager = Some(voice_manager.clone());
+        connection_state.audio_enabled = audio_enabled;
     }
+
+    // Initialize voice manager only if audio is enabled
+    let voice_manager = if audio_enabled {
+        let stt_ws_config_ref = stt_ws_config.as_ref().unwrap(); // Safe to unwrap after validation
+        let tts_ws_config_ref = tts_ws_config.as_ref().unwrap(); // Safe to unwrap after validation
+
+        info!(
+            "Initializing voice manager with STT provider: {} and TTS provider: {}",
+            stt_ws_config_ref.provider, tts_ws_config_ref.provider
+        );
+
+        // Get API keys from server config using utility function
+        let stt_api_key = match app_state.config.get_api_key(&stt_ws_config_ref.provider) {
+            Ok(key) => key,
+            Err(error_msg) => {
+                error!("{}", error_msg);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: error_msg,
+                    }))
+                    .await;
+                return true;
+            }
+        };
+
+        let tts_api_key = match app_state.config.get_api_key(&tts_ws_config_ref.provider) {
+            Ok(key) => key,
+            Err(error_msg) => {
+                error!("{}", error_msg);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: error_msg,
+                    }))
+                    .await;
+                return true;
+            }
+        };
+
+        // Create full configs with API keys
+        let stt_config = stt_ws_config_ref.to_stt_config(stt_api_key);
+        let tts_config = tts_ws_config_ref.to_tts_config(tts_api_key);
+
+        // Create voice manager configuration
+        let voice_config = VoiceManagerConfig {
+            stt_config,
+            tts_config,
+        };
+
+        // Create voice manager
+        let voice_manager = match VoiceManager::new(voice_config) {
+            Ok(vm) => Arc::new(vm),
+            Err(e) => {
+                error!("Failed to create voice manager: {}", e);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to create voice manager: {e}"),
+                    }))
+                    .await;
+                return true;
+            }
+        };
+
+        // Start voice manager
+        if let Err(e) = voice_manager.start().await {
+            error!("Failed to start voice manager: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to start voice manager: {e}"),
+                }))
+                .await;
+            return true;
+        }
+
+        // Set up STT callback with optimized message routing
+        let message_tx_clone = message_tx.clone();
+        if let Err(e) = voice_manager
+            .on_stt_result(move |result: STTResult| {
+                let message_tx = message_tx_clone.clone();
+                Box::pin(async move {
+                    let msg = OutgoingMessage::STTResult {
+                        transcript: result.transcript,
+                        is_final: result.is_final,
+                        is_speech_final: result.is_speech_final,
+                        confidence: result.confidence,
+                    };
+                    let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
+                })
+            })
+            .await
+        {
+            error!("Failed to set up STT callback: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to set up STT callback: {e}"),
+                }))
+                .await;
+            return true;
+        }
+
+        // We'll set up the TTS audio callback after potentially setting up LiveKit
+        // This ensures we have a single callback that handles both scenarios
+
+        // Set up TTS error callback
+        let message_tx_clone = message_tx.clone();
+        if let Err(e) = voice_manager
+            .on_tts_error(move |error| {
+                let message_tx = message_tx_clone.clone();
+                Box::pin(async move {
+                    let msg = OutgoingMessage::Error {
+                        message: format!("TTS error: {error}"),
+                    };
+                    let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
+                })
+            })
+            .await
+        {
+            error!("Failed to set up TTS error callback: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to set up TTS error callback: {e}"),
+                }))
+                .await;
+            return true;
+        }
+
+        // Wait for providers to be ready with timeout
+        let ready_timeout = Duration::from_secs(30);
+        let ready_check = async {
+            while !voice_manager.is_ready().await {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+
+        if timeout(ready_timeout, ready_check).await.is_err() {
+            error!("Timeout waiting for voice providers to be ready");
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: "Timeout waiting for voice providers to be ready".to_string(),
+                }))
+                .await;
+            return true;
+        }
+
+        // Store voice manager in state
+        {
+            let mut connection_state = state.lock().await;
+            connection_state.voice_manager = Some(voice_manager.clone());
+        }
+
+        Some(voice_manager)
+    } else {
+        info!("Audio processing disabled - skipping voice manager initialization");
+        None
+    };
 
     // Set up LiveKit client if configuration is provided
     let livekit_client_arc: Option<Arc<Mutex<LiveKitClient>>> =
         if let Some(livekit_ws_config) = livekit_ws_config {
             info!("Setting up LiveKit client with URL: {}", livekit_url);
 
-            let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config, &livekit_url);
+            // Use default TTS config for LiveKit audio parameters when TTS is not configured
+            let default_tts_config = TTSWebSocketConfig {
+                provider: "deepgram".to_string(),
+                voice_id: None,
+                speaking_rate: None,
+                audio_format: None,
+                sample_rate: Some(24000), // Default sample rate for LiveKit
+                connection_timeout: None,
+                request_timeout: None,
+                model: "".to_string(),
+            };
+
+            let tts_config_for_livekit = tts_ws_config.as_ref().unwrap_or(&default_tts_config);
+            let livekit_config =
+                livekit_ws_config.to_livekit_config(tts_config_for_livekit, &livekit_url);
             let mut livekit_client = LiveKitClient::new(livekit_config);
 
-            // Set up LiveKit audio callback to forward audio to STT processing
-            let voice_manager_clone = voice_manager.clone();
-            let message_tx_clone = message_tx.clone();
+            // Set up LiveKit audio callback to forward audio to STT processing (only if audio is enabled)
+            if let Some(voice_manager_ref) = &voice_manager {
+                let voice_manager_clone = voice_manager_ref.clone();
+                let message_tx_clone = message_tx.clone();
 
-            livekit_client.set_audio_callback(move |audio_data: Vec<u8>| {
-                let voice_manager = voice_manager_clone.clone();
-                let message_tx = message_tx_clone.clone();
+                livekit_client.set_audio_callback(move |audio_data: Vec<u8>| {
+                    let voice_manager = voice_manager_clone.clone();
+                    let message_tx = message_tx_clone.clone();
 
-                tokio::spawn(async move {
-                    debug!("Received LiveKit audio: {} bytes", audio_data.len());
+                    tokio::spawn(async move {
+                        debug!("Received LiveKit audio: {} bytes", audio_data.len());
 
-                    // Forward LiveKit audio to the same STT processing pipeline
-                    if let Err(e) = voice_manager.receive_audio(audio_data).await {
-                        error!("Failed to process LiveKit audio: {:?}", e);
-                        let _ = message_tx
-                            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                                message: format!("Failed to process LiveKit audio: {e:?}"),
-                            }))
-                            .await;
-                    }
+                        // Forward LiveKit audio to the same STT processing pipeline
+                        if let Err(e) = voice_manager.receive_audio(audio_data).await {
+                            error!("Failed to process LiveKit audio: {:?}", e);
+                            let _ = message_tx
+                                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                                    message: format!("Failed to process LiveKit audio: {e:?}"),
+                                }))
+                                .await;
+                        }
+                    });
                 });
-            });
+            } else {
+                info!("Audio processing disabled - LiveKit audio callback not set");
+            }
 
             // Set up LiveKit data callback to forward data messages to WebSocket client
             let message_tx_clone = message_tx.clone();
@@ -1060,64 +1162,68 @@ async fn handle_config_message(
             None
         };
 
-    // Set up unified TTS audio callback that handles both LiveKit and WebSocket routing
-    let message_tx_for_tts = message_tx.clone();
-    let livekit_client_for_tts = livekit_client_arc.clone();
+    // Set up unified TTS audio callback that handles both LiveKit and WebSocket routing (only if audio is enabled)
+    if let Some(voice_manager_ref) = &voice_manager {
+        let message_tx_for_tts = message_tx.clone();
+        let livekit_client_for_tts = livekit_client_arc.clone();
 
-    if let Err(e) = voice_manager
-        .on_tts_audio(move |audio_data: AudioData| {
-            let message_tx = message_tx_for_tts.clone();
-            let livekit_client = livekit_client_for_tts.clone();
+        if let Err(e) = voice_manager_ref
+            .on_tts_audio(move |audio_data: AudioData| {
+                let message_tx = message_tx_for_tts.clone();
+                let livekit_client = livekit_client_for_tts.clone();
 
-            Box::pin(async move {
-                let mut sent_to_livekit = false;
+                Box::pin(async move {
+                    let mut sent_to_livekit = false;
 
-                // Try to send to LiveKit first if available
-                if let Some(livekit_client_arc) = &livekit_client {
-                    let mut client = livekit_client_arc.lock().await;
+                    // Try to send to LiveKit first if available
+                    if let Some(livekit_client_arc) = &livekit_client {
+                        let mut client = livekit_client_arc.lock().await;
 
-                    // Check if LiveKit is connected before attempting to send
-                    if client.is_connected().await {
-                        match client.send_tts_audio(audio_data.data.clone()).await {
-                            Ok(()) => {
-                                debug!(
-                                    "TTS audio successfully sent to LiveKit: {} bytes",
-                                    audio_data.data.len()
-                                );
-                                sent_to_livekit = true;
+                        // Check if LiveKit is connected before attempting to send
+                        if client.is_connected().await {
+                            match client.send_tts_audio(audio_data.data.clone()).await {
+                                Ok(()) => {
+                                    debug!(
+                                        "TTS audio successfully sent to LiveKit: {} bytes",
+                                        audio_data.data.len()
+                                    );
+                                    sent_to_livekit = true;
+                                }
+                                Err(e) => {
+                                    error!("Failed to send TTS audio to LiveKit: {:?}", e);
+                                    // Will fall back to WebSocket below
+                                }
                             }
-                            Err(e) => {
-                                error!("Failed to send TTS audio to LiveKit: {:?}", e);
-                                // Will fall back to WebSocket below
-                            }
+                        } else {
+                            debug!("LiveKit client not connected, falling back to WebSocket");
                         }
-                    } else {
-                        debug!("LiveKit client not connected, falling back to WebSocket");
                     }
-                }
 
-                // Fall back to WebSocket if LiveKit is not available or failed
-                if !sent_to_livekit {
-                    debug!(
-                        "Sending TTS audio to WebSocket client: {} bytes",
-                        audio_data.data.len()
-                    );
-                    let audio_bytes = Bytes::from(audio_data.data);
-                    if let Err(e) = message_tx.send(MessageRoute::Binary(audio_bytes)).await {
-                        error!("Failed to send TTS audio to WebSocket: {:?}", e);
+                    // Fall back to WebSocket if LiveKit is not available or failed
+                    if !sent_to_livekit {
+                        debug!(
+                            "Sending TTS audio to WebSocket client: {} bytes",
+                            audio_data.data.len()
+                        );
+                        let audio_bytes = Bytes::from(audio_data.data);
+                        if let Err(e) = message_tx.send(MessageRoute::Binary(audio_bytes)).await {
+                            error!("Failed to send TTS audio to WebSocket: {:?}", e);
+                        }
                     }
-                }
+                })
             })
-        })
-        .await
-    {
-        error!("Failed to set up TTS audio callback: {}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to set up TTS audio callback: {e}"),
-            }))
-            .await;
-        return true;
+            .await
+        {
+            error!("Failed to set up TTS audio callback: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to set up TTS audio callback: {e}"),
+                }))
+                .await;
+            return true;
+        }
+    } else {
+        info!("Audio processing disabled - TTS audio callback not set");
     }
 
     // Send ready message
@@ -1139,12 +1245,25 @@ async fn handle_audio_message(
 
     let voice_manager = {
         let connection_state = state.lock().await;
+
+        // Check if audio processing is enabled
+        if !connection_state.audio_enabled {
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message:
+                        "Audio processing is disabled. Send config message with audio=true first."
+                            .to_string(),
+                }))
+                .await;
+            return true;
+        }
+
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
                 let _ = message_tx
                     .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: "Voice manager not configured. Send config message first."
+                        message: "Voice manager not configured. Send config message with audio=true first."
                             .to_string(),
                     }))
                     .await;
@@ -1186,12 +1305,25 @@ async fn handle_speak_message(
 
     let voice_manager = {
         let connection_state = state.lock().await;
+
+        // Check if audio processing is enabled
+        if !connection_state.audio_enabled {
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message:
+                        "Audio processing is disabled. Send config message with audio=true first."
+                            .to_string(),
+                }))
+                .await;
+            return true;
+        }
+
         match &connection_state.voice_manager {
             Some(vm) => vm.clone(),
             None => {
                 let _ = message_tx
                     .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: "Voice manager not configured. Send config message first."
+                        message: "Voice manager not configured. Send config message with audio=true first."
                             .to_string(),
                     }))
                     .await;
@@ -1231,31 +1363,41 @@ async fn handle_clear_message(
     let (voice_manager, livekit_client) = {
         let connection_state = state.lock().await;
 
-        let vm = match &connection_state.voice_manager {
-            Some(vm) => vm.clone(),
-            None => {
-                let _ = message_tx
-                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: "Voice manager not configured. Send config message first."
-                            .to_string(),
-                    }))
-                    .await;
-                return true;
+        // Check if audio processing is enabled for voice manager operations
+        let vm = if connection_state.audio_enabled {
+            match &connection_state.voice_manager {
+                Some(vm) => Some(vm.clone()),
+                None => {
+                    let _ = message_tx
+                        .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                            message: "Voice manager not configured. Send config message with audio=true first."
+                                .to_string(),
+                        }))
+                        .await;
+                    return true;
+                }
             }
+        } else {
+            // Audio is disabled, so voice manager operations are not available
+            None
         };
 
         let livekit = connection_state.livekit_client.clone();
         (vm, livekit)
     };
 
-    // Clear TTS provider
-    if let Err(e) = voice_manager.clear_tts().await {
-        error!("Failed to clear TTS provider: {}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to clear TTS provider: {e}"),
-            }))
-            .await;
+    // Clear TTS provider (only if audio is enabled)
+    if let Some(vm) = voice_manager {
+        if let Err(e) = vm.clear_tts().await {
+            error!("Failed to clear TTS provider: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to clear TTS provider: {e}"),
+                }))
+                .await;
+        }
+    } else {
+        debug!("Audio processing disabled - skipping TTS provider clear");
     }
 
     // Clear LiveKit audio buffer if available
@@ -1378,7 +1520,8 @@ mod tests {
     fn test_incoming_message_serialization() {
         // Test config message
         let config_msg = IncomingMessage::Config {
-            stt_config: STTWebSocketConfig {
+            audio: Some(true),
+            stt_config: Some(STTWebSocketConfig {
                 provider: "deepgram".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -1386,8 +1529,8 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
                 model: "nova-3".to_string(),
-            },
-            tts_config: TTSWebSocketConfig {
+            }),
+            tts_config: Some(TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
@@ -1396,7 +1539,7 @@ mod tests {
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
                 model: "".to_string(), // Model is in Voice ID for Deepgram
-            },
+            }),
             livekit: None,
         };
 
@@ -1674,7 +1817,8 @@ mod tests {
     #[test]
     fn test_incoming_message_config_with_livekit() {
         let config_msg = IncomingMessage::Config {
-            stt_config: STTWebSocketConfig {
+            audio: Some(true),
+            stt_config: Some(STTWebSocketConfig {
                 provider: "deepgram".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -1682,8 +1826,8 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
                 model: "nova-3".to_string(),
-            },
-            tts_config: TTSWebSocketConfig {
+            }),
+            tts_config: Some(TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
@@ -1692,7 +1836,7 @@ mod tests {
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
                 model: "".to_string(),
-            },
+            }),
             livekit: Some(LiveKitWebSocketConfig {
                 token: "test-jwt-token".to_string(),
             }),
@@ -1708,7 +1852,8 @@ mod tests {
     #[test]
     fn test_incoming_message_config_without_livekit() {
         let config_msg = IncomingMessage::Config {
-            stt_config: STTWebSocketConfig {
+            audio: Some(true),
+            stt_config: Some(STTWebSocketConfig {
                 provider: "deepgram".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -1716,8 +1861,8 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
                 model: "nova-3".to_string(),
-            },
-            tts_config: TTSWebSocketConfig {
+            }),
+            tts_config: Some(TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
@@ -1726,7 +1871,7 @@ mod tests {
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
                 model: "".to_string(),
-            },
+            }),
             livekit: None,
         };
 
@@ -1767,13 +1912,15 @@ mod tests {
 
         let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
         if let IncomingMessage::Config {
+            audio,
             stt_config,
             tts_config,
             livekit,
         } = parsed
         {
-            assert_eq!(stt_config.provider, "deepgram");
-            assert_eq!(tts_config.provider, "deepgram");
+            assert_eq!(audio, Some(true));
+            assert_eq!(stt_config.as_ref().unwrap().provider, "deepgram");
+            assert_eq!(tts_config.as_ref().unwrap().provider, "deepgram");
 
             let livekit_config = livekit.unwrap();
             assert_eq!(livekit_config.token, "test-jwt-token");
@@ -1861,13 +2008,15 @@ mod tests {
 
         let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
         if let IncomingMessage::Config {
+            audio,
             stt_config,
             tts_config,
             livekit,
         } = parsed
         {
-            assert_eq!(stt_config.provider, "deepgram");
-            assert_eq!(tts_config.provider, "deepgram");
+            assert_eq!(audio, Some(true));
+            assert_eq!(stt_config.as_ref().unwrap().provider, "deepgram");
+            assert_eq!(tts_config.as_ref().unwrap().provider, "deepgram");
             assert!(livekit.is_none());
         } else {
             panic!("Expected Config message");
@@ -1904,7 +2053,8 @@ mod tests {
     fn test_config_message_without_livekit_routing() {
         // Test that configuration without LiveKit creates proper routing logic
         let config_msg = IncomingMessage::Config {
-            stt_config: STTWebSocketConfig {
+            audio: Some(true),
+            stt_config: Some(STTWebSocketConfig {
                 provider: "deepgram".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -1912,8 +2062,8 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
                 model: "nova-3".to_string(),
-            },
-            tts_config: TTSWebSocketConfig {
+            }),
+            tts_config: Some(TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
@@ -1922,7 +2072,7 @@ mod tests {
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
                 model: "".to_string(),
-            },
+            }),
             livekit: None, // No LiveKit configuration
         };
 
@@ -1946,7 +2096,8 @@ mod tests {
     fn test_config_message_with_livekit_routing() {
         // Test that configuration with LiveKit creates proper routing logic
         let config_msg = IncomingMessage::Config {
-            stt_config: STTWebSocketConfig {
+            audio: Some(true),
+            stt_config: Some(STTWebSocketConfig {
                 provider: "deepgram".to_string(),
                 language: "en-US".to_string(),
                 sample_rate: 16000,
@@ -1954,8 +2105,8 @@ mod tests {
                 punctuation: true,
                 encoding: "linear16".to_string(),
                 model: "nova-3".to_string(),
-            },
-            tts_config: TTSWebSocketConfig {
+            }),
+            tts_config: Some(TTSWebSocketConfig {
                 provider: "deepgram".to_string(),
                 voice_id: Some("aura-luna-en".to_string()),
                 speaking_rate: Some(1.0),
@@ -1964,7 +2115,7 @@ mod tests {
                 connection_timeout: Some(30),
                 request_timeout: Some(60),
                 model: "".to_string(),
-            },
+            }),
             livekit: Some(LiveKitWebSocketConfig {
                 token: "test-jwt-token".to_string(),
             }),
@@ -2138,6 +2289,95 @@ mod tests {
         let cloned_audio = audio_bytes.clone();
         assert_eq!(cloned_audio.to_vec(), test_audio);
         assert_eq!(audio_bytes.to_vec(), test_audio);
+    }
+
+    #[test]
+    fn test_config_message_audio_disabled() {
+        // Test configuration with audio=false (LiveKit-only mode)
+        let config_msg = IncomingMessage::Config {
+            audio: Some(false),
+            stt_config: None, // Not required when audio=false
+            tts_config: None, // Not required when audio=false
+            livekit: Some(LiveKitWebSocketConfig {
+                token: "test-jwt-token".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&config_msg).unwrap();
+        assert!(json.contains("\"type\":\"config\""));
+        assert!(json.contains("\"audio\":false"));
+        assert!(json.contains("\"token\":\"test-jwt-token\""));
+        assert!(json.contains("\"livekit\""));
+        // Should not contain stt_config or tts_config fields when None
+        assert!(!json.contains("stt_config"));
+        assert!(!json.contains("tts_config"));
+
+        // Parse back to ensure structure is correct
+        let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
+        if let IncomingMessage::Config {
+            audio,
+            stt_config,
+            tts_config,
+            livekit,
+        } = parsed
+        {
+            assert_eq!(audio, Some(false));
+            assert!(stt_config.is_none());
+            assert!(tts_config.is_none());
+            assert!(livekit.is_some());
+        } else {
+            panic!("Expected Config message");
+        }
+    }
+
+    #[test]
+    fn test_config_message_audio_default() {
+        // Test configuration with no audio field (should default to true)
+        let config_msg = IncomingMessage::Config {
+            audio: None, // Should default to true
+            stt_config: Some(STTWebSocketConfig {
+                provider: "deepgram".to_string(),
+                language: "en-US".to_string(),
+                sample_rate: 16000,
+                channels: 1,
+                punctuation: true,
+                encoding: "linear16".to_string(),
+                model: "nova-3".to_string(),
+            }),
+            tts_config: Some(TTSWebSocketConfig {
+                provider: "deepgram".to_string(),
+                voice_id: Some("aura-luna-en".to_string()),
+                speaking_rate: Some(1.0),
+                audio_format: Some("pcm".to_string()),
+                sample_rate: Some(22050),
+                connection_timeout: Some(30),
+                request_timeout: Some(60),
+                model: "".to_string(),
+            }),
+            livekit: None,
+        };
+
+        let json = serde_json::to_string(&config_msg).unwrap();
+        assert!(json.contains("\"type\":\"config\""));
+        // Should not contain audio field when None (due to skip_serializing_if)
+        assert!(!json.contains("\"audio\""));
+
+        // Parse back to ensure structure is correct
+        let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
+        if let IncomingMessage::Config {
+            audio,
+            stt_config,
+            tts_config,
+            livekit,
+        } = parsed
+        {
+            assert_eq!(audio, Some(true)); // Should default to true via serde default
+            assert!(stt_config.is_some());
+            assert!(tts_config.is_some());
+            assert!(livekit.is_none());
+        } else {
+            panic!("Expected Config message");
+        }
     }
 
     #[test]
