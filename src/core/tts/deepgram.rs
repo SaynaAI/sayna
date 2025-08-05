@@ -386,7 +386,7 @@ impl DeepgramTTS {
                                             let flush_message = FLUSH_MESSAGE.to_string();
                                             tokio::spawn(async move {
                                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                                                if let Err(_) = delayed_sender.send(flush_message) {
+                                                if delayed_sender.send(flush_message).is_err() {
                                                     debug!("Failed to send delayed flush message - receiver closed");
                                                 }
                                             });
@@ -404,7 +404,7 @@ impl DeepgramTTS {
                                 let message_text_clone = message_text.to_string();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                                    if let Err(_) = delayed_sender.send(message_text_clone) {
+                                    if delayed_sender.send(message_text_clone).is_err() {
                                         debug!("Failed to send delayed message - receiver closed");
                                     }
                                 });

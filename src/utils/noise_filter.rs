@@ -21,12 +21,15 @@ type WorkerTask = (
     oneshot::Sender<Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>,
 );
 
+// Type aliases for cleaner code
+type WorkerSender = mpsc::Sender<WorkerTask>;
+type PoolSender = mpsc::Sender<WorkerSender>;
+type PoolReceiver = Arc<Mutex<mpsc::Receiver<WorkerSender>>>;
+type SenderPool = (PoolSender, PoolReceiver);
+
 // The pool of senders to the worker threads, managed by a channel.
 // This is the core of our thread-safe, async-friendly pool for the !Send models.
-static SENDER_POOL: LazyLock<(
-    mpsc::Sender<mpsc::Sender<WorkerTask>>,
-    Arc<Mutex<mpsc::Receiver<mpsc::Sender<WorkerTask>>>>,
-)> = LazyLock::new(|| {
+static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
     // Use a pool size based on available CPU cores, with a minimum of 2.
     let pool_size = num_cpus::get().max(2);
     let (pool_tx, pool_rx) = mpsc::channel(pool_size);

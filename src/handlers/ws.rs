@@ -958,7 +958,7 @@ async fn handle_config_message(
                         error!("Failed to process LiveKit audio: {:?}", e);
                         let _ = message_tx
                             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                                message: format!("Failed to process LiveKit audio: {:?}", e),
+                                message: format!("Failed to process LiveKit audio: {e:?}"),
                             }))
                             .await;
                     }
@@ -1041,7 +1041,7 @@ async fn handle_config_message(
                 error!("Failed to connect to LiveKit room: {:?}", e);
                 let _ = message_tx
                     .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: format!("Failed to connect to LiveKit room: {:?}", e),
+                        message: format!("Failed to connect to LiveKit room: {e:?}"),
                     }))
                     .await;
                 return true;
@@ -1317,7 +1317,7 @@ async fn handle_send_message(
             error!("Failed to send message via LiveKit: {:?}", e);
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: format!("Failed to send message via LiveKit: {:?}", e),
+                    message: format!("Failed to send message via LiveKit: {e:?}"),
                 }))
                 .await;
         } else {
