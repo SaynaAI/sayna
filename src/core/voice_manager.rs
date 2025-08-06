@@ -319,6 +319,10 @@ struct SpeechFinalState {
     waiting_for_speech_final: AtomicBool,
     /// User callback to call when timer expires
     user_callback: Option<STTCallback>,
+    /// Timestamp (ms since epoch) when timer last fired - used to prevent duplicates
+    timer_last_fired_ms: AtomicUsize,
+    /// Last text that was force-finalized by timer
+    last_forced_text: String,
 }
 
 /// State for managing interruption control
@@ -456,6 +460,8 @@ impl VoiceManager {
                 timer_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
             })),
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
@@ -554,6 +560,8 @@ impl VoiceManager {
                 .waiting_for_speech_final
                 .store(false, Ordering::Release);
             state.user_callback = None;
+            state.timer_last_fired_ms.store(0, Ordering::Release);
+            state.last_forced_text.clear();
         }
 
         // Disconnect STT provider
@@ -1199,49 +1207,77 @@ impl VoiceManager {
 
     /// Static method to process STT results with speech final timing control
     ///
-    /// This method implements the following behavior matching Python logic:
+    /// This method implements the following behavior:
     /// - Returns results immediately to callback (no waiting)
     /// - Starts background timer for is_final=true results  
     /// - Timer generates additional callback invocation when it expires
     /// - Cancels timer when real is_speech_final=true arrives
-    /// - Buffers text from final results for forced speech_final
+    /// - Allows continuous speech processing with multiple timer firings
+    /// - Prevents duplicate speech_final events within a short time window
     async fn process_stt_result_with_timing_static(
         result: STTResult,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     ) -> Option<STTResult> {
-        let mut state = speech_final_state.write();
-
         // Skip empty final results that aren't speech_final
         if result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final {
             return None;
         }
 
+        // Get current time in milliseconds
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as usize;
+
         // Case 1: Real is_speech_final=true received
         if result.is_speech_final {
+            let mut state = speech_final_state.write();
+
+            // Check if this is a duplicate of a recently forced speech_final
+            let last_fired_ms = state.timer_last_fired_ms.load(Ordering::Acquire);
+            const DUPLICATE_WINDOW_MS: usize = 500; // 500ms window to prevent duplicates
+            
+            // If timer fired very recently with the same text, ignore this real speech_final
+            if last_fired_ms > 0 
+                && now_ms.saturating_sub(last_fired_ms) < DUPLICATE_WINDOW_MS
+                && state.last_forced_text == result.transcript {
+                debug!(
+                    "Ignoring duplicate real speech_final - timer fired {}ms ago with same text",
+                    now_ms.saturating_sub(last_fired_ms)
+                );
+                return None;
+            }
+
             // Cancel any existing timer
             if let Some(handle) = state.timer_handle.take() {
                 handle.abort();
             }
 
-            // Reset state completely for next speech segment
+            // Reset state for next speech segment
             state.text_buffer.clear();
             state.last_text.clear();
+            state.last_forced_text.clear();
             state
                 .waiting_for_speech_final
                 .store(false, Ordering::Release);
+            state.timer_last_fired_ms.store(0, Ordering::Release);
 
             return Some(result);
         }
 
         // Case 2: is_final=true (but not speech_final) with non-empty text
         if result.is_final && !result.transcript.trim().is_empty() {
+            let mut state = speech_final_state.write();
+
             // Update buffer with current transcript
             state.text_buffer = result.transcript.clone();
 
-            // Cancel existing timer and restart it
+            // Cancel existing timer and restart it (always allow new timers)
             if let Some(handle) = state.timer_handle.take() {
                 handle.abort();
             }
+
+            let buffered_text = state.text_buffer.clone(); // Store the text for the timer
 
             // Start new background timer
             let speech_final_state_clone = speech_final_state.clone();
@@ -1250,9 +1286,11 @@ impl VoiceManager {
                 // Wait for timeout period (using 2300ms to match Python's 2.3 seconds)
                 tokio::time::sleep(Duration::from_millis(2300)).await;
 
-                // Check if we should force speech_final and get callback before locking
+                // Check if we should force speech_final
                 let callback_opt = {
                     let timer_state = speech_final_state_clone.read();
+                    
+                    // Only fire if we're still waiting for speech_final
                     if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
                         timer_state.user_callback.clone()
                     } else {
@@ -1261,27 +1299,33 @@ impl VoiceManager {
                 };
 
                 if let Some(callback) = callback_opt {
-                    // Now lock for write to reset state
+                    // Record when timer fired and what text was sent
+                    let fire_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as usize;
+                    
                     {
                         let mut timer_state = speech_final_state_clone.write();
-                        if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
-                            // Reset state
-                            timer_state.text_buffer.clear();
-                            timer_state.last_text.clear();
-                            timer_state
-                                .waiting_for_speech_final
-                                .store(false, Ordering::Release);
-                            timer_state.timer_handle = None;
-                        }
+                        timer_state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                        timer_state.last_forced_text = buffered_text.clone();
+                        timer_state
+                            .waiting_for_speech_final
+                            .store(false, Ordering::Release);
+                        timer_state.timer_handle = None;
                     }
 
-                    // Create forced result and call callback outside lock
+                    // Create forced result with the actual buffered text
                     let forced_result = STTResult {
-                        transcript: String::new(),
+                        transcript: buffered_text,
                         is_final: true,
                         is_speech_final: true,
                         confidence: 1.0, // High confidence for forced result
                     };
+                    debug!(
+                        "Timer firing forced speech_final with text: '{}'",
+                        forced_result.transcript
+                    );
                     callback(forced_result).await;
                 }
             });
@@ -1433,6 +1477,8 @@ mod tests {
                 timer_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
             }));
 
             // Reset state first
@@ -1444,6 +1490,8 @@ mod tests {
                     timer_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
+                    timer_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
                 };
             }
 
@@ -1477,6 +1525,8 @@ mod tests {
                 timer_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
             }));
 
             // Reset state first
@@ -1488,6 +1538,8 @@ mod tests {
                     timer_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
+                    timer_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
                 };
             }
 
@@ -1521,6 +1573,8 @@ mod tests {
                 timer_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
             }));
 
             // Reset state first
@@ -1532,6 +1586,8 @@ mod tests {
                     timer_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
+                    timer_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
                 };
             }
 
@@ -1583,6 +1639,8 @@ mod tests {
                 timer_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
             }));
 
             // Reset state first
@@ -1594,6 +1652,8 @@ mod tests {
                     timer_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
+                    timer_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
                 };
             }
 
@@ -1613,10 +1673,198 @@ mod tests {
             assert_eq!(final_result.transcript, "Direct speech final");
             assert_eq!(final_result.confidence, 0.85);
 
-            // State should remain reset since no timer was running
+            // State should be reset
             let state = speech_final_state.read();
             assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
             assert!(state.text_buffer.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_speech_final_prevention() {
+        use std::sync::atomic::AtomicUsize;
+
+        // Test Case 1: Timer fires, then real speech_final arrives - should prevent duplicate
+        {
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
+            }));
+
+            // Simulate the scenario:
+            // 1. is_final=true arrives
+            let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
+            let processed1 = VoiceManager::process_stt_result_with_timing_static(
+                result1.clone(),
+                speech_final_state.clone(),
+            )
+            .await;
+
+            assert!(processed1.is_some());
+            assert_eq!(processed1.unwrap().transcript, "Hello world");
+
+            // Verify timer was started
+            {
+                let state = speech_final_state.read();
+                assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
+                assert!(state.timer_handle.is_some());
+            }
+
+            // 2. Simulate timer firing (mark as fired)
+            {
+                let mut state = speech_final_state.write();
+                let fire_time_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as usize;
+                state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                state.last_forced_text = "Hello world".to_string();
+                state
+                    .waiting_for_speech_final
+                    .store(false, Ordering::Release);
+            }
+
+            // 3. Real speech_final arrives after timer fired
+            let result2 = STTResult::new("Hello world".to_string(), true, true, 0.95);
+            let processed2 = VoiceManager::process_stt_result_with_timing_static(
+                result2,
+                speech_final_state.clone(),
+            )
+            .await;
+
+            // Should be None (ignored) because timer already fired
+            assert!(processed2.is_none());
+        }
+
+        // Test Case 2: Multiple is_final results after timer fired should not restart timer
+        {
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
+            }));
+
+            // 1. First is_final=true
+            let result1 = STTResult::new("First".to_string(), true, false, 0.9);
+            let processed1 = VoiceManager::process_stt_result_with_timing_static(
+                result1,
+                speech_final_state.clone(),
+            )
+            .await;
+
+            assert!(processed1.is_some());
+
+            // Mark timer as fired (simulate timer expiry)
+            {
+                let mut state = speech_final_state.write();
+                let old_time_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as usize - 1000; // 1 second ago
+                state.timer_last_fired_ms.store(old_time_ms, Ordering::Release);
+                state.last_forced_text = "First".to_string();
+                state.waiting_for_speech_final.store(false, Ordering::Release);
+            }
+
+            // 2. Another is_final=true arrives after timer fired
+            let result2 = STTResult::new("Second".to_string(), true, false, 0.9);
+            let processed2 = VoiceManager::process_stt_result_with_timing_static(
+                result2,
+                speech_final_state.clone(),
+            )
+            .await;
+
+            // Should still return the result but NOT start a new timer
+            assert!(processed2.is_some());
+            assert_eq!(processed2.unwrap().transcript, "Second");
+
+            // Verify new timer WAS started (continuous speech should work)
+            {
+                let state = speech_final_state.read();
+                assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
+                assert!(state.timer_handle.is_some());
+            }
+        }
+
+        // Test Case 3: New speech segment after proper reset should work normally
+        {
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+                timer_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
+            }));
+
+            // First sequence: is_final=true starts timer
+            let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
+            let processed1 = VoiceManager::process_stt_result_with_timing_static(
+                result1,
+                speech_final_state.clone(),
+            )
+            .await;
+            assert!(processed1.is_some());
+
+            // Mark timer as fired (with recent timestamp)
+            {
+                let mut state = speech_final_state.write();
+                let fire_time_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as usize;
+                state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                state.last_forced_text = "First segment".to_string();
+                state.waiting_for_speech_final.store(false, Ordering::Release);
+            }
+
+            // Real speech_final arrives but is ignored (timer already fired)
+            let result2 = STTResult::new("First segment".to_string(), true, true, 0.9);
+            let processed2 = VoiceManager::process_stt_result_with_timing_static(
+                result2,
+                speech_final_state.clone(),
+            )
+            .await;
+            assert!(processed2.is_none()); // Ignored due to timer fired recently with same text
+
+            // Clear the state to simulate a clean new segment
+            {
+                let mut state = speech_final_state.write();
+                state.text_buffer.clear();
+                state
+                    .waiting_for_speech_final
+                    .store(false, Ordering::Release);
+                // Clear timer fired state to allow new timers
+            }
+
+            // Now a completely new segment starts (new is_final without speech_final)
+            let new_result = STTResult::new("New segment".to_string(), true, false, 0.9);
+            let processed_new = VoiceManager::process_stt_result_with_timing_static(
+                new_result,
+                speech_final_state.clone(),
+            )
+            .await;
+
+            assert!(processed_new.is_some());
+            assert_eq!(processed_new.unwrap().transcript, "New segment");
+
+            // Verify new timer started for continuous speech
+            {
+                let state = speech_final_state.read();
+                // New timer should be started for continuous speech
+                assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
+                assert!(state.timer_handle.is_some());
+            }
         }
     }
 }
