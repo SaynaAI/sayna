@@ -1,0 +1,147 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Sayna is a real-time voice processing server built in Rust that provides unified Speech-to-Text (STT) and Text-to-Speech (TTS) services through WebSocket and REST APIs. It integrates with LiveKit for real-time audio streaming and includes advanced noise filtering using DeepFilterNet.
+
+## Development Commands
+
+```bash
+# Run the development server
+cargo run
+
+# Run all tests
+cargo test
+
+# Run a specific test
+cargo test test_name
+
+# Build for release
+cargo build --release
+
+# Check code without building
+cargo check
+
+# Format code
+cargo fmt
+
+# Run linter
+cargo clippy
+
+# Build Docker image
+docker build -t sayna .
+
+# Run with environment variables
+cargo run
+```
+
+## High-Level Architecture
+
+### Project-Specific Rules and Guidelines
+
+The codebase includes detailed development rules in `.cursor/rules/`:
+- **`rust.mdc`**: Comprehensive Rust best practices including code organization, design patterns, performance optimization, security, and testing strategies
+- **`core.mdc`**: Business logic specifications for STT/TTS provider abstractions and unified API design
+- **`axum.mdc`**: Axum framework best practices for WebSocket and REST API development
+- **`livekit.mdc`**: LiveKit integration patterns and WebSocket API implementation details
+
+Always consult these rule files when implementing new features or modifying existing code to ensure consistency with established patterns.
+
+
+### Core Components
+
+1. **VoiceManager** (`src/core/voice_manager.rs`): Central coordinator for STT/TTS operations
+   - Manages provider lifecycle and switching
+   - Implements speech final timing control with fallback mechanisms
+   - Thread-safe with Arc<RwLock<>> for concurrent access
+   - Handles callbacks for STT results and audio output
+
+2. **Provider System** (`src/core/stt/` and `src/core/tts/`):
+   - Trait-based abstraction for pluggable providers
+   - Factory pattern for provider instantiation
+   - Current providers: Deepgram (STT/TTS), ElevenLabs (TTS)
+   - Providers implement `STTProvider` or `TTSProvider` traits
+
+3. **WebSocket Handler** (`src/handlers/ws.rs`):
+   - Real-time bidirectional communication endpoint
+   - Processes audio streams, configuration updates, and control messages
+   - Integrates with LiveKit for room-based audio
+   - Unified message handling for different data sources
+
+4. **LiveKit Integration** (`src/livekit/`):
+   - WebRTC audio streaming with room/participant management
+   - Audio track subscription and processing
+   - Data message forwarding between participants
+   - Handles connection lifecycle and error recovery
+
+5. **DeepFilterNet** (`src/utils/noise_filter.rs`):
+   - Advanced noise reduction with adaptive processing
+   - Thread pool for CPU-intensive operations
+   - Conservative blending to preserve speech quality
+   - Lazy static initialization for model loading
+
+### Request Flow
+
+1. **WebSocket Connection**: Client connects to `/ws` endpoint
+2. **Configuration**: Client sends config with provider selection and parameters
+3. **Audio Processing**: 
+   - Incoming audio → DeepFilterNet (optional) → STT Provider → Text results
+   - Text input → TTS Provider → Audio output → Client
+4. **LiveKit Mode**: Audio streams from LiveKit rooms processed in real-time
+
+### Key Design Patterns
+
+- **Factory Pattern**: Provider creation through factory functions
+- **Observer Pattern**: Callback registration for STT/TTS events  
+- **Singleton Pattern**: Lazy static for DeepFilterNet model
+- **Actor Pattern**: Message passing for WebSocket communication
+- **Repository Pattern**: State management with AppState
+
+## Environment Variables
+
+Required for production:
+- `DEEPGRAM_API_KEY`: Deepgram API authentication
+- `ELEVENLABS_API_KEY`: ElevenLabs API authentication
+- `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
+- `HOST`: Server bind address (default: 0.0.0.0)
+- `PORT`: Server port (default: 3001)
+
+## Testing Strategy
+
+- **Unit Tests**: Embedded in modules, run with `cargo test`
+- **Integration Tests**: In `/tests/` directory, test API endpoints and WebSocket
+- **Provider Tests**: Mock external APIs to test provider implementations
+- **Performance Tests**: Audio processing benchmarks in noise filter module
+
+When adding new features:
+1. Add unit tests in the same file using `#[cfg(test)]` module
+2. For API changes, update integration tests in `/tests/`
+3. Test error cases and edge conditions explicitly
+4. Use `#[tokio::test]` for async test functions
+
+## Critical Files and Their Purposes
+
+- `src/core/voice_manager.rs`: Central orchestration of voice processing
+- `src/handlers/ws.rs`: WebSocket message handling and routing
+- `src/livekit/livekit_manager.rs`: LiveKit room and participant management
+- `src/utils/noise_filter.rs`: DeepFilterNet integration and audio processing
+- `src/config.rs`: Server configuration and environment variable loading
+- `src/errors/mod.rs`: Centralized error types using thiserror
+
+## Adding New Providers
+
+1. Implement the `STTProvider` or `TTSProvider` trait in `src/core/stt/` or `src/core/tts/`
+2. Add factory function following existing pattern (e.g., `create_deepgram_stt`)
+3. Update `VoiceManager` to support the new provider in configuration
+4. Add provider-specific configuration to `WebSocketMessage::Config`
+5. Update tests to cover new provider functionality
+
+## Performance Considerations
+
+- DeepFilterNet processing is CPU-intensive; uses thread pool to avoid blocking
+- Audio buffers are processed in chunks to maintain low latency
+- Provider connections are reused when possible
+- WebSocket messages are processed asynchronously to prevent blocking
+- Memory is managed carefully in audio processing loops

@@ -16,8 +16,8 @@
 //!
 //! **Incoming Messages:**
 //! - `{"type": "config", "audio": true, "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
-//! - `{"type": "speak", "text": "Hello world", "flush": true}` - Synthesize speech from text (flush is optional, defaults to true)
-//! - `{"type": "clear"}` - Clear pending TTS audio and clear queue
+//! - `{"type": "speak", "text": "Hello world", "flush": true, "allow_interruption": true}` - Synthesize speech from text (flush and allow_interruption are optional, both default to true)
+//! - `{"type": "clear"}` - Clear pending TTS audio and clear queue (ignored if allow_interruption=false until audio finishes)
 //! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
 //! - **Binary messages** - Raw audio data for transcription
 //!
@@ -148,11 +148,12 @@
 //! };
 //!
 //! // Send text for synthesis
-//! function speak(text, flush = true) {
+//! function speak(text, flush = true, allowInterruption = true) {
 //!   const message = {
 //!     type: 'speak',
 //!     text: text,
-//!     flush: flush  // Set to false to queue multiple messages
+//!     flush: flush,  // Set to false to queue multiple messages
+//!     allow_interruption: allowInterruption  // Set to false to prevent interruption during playback
 //!   };
 //!   ws.send(JSON.stringify(message));
 //! }
@@ -201,6 +202,12 @@
 //!   speak('Hello, this is the first message', false);  // Queue without flush
 //!   speak('This is the second message', false);        // Queue without flush
 //!   speak('This is the final message', true);          // Send and flush all
+//!   
+//!   // Send non-interruptible message (cannot be interrupted by STT or clear)
+//!   speak('Important announcement that must not be interrupted', true, false);
+//!   
+//!   // Clear command will be ignored during non-interruptible audio playback
+//!   clearTTS(); // Will only work if allow_interruption=true or audio has finished
 //!   
 //!   // Send custom messages through LiveKit
 //!   sendMessage('Hello everyone in the room!', 'user');        // Send to default topic
@@ -279,9 +286,19 @@
 //!                         let speak_msg = json!({
 //!                             "type": "speak",
 //!                             "text": "Hello from Rust!",
-//!                             "flush": true
+//!                             "flush": true,
+//!                             "allow_interruption": true
 //!                         });
 //!                         write.send(Message::Text(speak_msg.to_string().into())).await?;
+//!                         
+//!                         // Send non-interruptible speak command
+//!                         let non_interruptible_msg = json!({
+//!                             "type": "speak",
+//!                             "text": "This important message cannot be interrupted",
+//!                             "flush": true,
+//!                             "allow_interruption": false
+//!                         });
+//!                         write.send(Message::Text(non_interruptible_msg.to_string().into())).await?;
 //!                         
 //!                         // Send binary audio data
 //!                         let audio_data = vec![0u8; 1024]; // Mock audio data
@@ -370,6 +387,11 @@ use crate::{
 
 /// Default value for audio enabled flag (true)
 fn default_audio_enabled() -> Option<bool> {
+    Some(true)
+}
+
+/// Default value for allow_interruption flag (true)
+fn default_allow_interruption() -> Option<bool> {
     Some(true)
 }
 
@@ -520,6 +542,11 @@ pub enum IncomingMessage {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         flush: Option<bool>,
+        #[serde(
+            default = "default_allow_interruption",
+            skip_serializing_if = "Option::is_none"
+        )]
+        allow_interruption: Option<bool>,
     },
     #[serde(rename = "clear")]
     Clear,
@@ -800,9 +827,11 @@ async fn handle_incoming_message(
             )
             .await
         }
-        IncomingMessage::Speak { text, flush } => {
-            handle_speak_message(text, flush, state, message_tx).await
-        }
+        IncomingMessage::Speak {
+            text,
+            flush,
+            allow_interruption,
+        } => handle_speak_message(text, flush, allow_interruption, state, message_tx).await,
         IncomingMessage::Clear => handle_clear_message(state, message_tx).await,
         IncomingMessage::SendMessage {
             message,
@@ -1156,6 +1185,28 @@ async fn handle_config_message(
                 connection_state.livekit_client = Some(livekit_client_arc.clone());
             }
 
+            // Register audio clear callback with VoiceManager if both are available
+            if let Some(voice_manager_ref) = &voice_manager {
+                let livekit_client_clone = livekit_client_arc.clone();
+                
+                if let Err(e) = voice_manager_ref
+                    .on_audio_clear(move || {
+                        let livekit = livekit_client_clone.clone();
+                        Box::pin(async move {
+                            let mut client = livekit.lock().await;
+                            if let Err(e) = client.clear_audio().await {
+                                warn!("Failed to clear LiveKit audio buffer: {:?}", e);
+                            } else {
+                                debug!("Cleared LiveKit audio buffer during interruption");
+                            }
+                        })
+                    })
+                    .await
+                {
+                    warn!("Failed to register audio clear callback: {:?}", e);
+                }
+            }
+
             info!("LiveKit client connected and ready");
             Some(livekit_client_arc)
         } else {
@@ -1292,15 +1343,20 @@ async fn handle_audio_message(
 async fn handle_speak_message(
     text: String,
     flush: Option<bool>,
+    allow_interruption: Option<bool>,
     state: &Arc<Mutex<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
     // Default flush to true for backward compatibility
     let should_flush = flush.unwrap_or(true);
+    // Default allow_interruption to true for backward compatibility
+    let allow_interruption = allow_interruption.unwrap_or(true);
+
     debug!(
-        "Processing speak command: {} chars (flush: {})",
+        "Processing speak command: {} chars (flush: {}, allow_interruption: {})",
         text.len(),
-        should_flush
+        should_flush,
+        allow_interruption
     );
 
     let voice_manager = {
@@ -1332,10 +1388,16 @@ async fn handle_speak_message(
         }
     };
 
-    info!("Speaking text (flush: {}): {}", should_flush, text);
+    info!(
+        "Speaking text (flush: {}, allow_interruption: {}): {}",
+        should_flush, allow_interruption, text
+    );
 
-    // Send text to TTS provider with flush parameter
-    if let Err(e) = voice_manager.speak(&text, should_flush).await {
+    // Send text to TTS provider with flush and allow_interruption parameters
+    if let Err(e) = voice_manager
+        .speak_with_interruption(&text, should_flush, allow_interruption)
+        .await
+    {
         error!("Failed to synthesize speech: {}", e);
         let _ = message_tx
             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -1344,9 +1406,10 @@ async fn handle_speak_message(
             .await;
     } else {
         debug!(
-            "Speech synthesis started for: {} chars (flush: {})",
+            "Speech synthesis started for: {} chars (flush: {}, allow_interruption: {})",
             text.len(),
-            should_flush
+            should_flush,
+            allow_interruption
         );
     }
 
@@ -1386,7 +1449,21 @@ async fn handle_clear_message(
         (vm, livekit)
     };
 
-    // Clear TTS provider (only if audio is enabled)
+    // Check if we're in a non-interruptible state
+    let is_blocked = if let Some(ref vm) = voice_manager {
+        vm.is_interruption_blocked().await
+    } else {
+        false
+    };
+
+    if is_blocked {
+        debug!("Clear command ignored - currently in non-interruptible audio playback");
+        return true;
+    }
+
+    // Clear TTS provider and audio buffers (only if audio is enabled)
+    // Note: The VoiceManager's clear_tts() will automatically call the audio_clear_callback
+    // which clears the LiveKit audio buffer, so we don't need to do it separately
     if let Some(vm) = voice_manager {
         if let Err(e) = vm.clear_tts().await {
             error!("Failed to clear TTS provider: {}", e);
@@ -1395,26 +1472,23 @@ async fn handle_clear_message(
                     message: format!("Failed to clear TTS provider: {e}"),
                 }))
                 .await;
+        } else {
+            debug!("Successfully cleared TTS and audio buffers");
         }
     } else {
         debug!("Audio processing disabled - skipping TTS provider clear");
-    }
-
-    // Clear LiveKit audio buffer if available
-    if let Some(livekit_manager) = livekit_client {
-        match livekit_manager.lock().await.clear_audio().await {
-            Ok(()) => {
-                debug!("Successfully cleared LiveKit audio buffer");
-            }
-            Err(e) => {
-                error!("Failed to clear LiveKit audio buffer: {}", e);
-                // Note: We don't return an error to the client for LiveKit clear failures
-                // since the main TTS clearing might have succeeded
-                warn!("LiveKit audio buffer clear failed, but continuing with clear command");
+        
+        // If audio is disabled but LiveKit is configured, still clear LiveKit audio
+        if let Some(livekit_manager) = livekit_client {
+            match livekit_manager.lock().await.clear_audio().await {
+                Ok(()) => {
+                    debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
+                }
+                Err(e) => {
+                    warn!("Failed to clear LiveKit audio buffer: {}", e);
+                }
             }
         }
-    } else {
-        debug!("No LiveKit client available - skipping LiveKit audio buffer clear");
     }
 
     debug!("Clear command completed");
@@ -1551,6 +1625,7 @@ mod tests {
         let speak_msg = IncomingMessage::Speak {
             text: "Hello world".to_string(),
             flush: Some(true),
+            allow_interruption: Some(true),
         };
 
         let json = serde_json::to_string(&speak_msg).unwrap();
@@ -1562,6 +1637,7 @@ mod tests {
         let speak_msg_no_flush = IncomingMessage::Speak {
             text: "Hello world".to_string(),
             flush: None,
+            allow_interruption: None,
         };
 
         let json = serde_json::to_string(&speak_msg_no_flush).unwrap();
@@ -1573,9 +1649,44 @@ mod tests {
         // Test parsing message without flush field (backward compatibility)
         let json_without_flush = r#"{"type":"speak","text":"Hello world"}"#;
         let parsed: IncomingMessage = serde_json::from_str(json_without_flush).unwrap();
-        if let IncomingMessage::Speak { text, flush } = parsed {
+        if let IncomingMessage::Speak {
+            text,
+            flush,
+            allow_interruption,
+        } = parsed
+        {
             assert_eq!(text, "Hello world");
             assert_eq!(flush, None);
+            assert_eq!(allow_interruption, Some(true)); // Defaults to true
+        } else {
+            panic!("Expected Speak message");
+        }
+
+        // Test speak message with allow_interruption=false
+        let speak_msg_no_interruption = IncomingMessage::Speak {
+            text: "Do not interrupt me".to_string(),
+            flush: Some(true),
+            allow_interruption: Some(false),
+        };
+
+        let json = serde_json::to_string(&speak_msg_no_interruption).unwrap();
+        assert!(json.contains("\"type\":\"speak\""));
+        assert!(json.contains("Do not interrupt me"));
+        assert!(json.contains("\"allow_interruption\":false"));
+
+        // Test parsing message with allow_interruption field
+        let json_with_interruption =
+            r#"{"type":"speak","text":"Hello","allow_interruption":false}"#;
+        let parsed: IncomingMessage = serde_json::from_str(json_with_interruption).unwrap();
+        if let IncomingMessage::Speak {
+            text,
+            flush,
+            allow_interruption,
+        } = parsed
+        {
+            assert_eq!(text, "Hello");
+            assert_eq!(flush, None);
+            assert_eq!(allow_interruption, Some(false));
         } else {
             panic!("Expected Speak message");
         }

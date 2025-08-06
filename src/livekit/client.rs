@@ -600,9 +600,17 @@ impl LiveKitClient {
 
     /// Clear all pending buffered audio from the published track
     ///
-    /// This method clears any audio data that has been queued for publishing but hasn't
-    /// been transmitted yet. This is useful for stopping TTS playback immediately when
-    /// a clear command is received.
+    /// This method clears the local audio buffer that hasn't been sent to WebRTC yet.
+    /// 
+    /// Important limitations:
+    /// - Audio already sent to WebRTC (every 10ms) cannot be recalled
+    /// - There may be 10-50ms of audio that continues playing
+    /// - This is the same limitation that Python's clear_queue() has
+    ///
+    /// For true audio interruption in voice agents, consider:
+    /// - Using shorter audio chunks for TTS
+    /// - Implementing streaming TTS that can be stopped mid-stream
+    /// - Managing interruptions at the application level
     ///
     /// # Returns
     /// * `Ok(())` - Audio buffer cleared successfully
@@ -640,12 +648,14 @@ impl LiveKitClient {
             ));
         }
 
-        // Check if we have an audio source available
-        if let Some(_audio_source) = &self.audio_source {
-            _audio_source.clear_buffer();
+        // Clear the local buffer in the NativeAudioSource
+        // This is equivalent to Python SDK's clear_queue() method
+        // It only clears audio that hasn't been sent to WebRTC yet
+        if let Some(audio_source) = &self.audio_source {
+            audio_source.clear_buffer();
+            debug!("Cleared local audio buffer");
         } else {
             warn!("No audio source available - nothing to clear");
-            // Not an error condition, just nothing to do
         }
 
         Ok(())
