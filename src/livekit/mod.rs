@@ -28,6 +28,7 @@
 //!         token: "your-jwt-token".to_string(),
 //!         sample_rate: 24000,
 //!         channels: 1,
+//!         enable_noise_filter: true,
 //!     };
 //!
 //!     // Create and initialize manager
@@ -99,10 +100,12 @@ mod tests {
             token: "test-token".to_string(),
             sample_rate: 24000,
             channels: 1,
+            enable_noise_filter: true,
         };
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
+        assert_eq!(config.enable_noise_filter, true);
     }
 
     #[test]

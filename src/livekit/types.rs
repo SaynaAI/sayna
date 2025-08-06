@@ -9,6 +9,9 @@ pub struct LiveKitConfig {
     pub sample_rate: u32,
     /// Number of audio channels for publishing (typically 1 for mono)
     pub channels: u16,
+    /// Enable noise filtering on incoming audio (default: true for better quality)
+    /// Set to false only if you need lower latency
+    pub enable_noise_filter: bool,
 }
 
 /// LiveKit connection status
