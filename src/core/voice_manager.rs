@@ -248,9 +248,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
+use tracing::debug;
 
 use crate::core::{
     create_stt_provider, create_tts_provider,
@@ -299,6 +300,10 @@ pub type TTSAudioCallback =
 pub type TTSErrorCallback =
     Arc<dyn Fn(TTSError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// Callback type for audio clear operations (e.g., LiveKit audio buffer clearing)
+pub type AudioClearCallback =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Internal state for managing speech final timing
 struct SpeechFinalState {
     /// Combined text buffer from STT results
@@ -311,6 +316,22 @@ struct SpeechFinalState {
     waiting_for_speech_final: bool,
     /// User callback to call when timer expires
     user_callback: Option<STTCallback>,
+}
+
+/// State for managing interruption control
+struct InterruptionState {
+    /// Whether interruptions are currently allowed
+    allow_interruption: bool,
+    /// Time when the current non-interruptible audio will finish playing
+    non_interruptible_until: Option<Instant>,
+    /// Sample rate of the current TTS audio
+    current_sample_rate: u32,
+    /// Accumulated audio duration for the current non-interruptible segment
+    accumulated_duration: f32,
+    /// Start time of the non-interruptible segment
+    start_time: Option<Instant>,
+    /// Whether we're currently clearing audio (blocks audio callbacks)
+    is_clearing: bool,
 }
 
 /// Internal TTS callback implementation for the VoiceManager
@@ -357,9 +378,13 @@ pub struct VoiceManager {
     stt_callback: Arc<RwLock<Option<STTCallback>>>,
     tts_audio_callback: Arc<RwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<RwLock<Option<TTSErrorCallback>>>,
+    audio_clear_callback: Arc<RwLock<Option<AudioClearCallback>>>,
 
     // Speech final timing control
     speech_final_state: Arc<RwLock<SpeechFinalState>>,
+
+    // Interruption control
+    interruption_state: Arc<Mutex<InterruptionState>>,
 
     // Configuration
     config: VoiceManagerConfig,
@@ -410,12 +435,21 @@ impl VoiceManager {
             stt_callback: Arc::new(RwLock::new(None)),
             tts_audio_callback: Arc::new(RwLock::new(None)),
             tts_error_callback: Arc::new(RwLock::new(None)),
+            audio_clear_callback: Arc::new(RwLock::new(None)),
             speech_final_state: Arc::new(RwLock::new(SpeechFinalState {
                 text_buffer: String::new(),
                 last_text: String::new(),
                 timer_handle: None,
                 waiting_for_speech_final: false,
                 user_callback: None,
+            })),
+            interruption_state: Arc::new(Mutex::new(InterruptionState {
+                allow_interruption: true,
+                non_interruptible_until: None,
+                current_sample_rate: 24000, // Default sample rate
+                accumulated_duration: 0.0,
+                start_time: None,
+                is_clearing: false,
             })),
             config,
         })
@@ -640,13 +674,127 @@ impl VoiceManager {
         Ok(())
     }
 
-    /// Clear any queued text from the TTS provider
+    /// Send text to the TTS provider with interruption control
+    ///
+    /// # Arguments
+    /// * `text` - Text to synthesize
+    /// * `flush` - Whether to immediately flush and start processing the text
+    /// * `allow_interruption` - Whether this audio can be interrupted by STT or clear commands
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<()>` - Success or error
+    pub async fn speak_with_interruption(
+        &self,
+        text: &str,
+        flush: bool,
+        allow_interruption: bool,
+    ) -> VoiceManagerResult<()> {
+        // Update interruption state
+        if !allow_interruption {
+            let mut interruption_state = self.interruption_state.lock().await;
+            interruption_state.allow_interruption = false;
+            interruption_state.is_clearing = false; // Reset clearing flag when starting new speech
+
+            // Update sample rate from TTS config
+            if let Some(sample_rate) = self.config.tts_config.sample_rate {
+                interruption_state.current_sample_rate = sample_rate;
+            }
+
+            // Reset accumulated duration and set start time
+            interruption_state.accumulated_duration = 0.0;
+            interruption_state.start_time = Some(Instant::now());
+
+            // Calculate audio duration based on text length and sample rate
+            // Estimate: ~150 words per minute average speech rate
+            // This is a rough estimate - actual duration will be calculated from audio data
+            let word_count = text.split_whitespace().count() as f32;
+            let estimated_duration_seconds = (word_count / 150.0) * 60.0;
+            interruption_state.non_interruptible_until =
+                Some(Instant::now() + Duration::from_secs_f32(estimated_duration_seconds));
+        } else {
+            let mut interruption_state = self.interruption_state.lock().await;
+            interruption_state.allow_interruption = true;
+            interruption_state.non_interruptible_until = None;
+            interruption_state.accumulated_duration = 0.0;
+            interruption_state.start_time = None;
+            interruption_state.is_clearing = false; // Reset clearing flag when starting new speech
+        }
+
+        // Send text to TTS provider
+        {
+            let mut tts = self.tts.write().await;
+            tts.speak(text, flush)
+                .await
+                .map_err(VoiceManagerError::TTSError)?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if interruption is currently blocked
+    ///
+    /// # Returns
+    /// * `bool` - True if interruption is currently blocked (allow_interruption=false and audio still playing)
+    pub async fn is_interruption_blocked(&self) -> bool {
+        let interruption_state = self.interruption_state.lock().await;
+        if !interruption_state.allow_interruption {
+            if let Some(until) = interruption_state.non_interruptible_until {
+                if Instant::now() < until {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Clear any queued text from the TTS provider and audio buffers
+    ///
+    /// This method clears both the TTS text queue and any audio buffers
+    /// (e.g., LiveKit audio source) if an audio clear callback is registered.
+    /// It also blocks any incoming audio callbacks during the clearing process
+    /// to prevent audio chunks from being forwarded after clear is initiated.
     ///
     /// # Returns
     /// * `VoiceManagerResult<()>` - Success or error
     pub async fn clear_tts(&self) -> VoiceManagerResult<()> {
+        // Check if we're allowed to clear
+        if self.is_interruption_blocked().await {
+            // Still within non-interruptible period, ignore clear
+            return Ok(());
+        }
+
+        // Set clearing flag to immediately block audio callbacks
+        {
+            let mut interruption_state = self.interruption_state.lock().await;
+            interruption_state.is_clearing = true;
+            debug!("Started audio clearing process - blocking audio callbacks");
+        }
+
+        // Clear TTS text queue
         let mut tts = self.tts.write().await;
         tts.clear().await.map_err(VoiceManagerError::TTSError)?;
+        drop(tts); // Release the lock
+
+        // Call audio clear callback to clear any audio buffers (e.g., LiveKit)
+        if let Some(callback) = self.audio_clear_callback.read().await.as_ref() {
+            callback().await;
+        }
+
+        // Wait for any pending audio chunks to be discarded
+        // This ensures that any audio already in flight gets blocked
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Reset interruption state and clear the clearing flag
+        {
+            let mut interruption_state = self.interruption_state.lock().await;
+            interruption_state.allow_interruption = true;
+            interruption_state.non_interruptible_until = None;
+            interruption_state.accumulated_duration = 0.0;
+            interruption_state.start_time = None;
+            interruption_state.is_clearing = false;
+            debug!("Completed audio clearing process - audio callbacks resumed");
+        }
+
         Ok(())
     }
 
@@ -706,14 +854,29 @@ impl VoiceManager {
             state.user_callback = Some(callback.clone());
         }
 
-        // Create wrapper callback that processes timing before forwarding to user
+        // Create wrapper callback that processes timing and interruption control before forwarding to user
         let speech_final_state_clone = self.speech_final_state.clone();
+        let interruption_state_clone = self.interruption_state.clone();
 
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
             let callback = callback.clone();
             let speech_final_state = speech_final_state_clone.clone();
+            let interruption_state = interruption_state_clone.clone();
 
             Box::pin(async move {
+                // Check if we should ignore STT results due to non-interruptible audio
+                {
+                    let int_state = interruption_state.lock().await;
+                    if !int_state.allow_interruption {
+                        if let Some(until) = int_state.non_interruptible_until {
+                            if Instant::now() < until {
+                                // Still within non-interruptible period, ignore STT result
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 // Process result with timing control inline
                 let processed_result =
                     Self::process_stt_result_with_timing_static(result, speech_final_state).await;
@@ -769,8 +932,61 @@ impl VoiceManager {
     where
         F: Fn(AudioData) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
+        let user_callback = Arc::new(callback);
+        let interruption_state_clone = self.interruption_state.clone();
+
+        // Create wrapper that checks clearing state and updates interruption timing
+        let wrapper_callback = Arc::new(move |audio_data: AudioData| {
+            let user_cb = user_callback.clone();
+            let int_state = interruption_state_clone.clone();
+
+            Box::pin(async move {
+                // Check if we're in clearing state - if so, discard the audio
+                {
+                    let state = int_state.lock().await;
+                    if state.is_clearing {
+                        debug!(
+                            "Discarding audio chunk during clearing process: {} bytes",
+                            audio_data.data.len()
+                        );
+                        return; // Don't forward audio to user callback
+                    }
+                }
+
+                // Update non-interruptible timing based on actual audio data
+                {
+                    let mut state = int_state.lock().await;
+                    if !state.allow_interruption {
+                        // Calculate actual audio duration from audio data
+                        // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
+                        // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
+                        let bytes_per_sample = 2;
+                        let channels = 1;
+                        let sample_rate = state.current_sample_rate;
+
+                        let chunk_duration_seconds = audio_data.data.len() as f32
+                            / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
+
+                        // Accumulate the duration
+                        state.accumulated_duration += chunk_duration_seconds;
+
+                        // Update the non-interruptible period based on accumulated audio duration
+                        // Use the start time to ensure consistent timing
+                        if let Some(start_time) = state.start_time {
+                            state.non_interruptible_until = Some(
+                                start_time + Duration::from_secs_f32(state.accumulated_duration),
+                            );
+                        }
+                    }
+                }
+
+                // Call the user's callback (only if not clearing)
+                user_cb(audio_data).await;
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
+
         let mut tts_audio_callback = self.tts_audio_callback.write().await;
-        *tts_audio_callback = Some(Arc::new(callback));
+        *tts_audio_callback = Some(wrapper_callback.clone());
 
         // Update the internal TTS callback
         {
@@ -813,6 +1029,47 @@ impl VoiceManager {
                 .map_err(VoiceManagerError::TTSError)?;
         }
 
+        Ok(())
+    }
+
+    /// Register a callback for audio clear operations
+    ///
+    /// This callback is called when the TTS queue is cleared and any audio
+    /// buffers (e.g., LiveKit audio source) need to be cleared as well.
+    ///
+    /// # Arguments
+    /// * `callback` - Closure that returns a Future for clearing audio
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<()>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = VoiceManagerConfig {
+    /// #     stt_config: STTConfig::default(),
+    /// #     tts_config: TTSConfig::default(),
+    /// # };
+    /// # let voice_manager = VoiceManager::new(config)?;
+    /// voice_manager.on_audio_clear(|| {
+    ///     Box::pin(async move {
+    ///         // Clear LiveKit audio buffer or other audio sources
+    ///         println!("Clearing audio buffers");
+    ///     })
+    /// }).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn on_audio_clear<F>(&self, callback: F) -> VoiceManagerResult<()>
+    where
+        F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+    {
+        let mut audio_clear_callback = self.audio_clear_callback.write().await;
+        *audio_clear_callback = Some(Arc::new(callback));
         Ok(())
     }
 
@@ -913,8 +1170,8 @@ impl VoiceManager {
             let speech_final_state_clone = speech_final_state.clone();
 
             let timer_handle = tokio::spawn(async move {
-                // Wait for timeout period (using 1200ms to match Python's 1.2 seconds)
-                tokio::time::sleep(Duration::from_millis(1200)).await;
+                // Wait for timeout period (using 2300ms to match Python's 2.3 seconds)
+                tokio::time::sleep(Duration::from_millis(2300)).await;
 
                 // Force speech_final after timeout
                 let mut timer_state = speech_final_state_clone.write().await;
@@ -922,7 +1179,7 @@ impl VoiceManager {
                 if timer_state.waiting_for_speech_final {
                     // Create forced speech final result with buffered text
                     let forced_result = STTResult {
-                        transcript: timer_state.text_buffer.clone(),
+                        transcript: String::new(),
                         is_final: true,
                         is_speech_final: true,
                         confidence: 1.0, // High confidence for forced result
