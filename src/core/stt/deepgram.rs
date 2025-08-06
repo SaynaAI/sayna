@@ -63,12 +63,12 @@ impl Default for DeepgramSTTConfig {
     fn default() -> Self {
         Self {
             base: STTConfig::default(),
-            punctuation: false,
+            punctuation: true,
             diarize: false,
             interim_results: true,
             filler_words: false,
             profanity_filter: false,
-            smart_format: false,
+            smart_format: true,
             keywords: Vec::new(),
             redact: Vec::new(),
             vad_events: true,
