@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -7,12 +8,16 @@ use super::types::{ConnectionStatus, LiveKitConfig, ParticipantInfo, RoomInfo};
 use crate::AppError;
 
 /// High-level manager for LiveKit connections
+///
+/// Optimized for low latency with atomic operations and minimal locking
 pub struct LiveKitManager {
     client: Arc<Mutex<Option<LiveKitClient>>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
     audio_sender: Option<mpsc::UnboundedSender<Vec<u8>>>,
     participants: Arc<RwLock<Vec<ParticipantInfo>>>,
     room_info: Arc<RwLock<Option<RoomInfo>>>,
+    // Use atomic bool for fast connection status checks
+    is_connected_atomic: Arc<AtomicBool>,
 }
 
 impl LiveKitManager {
@@ -24,6 +29,7 @@ impl LiveKitManager {
             audio_sender: None,
             participants: Arc::new(RwLock::new(Vec::new())),
             room_info: Arc::new(RwLock::new(None)),
+            is_connected_atomic: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -52,6 +58,7 @@ impl LiveKitManager {
         match client.connect().await {
             Ok(()) => {
                 *self.connection_status.write().await = ConnectionStatus::Connected;
+                self.is_connected_atomic.store(true, Ordering::Release);
                 *self.client.lock().await = Some(client);
 
                 info!("LiveKit manager initialized successfully");
@@ -59,6 +66,7 @@ impl LiveKitManager {
             }
             Err(e) => {
                 *self.connection_status.write().await = ConnectionStatus::Failed;
+                self.is_connected_atomic.store(false, Ordering::Release);
                 error!("Failed to initialize LiveKit manager: {:?}", e);
                 Err(e)
             }
@@ -89,7 +97,16 @@ impl LiveKitManager {
     }
 
     /// Check if connected to LiveKit room
+    ///
+    /// Uses atomic operations for fast lock-free checking
+    #[inline]
     pub async fn is_connected(&self) -> bool {
+        // Fast path: check atomic bool first
+        if !self.is_connected_atomic.load(Ordering::Acquire) {
+            return false;
+        }
+
+        // Slow path: verify with actual client (only if atomic says connected)
         if let Some(client) = self.client.lock().await.as_ref() {
             client.is_connected().await
         } else {
@@ -111,6 +128,8 @@ impl LiveKitManager {
     pub async fn disconnect(&mut self) -> Result<(), AppError> {
         info!("Disconnecting from LiveKit room");
 
+        // Update atomic flag first for fast path
+        self.is_connected_atomic.store(false, Ordering::Release);
         *self.connection_status.write().await = ConnectionStatus::Disconnected;
 
         if let Some(mut client) = self.client.lock().await.take() {
@@ -158,6 +177,7 @@ impl LiveKitManager {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// };
     ///
     /// let mut manager = LiveKitManager::new();
@@ -169,27 +189,30 @@ impl LiveKitManager {
     /// # }
     /// ```
     pub async fn clear_audio(&mut self) -> Result<(), AppError> {
-        info!("Clearing pending buffered audio from LiveKit track");
+        debug!("Clearing pending buffered audio from LiveKit track");
 
-        if let Some(mut client) = self.client.lock().await.take() {
+        // Fast path: check if connected using atomic
+        if !self.is_connected_atomic.load(Ordering::Acquire) {
+            debug!("Not connected to LiveKit, skipping clear audio");
+            return Ok(());
+        }
+
+        // Use as_mut() instead of take() to avoid unnecessary moves
+        let mut client_guard = self.client.lock().await;
+        if let Some(client) = client_guard.as_mut() {
             // Clear the audio buffer on the client
             match client.clear_audio().await {
                 Ok(()) => {
-                    info!("Successfully cleared LiveKit audio buffer");
-                    // Put the client back
-                    *self.client.lock().await = Some(client);
+                    debug!("Successfully cleared LiveKit audio buffer");
                     Ok(())
                 }
                 Err(e) => {
                     error!("Failed to clear LiveKit audio buffer: {:?}", e);
-                    // Put the client back even on error
-                    *self.client.lock().await = Some(client);
                     Err(e)
                 }
             }
         } else {
-            warn!("No active LiveKit client to clear audio buffer from");
-            // Not necessarily an error - might just not be connected yet
+            debug!("No active LiveKit client to clear audio buffer from");
             Ok(())
         }
     }
@@ -257,6 +280,7 @@ mod tests {
             token: "mock-jwt-token".to_string(),
             sample_rate: 24000,
             channels: 1,
+            enable_noise_filter: true,
         };
 
         // Try to initialize (this will fail with mock config, but we can still test the clear_audio logic)
@@ -298,6 +322,7 @@ mod tests {
             token: "mock-jwt-token".to_string(),
             sample_rate: 24000,
             channels: 1,
+            enable_noise_filter: true,
         };
 
         // Try initialization (will fail with mock config)

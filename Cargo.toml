@@ -35,6 +35,9 @@ dotenvy = "0.15"
 # Error handling
 thiserror = "2.0.12"
 
+# Performance optimizations
+parking_lot = "0.12"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"

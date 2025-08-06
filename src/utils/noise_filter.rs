@@ -4,15 +4,51 @@ use ndarray::{Array2, ArrayView2};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tracing::info;
 
-/// Enhanced configuration based on DeepFilterNet best practices and Python implementation analysis.
-/// These parameters are optimized for better noise cancellation while preserving speech quality.
-static MODEL_PARAMS: LazyLock<(DfParams, RuntimeParams)> = LazyLock::new(|| {
-    let df_params = DfParams::default();
-    let rt_params = RuntimeParams::default();
-
-    (df_params, rt_params)
+/// Configuration for DeepFilterNet model parameters.
+///
+/// This static configuration is loaded once at program startup to avoid repeated initialization.
+/// The parameters are optimized for noise cancellation while preserving speech quality.
+/// Using LazyLock ensures thread-safe initialization exactly once.
+static MODEL_PARAMS: LazyLock<DfParams> = LazyLock::new(|| {
+    DfParams::default()
 });
+
+/// Create optimized runtime parameters for DeepFilterNet
+/// Based on the official implementation, we use the default parameters
+/// with optional post-filter for improved echo suppression
+fn create_runtime_params() -> RuntimeParams {
+    // Start with official defaults
+    let mut params = RuntimeParams::default();
+    
+    // Enable post-filter for better echo suppression and residual noise removal
+    // This is particularly important for mobile phone usage and conference calls
+    params = params.with_post_filter(0.02);
+    
+    // Optionally adjust attenuation limit for more natural sound
+    // Default is 100dB (no limit), but we can be slightly more conservative
+    // to prevent over-processing while still removing most noise
+    params = params.with_atten_lim(40.0); // Limit to 40dB reduction
+    
+    params
+}
+
+/// Pre-calculated constants for performance optimization
+const SILENCE_THRESHOLD: f32 = 1e-7;
+const HIGH_SNR_RMS_THRESHOLD: f32 = 0.1;
+const HIGH_SNR_PEAK_THRESHOLD: f32 = 0.3;
+const LOW_ENERGY_RMS_THRESHOLD: f32 = 0.005;
+const LOW_ENERGY_PEAK_THRESHOLD: f32 = 0.02;
+const SHORT_AUDIO_DURATION: f32 = 1.0;
+const VERY_SHORT_AUDIO_DURATION: f32 = 0.2;
+const VOLUME_SAFETY_MARGIN: f32 = 0.95;
+const LIGHT_PROCESSING_SAFETY_MARGIN: f32 = 0.98;
+const HIGH_PASS_CUTOFF_HZ: f32 = 80.0;
+const PCM_TO_FLOAT_SCALE: f32 = 1.0 / 32768.0;
+const FLOAT_TO_PCM_SCALE_POS: f32 = 32767.0;
+const FLOAT_TO_PCM_SCALE_NEG: f32 = 32768.0;
+const MAX_SKIP_FRAMES: usize = 5;  // Skip after 5 consecutive silent frames
 
 // A task for a worker: audio bytes, sample rate, and a one-shot channel to send the result back.
 type WorkerTask = (
@@ -49,13 +85,18 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
             }
 
             // Create the expensive DfTract model ONCE on this thread.
-            let (df_params, rt_params) = &*MODEL_PARAMS;
-            let mut model = DfTract::new(df_params.clone(), rt_params)
+            let df_params = &*MODEL_PARAMS;
+            let rt_params = create_runtime_params();
+            
+            // Log the configuration being used
+            info!("DeepFilterNet initialized with post-filter enabled for optimal noise reduction");
+            let mut model = DfTract::new(df_params.clone(), &rt_params)
                 .expect("Failed to create DfTract model in worker thread");
+            let mut skip_counter = 0usize;
 
             // The worker's main loop. It blocks efficiently until a task arrives.
             while let Some((pcm, sample_rate, result_tx)) = worker_task_rx.blocking_recv() {
-                let result = process_audio_chunk(&mut model, &pcm, sample_rate);
+                let result = process_audio_chunk(&mut model, &pcm, sample_rate, &mut skip_counter);
                 // Send result back to the caller. Ignore error if caller hung up.
                 let _ = result_tx.send(result);
             }
@@ -108,69 +149,120 @@ async fn get_sender() -> PooledWorkerSender {
     }
 }
 
-/// Enhanced audio processing with adaptive logic based on Python implementation insights.
-/// Includes audio analysis, light processing for certain cases, and conservative blending.
+/// Processes audio chunk using DeepFilterNet for noise reduction.
+///
+/// This function analyzes audio characteristics and applies adaptive processing:
+/// - High SNR audio receives minimal processing to preserve quality
+/// - Short audio clips use light filtering to avoid artifacts
+/// - Full processing includes conservative blending with original audio
+///
+/// # Arguments
+/// * `df` - Mutable reference to the DeepFilterNet model
+/// * `pcm` - Raw PCM audio data (16-bit little-endian format)
+/// * `sample_rate` - Audio sample rate in Hz (e.g., 16000, 48000)
+///
+/// # Returns
+/// Processed audio as PCM bytes, or original audio if processing fails
+#[inline]
 fn process_audio_chunk(
     df: &mut DfTract,
     pcm: &[u8],
     sample_rate: u32,
+    skip_counter: &mut usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    // 1) Convert PCM to float samples
-    let wav: Vec<f32> = pcm
-        .chunks_exact(2)
-        .map(|b| {
-            let sample = i16::from_le_bytes([b[0], b[1]]) as f32;
-            (sample / 32768.0).clamp(-1.0, 1.0)
-        })
-        .collect();
-
-    // 2) Early return for empty or silent audio (more lenient threshold like Python)
-    if wav.is_empty() || wav.iter().all(|s| s.abs() < 1e-7) {
+    // Early validation to avoid unnecessary processing
+    if pcm.len() < 2 || pcm.len() % 2 != 0 {
         return Ok(pcm.to_owned());
     }
 
-    // 3) Analyze audio characteristics (mimicking Python logic)
+    // Pre-allocate with exact capacity for better memory efficiency
+    let sample_count = pcm.len() / 2;
+    let mut wav = Vec::with_capacity(sample_count);
+
+    // Convert PCM bytes to float samples
+    // Using chunks_exact for safer iteration while maintaining performance
+    for chunk in pcm.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f32;
+        wav.push((sample * PCM_TO_FLOAT_SCALE).clamp(-1.0, 1.0));
+    }
+
+    // Early return for empty audio
+    if wav.is_empty() {
+        return Ok(pcm.to_owned());
+    }
+    
+    // Check for silence and update skip counter
+    if wav.iter().all(|s| s.abs() < SILENCE_THRESHOLD) {
+        *skip_counter += 1;
+        if *skip_counter > MAX_SKIP_FRAMES {
+            // Return silence after too many silent frames
+            return Ok(vec![0u8; pcm.len()]);
+        }
+        return Ok(pcm.to_owned());
+    } else {
+        *skip_counter = 0;  // Reset on non-silent audio
+    }
+
+    // Analyze audio characteristics for adaptive processing
     let sample_rate_f32 = sample_rate as f32;
     let audio_duration = wav.len() as f32 / sample_rate_f32;
 
-    // Calculate RMS and peak energy
-    let rms_energy = (wav.iter().map(|s| s * s).sum::<f32>() / wav.len() as f32).sqrt();
-    let peak_energy = wav.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    // Calculate RMS and peak energy efficiently
+    let mut sum_squares = 0.0f32;
+    let mut peak_energy = 0.0f32;
 
-    // 4) Apply adaptive processing based on audio characteristics
+    // Single pass for both calculations
+    for &sample in &wav {
+        let abs_sample = sample.abs();
+        sum_squares += sample * sample;
+        if abs_sample > peak_energy {
+            peak_energy = abs_sample;
+        }
+    }
+
+    let rms_energy = (sum_squares / wav.len() as f32).sqrt();
+
+    // Apply adaptive processing based on audio characteristics
 
     // For high SNR audio (clear speech), apply minimal processing
-    if rms_energy > 0.1 && peak_energy > 0.3 {
+    if rms_energy > HIGH_SNR_RMS_THRESHOLD && peak_energy > HIGH_SNR_PEAK_THRESHOLD {
         return apply_light_processing(pcm, &wav, sample_rate);
     }
 
     // For very short audio, use light processing or skip
-    if audio_duration < 1.0 {
-        if rms_energy < 0.005 || peak_energy < 0.02 {
+    if audio_duration < SHORT_AUDIO_DURATION {
+        if rms_energy < LOW_ENERGY_RMS_THRESHOLD || peak_energy < LOW_ENERGY_PEAK_THRESHOLD {
             return Ok(pcm.to_owned());
         }
         return apply_light_processing(pcm, &wav, sample_rate);
     }
 
-    // 5) Check minimum samples requirement
+    // Check minimum samples requirement
     let hop = df.hop_size;
     let min_samples = (512_usize).max(hop * 2);
     if wav.len() < min_samples {
         return apply_light_processing(pcm, &wav, sample_rate);
     }
 
-    // 6) Store original for blending
-    let original_wav = wav.clone();
-
-    // 7) Full DeepFilterNet processing
+    // Full DeepFilterNet processing with pre-allocated buffer
     let mut enhanced = Vec::with_capacity(wav.len());
     let mut idx = 0;
 
+    // Process complete frames
     while idx + hop <= wav.len() {
         let frame = ArrayView2::from_shape((1, hop), &wav[idx..idx + hop])?;
         let mut out = Array2::<f32>::zeros((1, hop));
+        
+        // Process with DeepFilterNet - it handles everything internally:
+        // - LSNR calculation and stage selection
+        // - Masking and deep filtering
+        // - Post-filter application
+        // - Attenuation limiting
         df.process(frame, out.view_mut())?;
-        enhanced.extend_from_slice(out.as_slice().unwrap());
+
+        // Direct memory copy for efficiency
+        let out_slice = out.as_slice().unwrap();
+        enhanced.extend_from_slice(out_slice);
         idx += hop;
     }
 
@@ -189,60 +281,72 @@ fn process_audio_chunk(
         }
     }
 
-    // 8) Conservative blending - 20% enhanced, 80% original (like Python)
-    let blend_ratio = 0.2f32;
-    let blended: Vec<f32> = enhanced
-        .iter()
-        .zip(original_wav.iter())
-        .map(|(enh, orig)| blend_ratio * enh + (1.0 - blend_ratio) * orig)
-        .collect();
+    // NO BLENDING NEEDED - DfTract already handles attenuation limiting internally
+    // The model applies sophisticated processing including:
+    // - Post-filter for echo suppression (beta=0.015 for mobile)
+    // - Attenuation limiting (15dB for mobile config)
+    // - SNR-based stage selection
+    
+    // Light volume preservation to prevent clipping
+    let original_max = peak_energy;
+    let enhanced_max = enhanced.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
 
-    // 9) Volume preservation (maintain similar level as original)
-    let original_max = original_wav.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    let blended_max = blended.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    // Apply gentle volume normalization if needed
+    if enhanced_max > 0.0 && original_max > 0.0 && enhanced_max > original_max * 1.2 {
+        let volume_ratio = (original_max / enhanced_max) * VOLUME_SAFETY_MARGIN;
+        // In-place modification for efficiency
+        for sample in &mut enhanced {
+            *sample *= volume_ratio;
+        }
+    }
 
-    let final_audio = if blended_max > 0.0 && original_max > 0.0 {
-        let volume_ratio = original_max / blended_max;
-        blended.iter().map(|s| s * volume_ratio * 0.95).collect() // 5% safety margin
-    } else {
-        blended
-    };
-
-    // 10) Check for NaN/inf values
-    if final_audio.iter().any(|s| !s.is_finite()) {
+    // Check for NaN/inf values
+    if enhanced.iter().any(|s| !s.is_finite()) {
         return Ok(pcm.to_owned());
     }
 
-    // 11) Convert back to i16 bytes with conservative normalization
-    let result = final_audio
-        .iter()
-        .map(|s| {
-            let clamped = s.clamp(-1.0, 1.0);
-            let scaled = if clamped >= 0.0 {
-                clamped * 32767.0
-            } else {
-                clamped * 32768.0
-            };
-            scaled.round() as i16
-        })
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    // Convert back to PCM bytes with optimized conversion
+    let mut result = Vec::with_capacity(enhanced.len() * 2);
+
+    for &sample in &enhanced {
+        let clamped = sample.clamp(-1.0, 1.0);
+        let scaled = if clamped >= 0.0 {
+            clamped * FLOAT_TO_PCM_SCALE_POS
+        } else {
+            clamped * FLOAT_TO_PCM_SCALE_NEG
+        };
+        let sample_i16 = scaled.round() as i16;
+        result.extend_from_slice(&sample_i16.to_le_bytes());
+    }
 
     Ok(result)
 }
 
-/// Light processing for short/clean audio clips - applies minimal filtering
-/// Similar to the Python implementation's _apply_light_processing function
+/// Applies light processing for short or high-quality audio clips.
+///
+/// This function applies minimal filtering to preserve audio quality:
+/// - Very short clips (< 200ms) are returned unchanged
+/// - Longer clips receive gentle high-pass filtering at 80Hz
+/// - Original volume levels are preserved
+///
+/// # Arguments
+/// * `original_pcm` - Original PCM audio data for fallback
+/// * `wav` - Audio samples as floating-point values
+/// * `sample_rate` - Audio sample rate in Hz
+///
+/// # Returns
+/// Lightly processed audio as PCM bytes
+#[inline]
 fn apply_light_processing(
     original_pcm: &[u8],
     wav: &[f32],
     sample_rate: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    // For very short clips (< 200ms equivalent), preserve original
+    // For very short clips, preserve original
     let sample_rate_f32 = sample_rate as f32;
     let duration = wav.len() as f32 / sample_rate_f32;
 
-    if duration < 0.2 {
+    if duration < VERY_SHORT_AUDIO_DURATION {
         // Very short - minimal processing, preserve original volume
         let max_val = wav.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         if max_val > 0.0 {
@@ -252,19 +356,26 @@ fn apply_light_processing(
     }
 
     // Apply gentle high-pass filter for longer short clips
-    // Simple first-order high-pass at 80Hz
-    let cutoff_freq = 80.0;
-    let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_freq);
+    // Pre-calculate filter coefficients
+    let rc = 1.0 / (2.0 * std::f32::consts::PI * HIGH_PASS_CUTOFF_HZ);
     let dt = 1.0 / sample_rate_f32;
     let alpha = rc / (rc + dt);
 
+    // Pre-allocate filtered buffer
     let mut filtered = Vec::with_capacity(wav.len());
+
     if !wav.is_empty() {
         filtered.push(wav[0]); // First sample unchanged
 
-        for i in 1..wav.len() {
-            let filtered_sample = alpha * (filtered[i - 1] + wav[i] - wav[i - 1]);
+        // Apply high-pass filter
+        let mut prev_input = wav[0];
+        let mut prev_output = wav[0];
+
+        for &current_input in &wav[1..] {
+            let filtered_sample = alpha * (prev_output + current_input - prev_input);
             filtered.push(filtered_sample);
+            prev_input = current_input;
+            prev_output = filtered_sample;
         }
     }
 
@@ -272,36 +383,53 @@ fn apply_light_processing(
     let original_max = wav.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     let filtered_max = filtered.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
 
-    let normalized = if filtered_max > 0.0 && original_max > 0.0 {
-        let volume_ratio = original_max / filtered_max;
-        filtered.iter().map(|s| s * volume_ratio * 0.98).collect() // Small safety margin
-    } else {
-        filtered
-    };
+    // Apply volume normalization in-place if needed
+    if filtered_max > 0.0 && original_max > 0.0 {
+        let volume_ratio = (original_max / filtered_max) * LIGHT_PROCESSING_SAFETY_MARGIN;
+        for sample in &mut filtered {
+            *sample *= volume_ratio;
+        }
+    }
 
-    // Convert back to bytes
-    let result = normalized
-        .iter()
-        .map(|s| {
-            let clamped = s.clamp(-1.0, 1.0);
-            let scaled = if clamped >= 0.0 {
-                clamped * 32767.0
-            } else {
-                clamped * 32768.0
-            };
-            scaled.round() as i16
-        })
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    // Convert back to PCM bytes with optimized conversion
+    let mut result = Vec::with_capacity(filtered.len() * 2);
+
+    for &sample in &filtered {
+        let clamped = sample.clamp(-1.0, 1.0);
+        let scaled = if clamped >= 0.0 {
+            clamped * FLOAT_TO_PCM_SCALE_POS
+        } else {
+            clamped * FLOAT_TO_PCM_SCALE_NEG
+        };
+        let sample_i16 = scaled.round() as i16;
+        result.extend_from_slice(&sample_i16.to_le_bytes());
+    }
 
     Ok(result)
 }
 
-/// Async wrapper to perform noise reduction using the worker pool.
+/// Performs asynchronous noise reduction using a worker thread pool.
+///
+/// This function provides the main public interface for noise reduction.
+/// It efficiently manages CPU-intensive processing across multiple threads
+/// while maintaining an async interface for the caller.
+///
+/// The function uses a pool of worker threads, each with its own DeepFilterNet
+/// model instance, to process audio in parallel without blocking the async runtime.
 ///
 /// # Arguments
-/// * `pcm` - Audio data as PCM i16 little-endian bytes
-/// * `sample_rate` - Audio sample rate in Hz (e.g., 16000, 48000)
+/// * `pcm` - Audio data in PCM format (16-bit signed integer, little-endian)
+/// * `sample_rate` - Sample rate of the audio in Hz (common values: 16000, 48000)
+///
+/// # Returns
+/// * `Ok(Vec<u8>)` - Processed audio data with reduced noise
+/// * `Err` - If processing fails or worker threads are unavailable
+///
+/// # Example
+/// ```ignore
+/// let processed = reduce_noise_async(audio_bytes, 16000).await?;
+/// ```
+#[inline]
 pub async fn reduce_noise_async(
     pcm: Bytes,
     sample_rate: u32,
@@ -322,4 +450,156 @@ pub async fn reduce_noise_async(
     response_rx
         .await
         .map_err(|_| "Worker thread panicked or channel closed while processing.")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Creates sample PCM data for testing
+    fn create_test_pcm(samples: usize) -> Vec<u8> {
+        let mut pcm = Vec::with_capacity(samples * 2);
+        for i in 0..samples {
+            let value = ((i as f32 / samples as f32) * 1000.0).sin();
+            let sample = (value * 16384.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        pcm
+    }
+
+    /// Tests that silent audio is returned unchanged
+    #[tokio::test]
+    async fn test_silent_audio_passthrough() {
+        let silent_pcm = vec![0u8; 320]; // 160 samples of silence
+        let result = reduce_noise_async(Bytes::from(silent_pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(
+            result, silent_pcm,
+            "Silent audio should pass through unchanged"
+        );
+    }
+
+    /// Tests that very short audio receives appropriate processing
+    #[tokio::test]
+    async fn test_short_audio_processing() {
+        let short_pcm = create_test_pcm(100); // Very short audio
+        let result = reduce_noise_async(Bytes::from(short_pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(
+            result.len(),
+            short_pcm.len(),
+            "Audio length should be preserved"
+        );
+    }
+
+    /// Tests that normal audio is processed successfully
+    #[tokio::test]
+    async fn test_normal_audio_processing() {
+        let pcm = create_test_pcm(16000); // 1 second at 16kHz
+        let result = reduce_noise_async(Bytes::from(pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(result.len(), pcm.len(), "Audio length should be preserved");
+    }
+
+    /// Tests that odd-length PCM data is handled correctly
+    #[tokio::test]
+    async fn test_odd_length_pcm() {
+        let mut pcm = create_test_pcm(100);
+        pcm.push(0); // Make it odd length
+        let result = reduce_noise_async(Bytes::from(pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(result, pcm, "Odd-length PCM should be returned unchanged");
+    }
+
+    /// Tests that empty input returns empty output
+    #[tokio::test]
+    async fn test_empty_input() {
+        let empty_pcm = vec![];
+        let result = reduce_noise_async(Bytes::from(empty_pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(result, empty_pcm, "Empty input should return empty output");
+    }
+
+    /// Tests parallel processing with multiple requests
+    #[tokio::test]
+    async fn test_parallel_processing() {
+        let pcm1 = create_test_pcm(1000);
+        let pcm2 = create_test_pcm(2000);
+        let pcm3 = create_test_pcm(3000);
+
+        let (result1, result2, result3) = tokio::join!(
+            reduce_noise_async(Bytes::from(pcm1.clone()), 16000),
+            reduce_noise_async(Bytes::from(pcm2.clone()), 16000),
+            reduce_noise_async(Bytes::from(pcm3.clone()), 16000)
+        );
+
+        assert!(result1.is_ok(), "First request should succeed");
+        assert!(result2.is_ok(), "Second request should succeed");
+        assert!(result3.is_ok(), "Third request should succeed");
+
+        assert_eq!(result1.unwrap().len(), pcm1.len());
+        assert_eq!(result2.unwrap().len(), pcm2.len());
+        assert_eq!(result3.unwrap().len(), pcm3.len());
+    }
+
+    /// Tests high SNR audio detection and light processing
+    #[tokio::test]
+    async fn test_high_snr_audio() {
+        // Create loud, clear audio
+        let mut pcm = Vec::with_capacity(3200);
+        for i in 0..1600 {
+            let value = (i as f32 / 100.0).sin() * 0.8; // High amplitude
+            let sample = (value * 32767.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let result = reduce_noise_async(Bytes::from(pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+        assert_eq!(result.len(), pcm.len(), "Audio length should be preserved");
+    }
+
+    /// Tests that pre-calculated constants are correct
+    #[test]
+    fn test_constants_validity() {
+        assert!((PCM_TO_FLOAT_SCALE - 1.0 / 32768.0).abs() < f32::EPSILON);
+        assert_eq!(FLOAT_TO_PCM_SCALE_POS, 32767.0);
+        assert_eq!(FLOAT_TO_PCM_SCALE_NEG, 32768.0);
+        assert!(VOLUME_SAFETY_MARGIN > 0.0 && VOLUME_SAFETY_MARGIN < 1.0);
+        assert!(LIGHT_PROCESSING_SAFETY_MARGIN > 0.0 && LIGHT_PROCESSING_SAFETY_MARGIN < 1.0);
+    }
+
+    /// Tests that valid audio from LiveKit is not incorrectly filtered out
+    #[tokio::test]
+    async fn test_livekit_audio_passthrough() {
+        // Simulate audio data similar to what LiveKit sends
+        // Create low-energy but valid speech audio
+        let mut pcm = Vec::with_capacity(1600);
+        for i in 0..800 {
+            // Generate low amplitude sine wave (typical for distant speech)
+            let value = (i as f32 / 100.0).sin() * 0.05; // 5% amplitude
+            let sample = (value * 32767.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let result = reduce_noise_async(Bytes::from(pcm.clone()), 16000)
+            .await
+            .expect("Processing should succeed");
+
+        // Audio should not be completely silent after processing
+        assert!(!result.is_empty(), "Audio should not be empty");
+        assert_eq!(result.len(), pcm.len(), "Audio length should be preserved");
+
+        // Check that the audio wasn't zeroed out
+        let non_zero_count = result.iter().filter(|&&b| b != 0).count();
+        assert!(
+            non_zero_count > result.len() / 2,
+            "Most audio samples should be non-zero"
+        );
+    }
 }

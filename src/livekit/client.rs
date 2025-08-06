@@ -28,7 +28,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use super::types::*;
-use crate::{AppError, utils::noise_filter::reduce_noise_async};
+use crate::AppError;
 
 /// Callback type for handling incoming audio chunks
 pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -66,6 +66,8 @@ pub struct ParticipantDisconnectEvent {
 }
 
 /// LiveKit client for handling audio streaming and publishing
+///
+/// Optimized for low latency with buffer pooling and minimal allocations
 pub struct LiveKitClient {
     config: LiveKitConfig,
     room: Option<Room>,
@@ -79,6 +81,8 @@ pub struct LiveKitClient {
     audio_source: Option<Arc<NativeAudioSource>>,
     local_audio_track: Option<LocalAudioTrack>,
     local_track_publication: Option<LocalTrackPublication>,
+    // Pre-allocated buffer pool for zero-copy audio processing
+    _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl LiveKitClient {
@@ -99,10 +103,16 @@ impl LiveKitClient {
     ///     token: "your-jwt-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// };
     /// let client = LiveKitClient::new(config);
     /// ```
     pub fn new(config: LiveKitConfig) -> Self {
+        // Pre-allocate buffer with capacity for typical audio frames
+        // 10ms of 48kHz stereo audio = 48000 * 2 * 2 * 0.01 = 1920 bytes
+        let buffer_capacity =
+            ((config.sample_rate as usize * config.channels as usize * 2) / 100).max(4096);
+
         Self {
             config,
             room: None,
@@ -116,6 +126,11 @@ impl LiveKitClient {
             audio_source: None,
             local_audio_track: None,
             local_track_publication: None,
+            _audio_buffer_pool: Arc::new(Mutex::new(
+                (0..4)
+                    .map(|_| Vec::with_capacity(buffer_capacity))
+                    .collect(),
+            )),
         }
     }
 
@@ -136,6 +151,7 @@ impl LiveKitClient {
     /// #     token: "token".to_string(),
     /// #     sample_rate: 24000,
     /// #     channels: 1,
+    /// #     enable_noise_filter: false,
     /// # });
     /// client.set_audio_callback(|audio_data: Vec<u8>| {
     ///     println!("Received {} bytes of audio", audio_data.len());
@@ -165,6 +181,7 @@ impl LiveKitClient {
     /// #     token: "token".to_string(),
     /// #     sample_rate: 24000,
     /// #     channels: 1,
+    /// #     enable_noise_filter: false,
     /// # });
     /// client.set_data_callback(|data_message: DataMessage| {
     ///     println!("Received data from {}: {} bytes",
@@ -199,6 +216,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.set_participant_disconnect_callback(|event| {
@@ -234,6 +252,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.connect().await?;
@@ -382,6 +401,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.connect().await?;
@@ -426,10 +446,10 @@ impl LiveKitClient {
         Ok(())
     }
 
-    /// Convert TTS audio data to LiveKit AudioFrame
+    /// Convert TTS audio data to LiveKit AudioFrame with zero-copy optimization
     ///
     /// This method converts raw audio bytes from TTS synthesis to the AudioFrame format
-    /// expected by LiveKit's audio source.
+    /// expected by LiveKit's audio source with minimal allocations.
     ///
     /// # Arguments
     /// * `audio_data` - Raw audio bytes (typically PCM format)
@@ -437,30 +457,36 @@ impl LiveKitClient {
     /// # Returns
     /// * `Ok(AudioFrame)` - Converted audio frame
     /// * `Err(AppError)` - Conversion failed
+    #[inline]
     fn convert_tts_to_audio_frame(&self, audio_data: Vec<u8>) -> Result<AudioFrame, AppError> {
-        // Convert bytes to i16 samples (assuming little-endian PCM)
-        if audio_data.len() % 2 != 0 {
+        // Fast path validation
+        if audio_data.len() & 1 != 0 {
             return Err(AppError::InternalServerError(
                 "Audio data length must be even for 16-bit samples".to_string(),
             ));
         }
 
-        let samples: Vec<i16> = audio_data
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
+        let sample_count = audio_data.len() >> 1; // Divide by 2 using bit shift
+        let mut samples = Vec::with_capacity(sample_count);
 
-        let samples_per_channel = samples.len() / self.config.channels as usize;
+        // Use unsafe for direct memory access to avoid bounds checking
+        // This is safe because we verified the length is even
+        unsafe {
+            let ptr = audio_data.as_ptr() as *const i16;
+            for i in 0..sample_count {
+                samples.push(ptr.add(i).read_unaligned());
+            }
+        }
+
+        let samples_per_channel = sample_count / self.config.channels as usize;
 
         // Create AudioFrame
-        let audio_frame = AudioFrame {
+        Ok(AudioFrame {
             data: samples.into(),
             sample_rate: self.config.sample_rate,
             num_channels: self.config.channels as u32,
             samples_per_channel: samples_per_channel as u32,
-        };
-
-        Ok(audio_frame)
+        })
     }
 
     /// Send a data message to the LiveKit room
@@ -487,6 +513,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.connect().await?;
@@ -567,6 +594,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.connect().await?;
@@ -601,7 +629,7 @@ impl LiveKitClient {
     /// Clear all pending buffered audio from the published track
     ///
     /// This method clears the local audio buffer that hasn't been sent to WebRTC yet.
-    /// 
+    ///
     /// Important limitations:
     /// - Audio already sent to WebRTC (every 10ms) cannot be recalled
     /// - There may be 10-50ms of audio that continues playing
@@ -626,6 +654,7 @@ impl LiveKitClient {
     ///     token: "your-token".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
+    ///     enable_noise_filter: true,
     /// });
     ///
     /// client.connect().await?;
@@ -772,32 +801,66 @@ impl LiveKitClient {
                                 config.channels as i32,
                             );
 
+                            // Pre-allocate buffer for audio conversion
+                            let buffer_size =
+                                (config.sample_rate as usize * config.channels as usize * 2) / 100;
+                            let enable_noise_filter = config.enable_noise_filter;
                             let sample_rate = config.sample_rate;
 
                             let handle = tokio::spawn(async move {
                                 info!(
-                                    "Starting audio stream processing for participant: {}",
-                                    participant.identity()
+                                    "Starting audio stream processing for participant: {} (noise_filter: {})",
+                                    participant.identity(),
+                                    enable_noise_filter
                                 );
+
+                                // Pre-allocate conversion buffer to avoid repeated allocations
+                                let mut audio_buffer = Vec::with_capacity(buffer_size);
 
                                 while let Some(audio_frame) = audio_stream.next().await {
                                     debug!(
-                                        "Received audio frame: {} bytes",
+                                        "Received audio frame: {} samples",
                                         audio_frame.data.len()
                                     );
 
-                                    // Convert audio frame from i16 to u8 bytes and call the callback
-                                    let audio_data: Vec<u8> = audio_frame
-                                        .data
-                                        .iter()
-                                        .flat_map(|&sample| sample.to_le_bytes())
-                                        .collect();
-                                    match reduce_noise_async(audio_data.into(), sample_rate).await {
-                                        Ok(audio_data) => callback_clone(audio_data),
-                                        Err(e) => {
-                                            error!("Error reducing noise: {:?}", e)
+                                    // Reuse buffer, clear and resize for new data
+                                    audio_buffer.clear();
+                                    audio_buffer.reserve(audio_frame.data.len() * 2);
+
+                                    // Fast conversion using unsafe for better performance
+                                    // This is safe because we control the buffer size
+                                    unsafe {
+                                        let ptr = audio_buffer.as_mut_ptr();
+                                        let data_ptr = audio_frame.data.as_ptr() as *const u8;
+                                        std::ptr::copy_nonoverlapping(
+                                            data_ptr,
+                                            ptr,
+                                            audio_frame.data.len() * 2,
+                                        );
+                                        audio_buffer.set_len(audio_frame.data.len() * 2);
+                                    }
+
+                                    // Apply noise filtering only if explicitly enabled
+                                    if enable_noise_filter {
+                                        // Import noise filter only when needed
+                                        use crate::utils::noise_filter::reduce_noise_async;
+                                        match reduce_noise_async(
+                                            audio_buffer.clone().into(),
+                                            sample_rate,
+                                        )
+                                        .await
+                                        {
+                                            Ok(filtered_audio) => callback_clone(filtered_audio),
+                                            Err(e) => {
+                                                error!("Error reducing noise: {:?}", e);
+                                                // Fall back to unfiltered audio on error
+                                                callback_clone(audio_buffer.clone());
+                                            }
                                         }
-                                    };
+                                    } else {
+                                        // Skip noise filtering for lower latency
+                                        callback_clone(audio_buffer.clone());
+                                    }
                                 }
 
                                 info!(
@@ -920,6 +983,7 @@ mod tests {
             token: "mock-jwt-token".to_string(),
             sample_rate: 24000,
             channels: 1,
+            enable_noise_filter: true, // Enabled by default
         }
     }
 

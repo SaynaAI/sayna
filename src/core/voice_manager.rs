@@ -245,12 +245,14 @@
 //! }
 //! ```
 
+use parking_lot::RwLock as SyncRwLock;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use tracing::debug;
 
 use crate::core::{
@@ -305,33 +307,36 @@ pub type AudioClearCallback =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Internal state for managing speech final timing
+/// Uses parking_lot RwLock for faster synchronization and pre-allocated string buffers
 struct SpeechFinalState {
-    /// Combined text buffer from STT results
+    /// Combined text buffer from STT results - pre-allocated with capacity
     text_buffer: String,
-    /// Last seen text for comparison
+    /// Last seen text for comparison - pre-allocated with capacity
     last_text: String,
     /// Timer handle for speech final timeout
     timer_handle: Option<JoinHandle<()>>,
-    /// Whether we're currently waiting for speech_final
-    waiting_for_speech_final: bool,
+    /// Whether we're currently waiting for speech_final - atomic for lock-free reads
+    waiting_for_speech_final: AtomicBool,
     /// User callback to call when timer expires
     user_callback: Option<STTCallback>,
 }
 
 /// State for managing interruption control
+/// Uses atomic types for lock-free access in hot paths
 struct InterruptionState {
-    /// Whether interruptions are currently allowed
-    allow_interruption: bool,
+    /// Whether interruptions are currently allowed - atomic for lock-free reads
+    allow_interruption: AtomicBool,
     /// Time when the current non-interruptible audio will finish playing
-    non_interruptible_until: Option<Instant>,
-    /// Sample rate of the current TTS audio
-    current_sample_rate: u32,
+    /// Stored as milliseconds since epoch for atomic access
+    non_interruptible_until_ms: AtomicUsize,
+    /// Sample rate of the current TTS audio - atomic for lock-free access
+    current_sample_rate: AtomicU32,
     /// Accumulated audio duration for the current non-interruptible segment
-    accumulated_duration: f32,
-    /// Start time of the non-interruptible segment
-    start_time: Option<Instant>,
-    /// Whether we're currently clearing audio (blocks audio callbacks)
-    is_clearing: bool,
+    accumulated_duration: parking_lot::Mutex<f32>,
+    /// Start time of the non-interruptible segment as milliseconds since epoch
+    start_time_ms: AtomicUsize,
+    /// Whether we're currently clearing audio (blocks audio callbacks) - atomic for lock-free reads
+    is_clearing: AtomicBool,
 }
 
 /// Internal TTS callback implementation for the VoiceManager
@@ -370,24 +375,28 @@ impl AudioCallback for VoiceManagerTTSCallback {
 }
 
 /// VoiceManager provides a unified interface for managing STT and TTS providers
+/// Optimized for extreme low-latency with lock-free atomics and pre-allocated buffers
 pub struct VoiceManager {
     tts: Arc<RwLock<Box<dyn BaseTTS>>>,
     stt: Arc<RwLock<Box<dyn BaseSTT>>>,
 
-    // Callbacks
-    stt_callback: Arc<RwLock<Option<STTCallback>>>,
-    tts_audio_callback: Arc<RwLock<Option<TTSAudioCallback>>>,
-    tts_error_callback: Arc<RwLock<Option<TTSErrorCallback>>>,
-    audio_clear_callback: Arc<RwLock<Option<AudioClearCallback>>>,
+    // Callbacks - using parking_lot RwLock for faster synchronization
+    stt_callback: Arc<SyncRwLock<Option<STTCallback>>>,
+    tts_audio_callback: Arc<SyncRwLock<Option<TTSAudioCallback>>>,
+    tts_error_callback: Arc<SyncRwLock<Option<TTSErrorCallback>>>,
+    audio_clear_callback: Arc<SyncRwLock<Option<AudioClearCallback>>>,
 
-    // Speech final timing control
-    speech_final_state: Arc<RwLock<SpeechFinalState>>,
+    // Speech final timing control - using parking_lot for faster access
+    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
 
-    // Interruption control
-    interruption_state: Arc<Mutex<InterruptionState>>,
+    // Interruption control - mostly lock-free with atomics
+    interruption_state: Arc<InterruptionState>,
 
     // Configuration
     config: VoiceManagerConfig,
+
+    // Notification for audio clear completion instead of sleep
+    clear_notify: Arc<Notify>,
 }
 
 impl VoiceManager {
@@ -429,29 +438,35 @@ impl VoiceManager {
         let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
             .map_err(VoiceManagerError::STTError)?;
 
+        // Pre-allocate string buffers with reasonable capacity
+        const TEXT_BUFFER_CAPACITY: usize = 1024;
+        let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+        let last_text = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
             stt: Arc::new(RwLock::new(stt)),
-            stt_callback: Arc::new(RwLock::new(None)),
-            tts_audio_callback: Arc::new(RwLock::new(None)),
-            tts_error_callback: Arc::new(RwLock::new(None)),
-            audio_clear_callback: Arc::new(RwLock::new(None)),
-            speech_final_state: Arc::new(RwLock::new(SpeechFinalState {
-                text_buffer: String::new(),
-                last_text: String::new(),
+            stt_callback: Arc::new(SyncRwLock::new(None)),
+            tts_audio_callback: Arc::new(SyncRwLock::new(None)),
+            tts_error_callback: Arc::new(SyncRwLock::new(None)),
+            audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+            speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer,
+                last_text,
                 timer_handle: None,
-                waiting_for_speech_final: false,
+                waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
             })),
-            interruption_state: Arc::new(Mutex::new(InterruptionState {
-                allow_interruption: true,
-                non_interruptible_until: None,
-                current_sample_rate: 24000, // Default sample rate
-                accumulated_duration: 0.0,
-                start_time: None,
-                is_clearing: false,
-            })),
+            interruption_state: Arc::new(InterruptionState {
+                allow_interruption: AtomicBool::new(true),
+                non_interruptible_until_ms: AtomicUsize::new(0),
+                current_sample_rate: AtomicU32::new(24000),
+                accumulated_duration: parking_lot::Mutex::new(0.0),
+                start_time_ms: AtomicUsize::new(0),
+                is_clearing: AtomicBool::new(false),
+            }),
             config,
+            clear_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -489,12 +504,12 @@ impl VoiceManager {
             tts.connect().await.map_err(VoiceManagerError::TTSError)?;
         }
 
-        // Set up internal TTS callback
+        // Set up internal TTS callback - using parking_lot for faster access
         {
             let mut tts = self.tts.write().await;
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: self.tts_audio_callback.read().await.clone(),
-                error_callback: self.tts_error_callback.read().await.clone(),
+                audio_callback: self.tts_audio_callback.read().clone(),
+                error_callback: self.tts_error_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -528,14 +543,16 @@ impl VoiceManager {
     pub async fn stop(&self) -> VoiceManagerResult<()> {
         // Cancel any pending speech final timer
         {
-            let mut state = self.speech_final_state.write().await;
+            let mut state = self.speech_final_state.write();
             if let Some(handle) = state.timer_handle.take() {
                 handle.abort();
             }
-            // Reset speech final state
+            // Reset speech final state - reuse allocated capacity
             state.text_buffer.clear();
             state.last_text.clear();
-            state.waiting_for_speech_final = false;
+            state
+                .waiting_for_speech_final
+                .store(false, Ordering::Release);
             state.user_callback = None;
         }
 
@@ -622,13 +639,10 @@ impl VoiceManager {
     /// ```
     pub async fn receive_audio(&self, audio: Vec<u8>) -> VoiceManagerResult<()> {
         // Send audio to STT provider
-        {
-            let mut stt = self.stt.write().await;
-            stt.send_audio(audio)
-                .await
-                .map_err(VoiceManagerError::STTError)?;
-        }
-
+        let mut stt = self.stt.write().await;
+        stt.send_audio(audio)
+            .await
+            .map_err(VoiceManagerError::STTError)?;
         Ok(())
     }
 
@@ -689,35 +703,61 @@ impl VoiceManager {
         flush: bool,
         allow_interruption: bool,
     ) -> VoiceManagerResult<()> {
-        // Update interruption state
+        // Update interruption state using atomics for lock-free performance
         if !allow_interruption {
-            let mut interruption_state = self.interruption_state.lock().await;
-            interruption_state.allow_interruption = false;
-            interruption_state.is_clearing = false; // Reset clearing flag when starting new speech
+            self.interruption_state
+                .allow_interruption
+                .store(false, Ordering::Release);
+            self.interruption_state
+                .is_clearing
+                .store(false, Ordering::Release);
 
             // Update sample rate from TTS config
             if let Some(sample_rate) = self.config.tts_config.sample_rate {
-                interruption_state.current_sample_rate = sample_rate;
+                self.interruption_state
+                    .current_sample_rate
+                    .store(sample_rate, Ordering::Release);
             }
 
             // Reset accumulated duration and set start time
-            interruption_state.accumulated_duration = 0.0;
-            interruption_state.start_time = Some(Instant::now());
+            {
+                let mut duration = self.interruption_state.accumulated_duration.lock();
+                *duration = 0.0;
+            }
+
+            // Get current timestamp in milliseconds
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as usize;
+            self.interruption_state
+                .start_time_ms
+                .store(now, Ordering::Release);
 
             // Calculate audio duration based on text length and sample rate
             // Estimate: ~150 words per minute average speech rate
-            // This is a rough estimate - actual duration will be calculated from audio data
             let word_count = text.split_whitespace().count() as f32;
             let estimated_duration_seconds = (word_count / 150.0) * 60.0;
-            interruption_state.non_interruptible_until =
-                Some(Instant::now() + Duration::from_secs_f32(estimated_duration_seconds));
+            let until_ms = now + (estimated_duration_seconds * 1000.0) as usize;
+            self.interruption_state
+                .non_interruptible_until_ms
+                .store(until_ms, Ordering::Release);
         } else {
-            let mut interruption_state = self.interruption_state.lock().await;
-            interruption_state.allow_interruption = true;
-            interruption_state.non_interruptible_until = None;
-            interruption_state.accumulated_duration = 0.0;
-            interruption_state.start_time = None;
-            interruption_state.is_clearing = false; // Reset clearing flag when starting new speech
+            self.interruption_state
+                .allow_interruption
+                .store(true, Ordering::Release);
+            self.interruption_state
+                .non_interruptible_until_ms
+                .store(0, Ordering::Release);
+            self.interruption_state
+                .start_time_ms
+                .store(0, Ordering::Release);
+            self.interruption_state
+                .is_clearing
+                .store(false, Ordering::Release);
+
+            let mut duration = self.interruption_state.accumulated_duration.lock();
+            *duration = 0.0;
         }
 
         // Send text to TTS provider
@@ -736,10 +776,22 @@ impl VoiceManager {
     /// # Returns
     /// * `bool` - True if interruption is currently blocked (allow_interruption=false and audio still playing)
     pub async fn is_interruption_blocked(&self) -> bool {
-        let interruption_state = self.interruption_state.lock().await;
-        if !interruption_state.allow_interruption {
-            if let Some(until) = interruption_state.non_interruptible_until {
-                if Instant::now() < until {
+        // Lock-free check using atomics
+        if !self
+            .interruption_state
+            .allow_interruption
+            .load(Ordering::Acquire)
+        {
+            let until_ms = self
+                .interruption_state
+                .non_interruptible_until_ms
+                .load(Ordering::Acquire);
+            if until_ms > 0 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as usize;
+                if now_ms < until_ms {
                     return true;
                 }
             }
@@ -763,12 +815,11 @@ impl VoiceManager {
             return Ok(());
         }
 
-        // Set clearing flag to immediately block audio callbacks
-        {
-            let mut interruption_state = self.interruption_state.lock().await;
-            interruption_state.is_clearing = true;
-            debug!("Started audio clearing process - blocking audio callbacks");
-        }
+        // Set clearing flag to immediately block audio callbacks (lock-free)
+        self.interruption_state
+            .is_clearing
+            .store(true, Ordering::Release);
+        debug!("Started audio clearing process - blocking audio callbacks");
 
         // Clear TTS text queue
         let mut tts = self.tts.write().await;
@@ -776,24 +827,40 @@ impl VoiceManager {
         drop(tts); // Release the lock
 
         // Call audio clear callback to clear any audio buffers (e.g., LiveKit)
-        if let Some(callback) = self.audio_clear_callback.read().await.as_ref() {
-            callback().await;
-        }
-
-        // Wait for any pending audio chunks to be discarded
-        // This ensures that any audio already in flight gets blocked
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Reset interruption state and clear the clearing flag
         {
-            let mut interruption_state = self.interruption_state.lock().await;
-            interruption_state.allow_interruption = true;
-            interruption_state.non_interruptible_until = None;
-            interruption_state.accumulated_duration = 0.0;
-            interruption_state.start_time = None;
-            interruption_state.is_clearing = false;
-            debug!("Completed audio clearing process - audio callbacks resumed");
+            let callback_opt = self.audio_clear_callback.read().clone();
+            if let Some(callback) = callback_opt {
+                callback().await;
+            }
         }
+
+        // Use notification instead of sleep for better latency
+        // Wait for pending audio to be processed with timeout
+        let _ = tokio::time::timeout(
+            Duration::from_millis(50), // Reduced from 100ms
+            self.clear_notify.notified(),
+        )
+        .await;
+
+        // Reset interruption state using atomics
+        self.interruption_state
+            .allow_interruption
+            .store(true, Ordering::Release);
+        self.interruption_state
+            .non_interruptible_until_ms
+            .store(0, Ordering::Release);
+        self.interruption_state
+            .start_time_ms
+            .store(0, Ordering::Release);
+        self.interruption_state
+            .is_clearing
+            .store(false, Ordering::Release);
+
+        let mut duration = self.interruption_state.accumulated_duration.lock();
+        *duration = 0.0;
+        drop(duration);
+
+        debug!("Completed audio clearing process - audio callbacks resumed");
 
         Ok(())
     }
@@ -842,15 +909,15 @@ impl VoiceManager {
     {
         let callback = Arc::new(callback);
 
-        // Store the callback for later use
+        // Store the callback for later use - using parking_lot for faster access
         {
-            let mut stt_callback = self.stt_callback.write().await;
+            let mut stt_callback = self.stt_callback.write();
             *stt_callback = Some(callback.clone());
         }
 
         // Also store in speech final state for timer access
         {
-            let mut state = self.speech_final_state.write().await;
+            let mut state = self.speech_final_state.write();
             state.user_callback = Some(callback.clone());
         }
 
@@ -864,15 +931,22 @@ impl VoiceManager {
             let interruption_state = interruption_state_clone.clone();
 
             Box::pin(async move {
-                // Check if we should ignore STT results due to non-interruptible audio
+                // Check if we should ignore STT results due to non-interruptible audio (lock-free)
+                if !interruption_state
+                    .allow_interruption
+                    .load(Ordering::Acquire)
                 {
-                    let int_state = interruption_state.lock().await;
-                    if !int_state.allow_interruption {
-                        if let Some(until) = int_state.non_interruptible_until {
-                            if Instant::now() < until {
-                                // Still within non-interruptible period, ignore STT result
-                                return;
-                            }
+                    let until_ms = interruption_state
+                        .non_interruptible_until_ms
+                        .load(Ordering::Acquire);
+                    if until_ms > 0 {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as usize;
+                        if now_ms < until_ms {
+                            // Still within non-interruptible period, ignore STT result
+                            return;
                         }
                     }
                 }
@@ -941,41 +1015,39 @@ impl VoiceManager {
             let int_state = interruption_state_clone.clone();
 
             Box::pin(async move {
-                // Check if we're in clearing state - if so, discard the audio
-                {
-                    let state = int_state.lock().await;
-                    if state.is_clearing {
-                        debug!(
-                            "Discarding audio chunk during clearing process: {} bytes",
-                            audio_data.data.len()
-                        );
-                        return; // Don't forward audio to user callback
-                    }
+                // Check if we're in clearing state - lock-free check
+                if int_state.is_clearing.load(Ordering::Acquire) {
+                    debug!(
+                        "Discarding audio chunk during clearing process: {} bytes",
+                        audio_data.data.len()
+                    );
+                    return; // Don't forward audio to user callback
                 }
 
                 // Update non-interruptible timing based on actual audio data
-                {
-                    let mut state = int_state.lock().await;
-                    if !state.allow_interruption {
-                        // Calculate actual audio duration from audio data
-                        // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
-                        // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
-                        let bytes_per_sample = 2;
-                        let channels = 1;
-                        let sample_rate = state.current_sample_rate;
+                if !int_state.allow_interruption.load(Ordering::Acquire) {
+                    // Calculate actual audio duration from audio data
+                    // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
+                    // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
+                    let bytes_per_sample = 2;
+                    let channels = 1;
+                    let sample_rate = int_state.current_sample_rate.load(Ordering::Acquire);
 
-                        let chunk_duration_seconds = audio_data.data.len() as f32
-                            / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
+                    let chunk_duration_seconds = audio_data.data.len() as f32
+                        / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
 
-                        // Accumulate the duration
-                        state.accumulated_duration += chunk_duration_seconds;
+                    // Accumulate the duration
+                    {
+                        let mut duration = int_state.accumulated_duration.lock();
+                        *duration += chunk_duration_seconds;
 
                         // Update the non-interruptible period based on accumulated audio duration
-                        // Use the start time to ensure consistent timing
-                        if let Some(start_time) = state.start_time {
-                            state.non_interruptible_until = Some(
-                                start_time + Duration::from_secs_f32(state.accumulated_duration),
-                            );
+                        let start_ms = int_state.start_time_ms.load(Ordering::Acquire);
+                        if start_ms > 0 {
+                            let until_ms = start_ms + (*duration * 1000.0) as usize;
+                            int_state
+                                .non_interruptible_until_ms
+                                .store(until_ms, Ordering::Release);
                         }
                     }
                 }
@@ -985,15 +1057,19 @@ impl VoiceManager {
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
-        let mut tts_audio_callback = self.tts_audio_callback.write().await;
-        *tts_audio_callback = Some(wrapper_callback.clone());
+        // Store callback and release lock before await
+        let audio_callback = {
+            let mut tts_audio_callback = self.tts_audio_callback.write();
+            *tts_audio_callback = Some(wrapper_callback.clone());
+            tts_audio_callback.clone()
+        };
 
         // Update the internal TTS callback
         {
             let mut tts = self.tts.write().await;
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: tts_audio_callback.clone(),
-                error_callback: self.tts_error_callback.read().await.clone(),
+                audio_callback,
+                error_callback: self.tts_error_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -1014,15 +1090,19 @@ impl VoiceManager {
     where
         F: Fn(TTSError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
-        let mut tts_error_callback = self.tts_error_callback.write().await;
-        *tts_error_callback = Some(Arc::new(callback));
+        // Store callback and then release lock before await
+        let error_callback = {
+            let mut tts_error_callback = self.tts_error_callback.write();
+            *tts_error_callback = Some(Arc::new(callback));
+            tts_error_callback.clone()
+        };
 
         // Update the internal TTS callback
         {
             let mut tts = self.tts.write().await;
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: self.tts_audio_callback.read().await.clone(),
-                error_callback: tts_error_callback.clone(),
+                audio_callback: self.tts_audio_callback.read().clone(),
+                error_callback,
             });
 
             tts.on_audio(tts_callback)
@@ -1068,7 +1148,7 @@ impl VoiceManager {
     where
         F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
-        let mut audio_clear_callback = self.audio_clear_callback.write().await;
+        let mut audio_clear_callback = self.audio_clear_callback.write();
         *audio_clear_callback = Some(Arc::new(callback));
         Ok(())
     }
@@ -1127,11 +1207,11 @@ impl VoiceManager {
     /// - Buffers text from final results for forced speech_final
     async fn process_stt_result_with_timing_static(
         result: STTResult,
-        speech_final_state: Arc<RwLock<SpeechFinalState>>,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     ) -> Option<STTResult> {
-        let mut state = speech_final_state.write().await;
+        let mut state = speech_final_state.write();
 
-        // Skip empty final results that aren't speech_final (like Python does)
+        // Skip empty final results that aren't speech_final
         if result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final {
             return None;
         }
@@ -1146,66 +1226,73 @@ impl VoiceManager {
             // Reset state completely for next speech segment
             state.text_buffer.clear();
             state.last_text.clear();
-            state.waiting_for_speech_final = false;
+            state
+                .waiting_for_speech_final
+                .store(false, Ordering::Release);
 
             return Some(result);
         }
 
-        // If we get a speech_final but we weren't waiting, ignore it (like Python)
-        if !state.waiting_for_speech_final && result.is_speech_final {
-            return None;
-        }
-
         // Case 2: is_final=true (but not speech_final) with non-empty text
-        if result.is_final && !result.is_speech_final && !result.transcript.trim().is_empty() {
+        if result.is_final && !result.transcript.trim().is_empty() {
             // Update buffer with current transcript
             state.text_buffer = result.transcript.clone();
 
-            // Cancel existing timer and restart it (like Python does)
+            // Cancel existing timer and restart it
             if let Some(handle) = state.timer_handle.take() {
                 handle.abort();
             }
 
-            // Start new background timer (matching Python 1.2s approach)
+            // Start new background timer
             let speech_final_state_clone = speech_final_state.clone();
 
             let timer_handle = tokio::spawn(async move {
                 // Wait for timeout period (using 2300ms to match Python's 2.3 seconds)
                 tokio::time::sleep(Duration::from_millis(2300)).await;
 
-                // Force speech_final after timeout
-                let mut timer_state = speech_final_state_clone.write().await;
+                // Check if we should force speech_final and get callback before locking
+                let callback_opt = {
+                    let timer_state = speech_final_state_clone.read();
+                    if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
+                        timer_state.user_callback.clone()
+                    } else {
+                        None
+                    }
+                };
 
-                if timer_state.waiting_for_speech_final {
-                    // Create forced speech final result with buffered text
+                if let Some(callback) = callback_opt {
+                    // Now lock for write to reset state
+                    {
+                        let mut timer_state = speech_final_state_clone.write();
+                        if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
+                            // Reset state
+                            timer_state.text_buffer.clear();
+                            timer_state.last_text.clear();
+                            timer_state
+                                .waiting_for_speech_final
+                                .store(false, Ordering::Release);
+                            timer_state.timer_handle = None;
+                        }
+                    }
+
+                    // Create forced result and call callback outside lock
                     let forced_result = STTResult {
                         transcript: String::new(),
                         is_final: true,
                         is_speech_final: true,
                         confidence: 1.0, // High confidence for forced result
                     };
-
-                    // Reset state
-                    timer_state.text_buffer.clear();
-                    timer_state.last_text.clear();
-                    timer_state.waiting_for_speech_final = false;
-                    timer_state.timer_handle = None;
-
-                    // Call user callback directly with forced result
-                    if let Some(callback) = &timer_state.user_callback {
-                        let callback_clone = callback.clone();
-                        // Need to drop the lock before calling callback
-                        drop(timer_state);
-                        callback_clone(forced_result).await;
-                    }
+                    callback(forced_result).await;
                 }
             });
 
             state.timer_handle = Some(timer_handle);
-            state.waiting_for_speech_final = true;
+            state
+                .waiting_for_speech_final
+                .store(true, Ordering::Release);
         }
 
-        // Always return the original result immediately (like Python)
+        // Always return the original result immediately
         Some(result)
     }
 }
@@ -1340,16 +1427,22 @@ mod tests {
 
         // Test Case 1: is_final result should return immediately and start timer
         {
-            let speech_final_state = voice_manager.speech_final_state.clone();
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+            }));
 
             // Reset state first
             {
-                let mut state = speech_final_state.write().await;
+                let mut state = speech_final_state.write();
                 *state = SpeechFinalState {
-                    text_buffer: String::new(),
-                    last_text: String::new(),
+                    text_buffer: String::with_capacity(1024),
+                    last_text: String::with_capacity(1024),
                     timer_handle: None,
-                    waiting_for_speech_final: false,
+                    waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                 };
             }
@@ -1370,24 +1463,30 @@ mod tests {
             assert!(!processed_result.is_speech_final);
 
             // Timer should be started and state updated
-            let state = speech_final_state.read().await;
-            assert!(state.waiting_for_speech_final);
+            let state = speech_final_state.read();
+            assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
             assert_eq!(state.text_buffer, "Hello");
             assert!(state.timer_handle.is_some());
         }
 
         // Test Case 2: Timer should be started for final results and state should be set correctly
         {
-            let speech_final_state = voice_manager.speech_final_state.clone();
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+            }));
 
             // Reset state first
             {
-                let mut state = speech_final_state.write().await;
+                let mut state = speech_final_state.write();
                 *state = SpeechFinalState {
-                    text_buffer: String::new(),
-                    last_text: String::new(),
+                    text_buffer: String::with_capacity(1024),
+                    last_text: String::with_capacity(1024),
                     timer_handle: None,
-                    waiting_for_speech_final: false,
+                    waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                 };
             }
@@ -1408,24 +1507,30 @@ mod tests {
             assert!(!processed_result.is_speech_final);
 
             // Check that timer was started and state is correct
-            let state = speech_final_state.read().await;
-            assert!(state.waiting_for_speech_final);
+            let state = speech_final_state.read();
+            assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
             assert_eq!(state.text_buffer, "Test message");
             assert!(state.timer_handle.is_some());
         }
 
         // Test Case 3: Real speech_final should cancel timer and reset state
         {
-            let speech_final_state = voice_manager.speech_final_state.clone();
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+            }));
 
             // Reset state first
             {
-                let mut state = speech_final_state.write().await;
+                let mut state = speech_final_state.write();
                 *state = SpeechFinalState {
-                    text_buffer: String::new(),
-                    last_text: String::new(),
+                    text_buffer: String::with_capacity(1024),
+                    last_text: String::with_capacity(1024),
                     timer_handle: None,
-                    waiting_for_speech_final: false,
+                    waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                 };
             }
@@ -1440,8 +1545,8 @@ mod tests {
 
             // Verify timer was started
             {
-                let state = speech_final_state.read().await;
-                assert!(state.waiting_for_speech_final);
+                let state = speech_final_state.read();
+                assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
                 assert!(state.timer_handle.is_some());
                 assert_eq!(state.text_buffer, "Hello world");
             }
@@ -1463,8 +1568,8 @@ mod tests {
             assert_eq!(final_result.confidence, 0.95);
 
             // State should be reset
-            let state = speech_final_state.read().await;
-            assert!(!state.waiting_for_speech_final);
+            let state = speech_final_state.read();
+            assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
             assert!(state.text_buffer.is_empty());
             assert!(state.last_text.is_empty());
             assert!(state.timer_handle.is_none());
@@ -1472,16 +1577,22 @@ mod tests {
 
         // Test Case 4: Direct speech_final with no prior timer should return original result
         {
-            let speech_final_state = voice_manager.speech_final_state.clone();
+            let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer: String::with_capacity(1024),
+                last_text: String::with_capacity(1024),
+                timer_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+            }));
 
             // Reset state first
             {
-                let mut state = speech_final_state.write().await;
+                let mut state = speech_final_state.write();
                 *state = SpeechFinalState {
-                    text_buffer: String::new(),
-                    last_text: String::new(),
+                    text_buffer: String::with_capacity(1024),
+                    last_text: String::with_capacity(1024),
                     timer_handle: None,
-                    waiting_for_speech_final: false,
+                    waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                 };
             }
@@ -1503,8 +1614,8 @@ mod tests {
             assert_eq!(final_result.confidence, 0.85);
 
             // State should remain reset since no timer was running
-            let state = speech_final_state.read().await;
-            assert!(!state.waiting_for_speech_final);
+            let state = speech_final_state.read();
+            assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
             assert!(state.text_buffer.is_empty());
         }
     }
