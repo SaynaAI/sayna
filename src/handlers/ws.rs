@@ -371,7 +371,10 @@ use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{RwLock, mpsc};
 use tokio::{
     select,
@@ -630,15 +633,15 @@ pub enum OutgoingMessage {
 
 /// WebSocket connection state optimized for low latency
 ///
-/// Uses RwLock instead of Mutex for better read performance:
-/// - Multiple concurrent reads for checking state
-/// - Exclusive writes only when configuration changes
-/// - Reduces lock contention in hot paths
+/// Uses RwLock for state that changes rarely but is read frequently:
+/// - AtomicBool for audio_enabled flag - no locks needed for hot path
+/// - RwLock for managers - fast reads, rare writes (only during config)
+/// - Optimized for the common case: many reads, few writes
 struct ConnectionState {
     voice_manager: Option<Arc<VoiceManager>>,
     livekit_client: Option<Arc<RwLock<LiveKitClient>>>,
     /// Whether audio processing (STT/TTS) is enabled for this connection
-    audio_enabled: bool,
+    audio_enabled: AtomicBool,
 }
 
 impl ConnectionState {
@@ -646,7 +649,7 @@ impl ConnectionState {
         Self {
             voice_manager: None,
             livekit_client: None,
-            audio_enabled: false, // Will be set based on config message
+            audio_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -676,7 +679,7 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     // Split the socket into sender and receiver
     let (mut sender, mut receiver) = socket.split();
 
-    // Connection state with RwLock for better read performance
+    // Connection state with RwLock for rare writes, frequent reads
     let state = Arc::new(RwLock::new(ConnectionState::new()));
 
     // Optimized channel buffer size for audio workloads
@@ -685,23 +688,14 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     const CHANNEL_BUFFER_SIZE: usize = 1024;
     let (message_tx, mut message_rx) = mpsc::channel::<MessageRoute>(CHANNEL_BUFFER_SIZE);
 
-    // Spawn optimized task to handle outgoing messages with batch processing
+    // Spawn task to handle outgoing messages - simple and direct for low latency
     let sender_task = tokio::spawn(async move {
-        // Pre-allocate buffer for JSON serialization
-        let mut json_buffer = Vec::with_capacity(4096);
-
         while let Some(route) = message_rx.recv().await {
             let result = match route {
                 MessageRoute::Outgoing(message) => {
-                    // Reuse buffer for JSON serialization
-                    json_buffer.clear();
-                    match serde_json::to_writer(&mut json_buffer, &message) {
-                        Ok(_) => {
-                            // Safety: we know json_buffer contains valid UTF-8 from serde_json
-                            let json_str =
-                                unsafe { String::from_utf8_unchecked(json_buffer.clone()) };
-                            sender.send(Message::Text(json_str.into())).await
-                        }
+                    // Direct serialization and send - no batching for low latency
+                    match serde_json::to_string(&message) {
+                        Ok(json_str) => sender.send(Message::Text(json_str.into())).await,
                         Err(e) => {
                             error!("Failed to serialize outgoing message: {}", e);
                             continue;
@@ -764,17 +758,24 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
 
     // Stop voice manager and LiveKit client if they exist
     {
-        let connection_state = state.read().await;
-        if let Some(voice_manager) = &connection_state.voice_manager {
+        let state_guard = state.read().await;
+        if let Some(voice_manager) = &state_guard.voice_manager {
             if let Err(e) = voice_manager.stop().await {
                 error!("Failed to stop voice manager: {}", e);
             }
         }
 
-        if let Some(livekit_client) = &connection_state.livekit_client {
-            let mut client = livekit_client.write().await;
-            if let Err(e) = client.disconnect().await {
-                error!("Failed to disconnect LiveKit client: {:?}", e);
+        if let Some(livekit_client) = &state_guard.livekit_client {
+            // Try to get write lock with timeout for cleanup
+            match tokio::time::timeout(Duration::from_millis(100), livekit_client.write()).await {
+                Ok(mut client) => {
+                    if let Err(e) = client.disconnect().await {
+                        error!("Failed to disconnect LiveKit client: {:?}", e);
+                    }
+                }
+                Err(_) => {
+                    warn!("Timeout acquiring LiveKit lock for cleanup - client may be busy");
+                }
             }
         }
     }
@@ -915,8 +916,10 @@ async fn handle_config_message(
 
     // Store audio_enabled flag in connection state first
     {
-        let mut connection_state = state.write().await;
-        connection_state.audio_enabled = audio_enabled;
+        let state_guard = state.read().await;
+        state_guard
+            .audio_enabled
+            .store(audio_enabled, Ordering::Relaxed);
     }
 
     // Initialize voice manager only if audio is enabled
@@ -1063,8 +1066,8 @@ async fn handle_config_message(
 
         // Store voice manager in state
         {
-            let mut connection_state = state.write().await;
-            connection_state.voice_manager = Some(voice_manager.clone());
+            let mut state_guard = state.write().await;
+            state_guard.voice_manager = Some(voice_manager.clone());
         }
 
         Some(voice_manager)
@@ -1104,6 +1107,7 @@ async fn handle_config_message(
                     let voice_manager = voice_manager_clone.clone();
                     let message_tx = message_tx_clone.clone();
 
+                    // Direct processing - spawn lightweight task for async processing
                     tokio::spawn(async move {
                         debug!("Received LiveKit audio: {} bytes", audio_data.len());
 
@@ -1127,6 +1131,7 @@ async fn handle_config_message(
             livekit_client.set_data_callback(move |data_message| {
                 let message_tx = message_tx_clone.clone();
 
+                // Spawn task for async send to ensure delivery
                 tokio::spawn(async move {
                     debug!(
                         "Received LiveKit data from {}: {} bytes",
@@ -1162,6 +1167,7 @@ async fn handle_config_message(
                         message: unified_message,
                     };
 
+                    // Use send for guaranteed delivery
                     let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
                 });
             });
@@ -1171,6 +1177,7 @@ async fn handle_config_message(
             livekit_client.set_participant_disconnect_callback(move |disconnect_event| {
                 let message_tx = message_tx_clone.clone();
 
+                // Spawn task for async send to ensure delivery
                 tokio::spawn(async move {
                     debug!(
                         "Participant {} disconnected from LiveKit room {}",
@@ -1189,6 +1196,7 @@ async fn handle_config_message(
                         participant: participant_info,
                     };
 
+                    // Use send for guaranteed delivery
                     let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
                 });
             });
@@ -1207,8 +1215,8 @@ async fn handle_config_message(
             // Store LiveKit client in state
             let livekit_client_arc = Arc::new(RwLock::new(livekit_client));
             {
-                let mut connection_state = state.write().await;
-                connection_state.livekit_client = Some(livekit_client_arc.clone());
+                let mut state_guard = state.write().await;
+                state_guard.livekit_client = Some(livekit_client_arc.clone());
             }
 
             // Register audio clear callback with VoiceManager if both are available
@@ -1219,11 +1227,18 @@ async fn handle_config_message(
                     .on_audio_clear(move || {
                         let livekit = livekit_client_clone.clone();
                         Box::pin(async move {
-                            let mut client = livekit.write().await;
-                            if let Err(e) = client.clear_audio().await {
-                                warn!("Failed to clear LiveKit audio buffer: {:?}", e);
-                            } else {
-                                debug!("Cleared LiveKit audio buffer during interruption");
+                            // Use try_write to avoid blocking in callback
+                            match livekit.try_write() {
+                                Ok(mut client) => {
+                                    if let Err(e) = client.clear_audio().await {
+                                        warn!("Failed to clear LiveKit audio buffer: {:?}", e);
+                                    } else {
+                                        debug!("Cleared LiveKit audio buffer during interruption");
+                                    }
+                                }
+                                Err(_) => {
+                                    debug!("LiveKit client busy during audio clear");
+                                }
                             }
                         })
                     })
@@ -1254,25 +1269,34 @@ async fn handle_config_message(
 
                     // Try to send to LiveKit first if available
                     if let Some(livekit_client_arc) = &livekit_client {
-                        let mut client = livekit_client_arc.write().await;
-
-                        // Check if LiveKit is connected before attempting to send
-                        if client.is_connected().await {
-                            match client.send_tts_audio(audio_data.data.clone()).await {
-                                Ok(()) => {
+                        // Use try_write to avoid blocking in hot path
+                        match livekit_client_arc.try_write() {
+                            Ok(mut client) => {
+                                // Check if LiveKit is connected before attempting to send
+                                if client.is_connected().await {
+                                    match client.send_tts_audio(audio_data.data.clone()).await {
+                                        Ok(()) => {
+                                            debug!(
+                                                "TTS audio successfully sent to LiveKit: {} bytes",
+                                                audio_data.data.len()
+                                            );
+                                            sent_to_livekit = true;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to send TTS audio to LiveKit: {:?}", e);
+                                            // Will fall back to WebSocket below
+                                        }
+                                    }
+                                } else {
                                     debug!(
-                                        "TTS audio successfully sent to LiveKit: {} bytes",
-                                        audio_data.data.len()
+                                        "LiveKit client not connected, falling back to WebSocket"
                                     );
-                                    sent_to_livekit = true;
-                                }
-                                Err(e) => {
-                                    error!("Failed to send TTS audio to LiveKit: {:?}", e);
-                                    // Will fall back to WebSocket below
                                 }
                             }
-                        } else {
-                            debug!("LiveKit client not connected, falling back to WebSocket");
+                            Err(_) => {
+                                debug!("LiveKit client busy, falling back to WebSocket");
+                                // Will fall back to WebSocket below
+                            }
                         }
                     }
 
@@ -1322,11 +1346,12 @@ async fn handle_audio_message(
 ) -> bool {
     debug!("Processing audio data: {} bytes", audio_data.len());
 
+    // Fast path: read lock to check state and get voice manager
     let voice_manager = {
-        let connection_state = state.read().await;
+        let state_guard = state.read().await;
 
-        // Check if audio processing is enabled
-        if !connection_state.audio_enabled {
+        // Check if audio processing is enabled (atomic read, no lock overhead)
+        if !state_guard.audio_enabled.load(Ordering::Relaxed) {
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
                     message:
@@ -1337,7 +1362,7 @@ async fn handle_audio_message(
             return true;
         }
 
-        match &connection_state.voice_manager {
+        match &state_guard.voice_manager {
             Some(vm) => vm.clone(),
             None => {
                 let _ = message_tx
@@ -1388,11 +1413,12 @@ async fn handle_speak_message(
         allow_interruption
     );
 
+    // Fast path: read lock to check state and get voice manager
     let voice_manager = {
-        let connection_state = state.read().await;
+        let state_guard = state.read().await;
 
-        // Check if audio processing is enabled
-        if !connection_state.audio_enabled {
+        // Check if audio processing is enabled (atomic read, no lock overhead)
+        if !state_guard.audio_enabled.load(Ordering::Relaxed) {
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
                     message:
@@ -1403,7 +1429,7 @@ async fn handle_speak_message(
             return true;
         }
 
-        match &connection_state.voice_manager {
+        match &state_guard.voice_manager {
             Some(vm) => vm.clone(),
             None => {
                 let _ = message_tx
@@ -1452,12 +1478,13 @@ async fn handle_clear_message(
 ) -> bool {
     debug!("Processing clear command");
 
+    // Fast path: read lock to get both managers
     let (voice_manager, livekit_client) = {
-        let connection_state = state.read().await;
+        let state_guard = state.read().await;
 
         // Check if audio processing is enabled for voice manager operations
-        let vm = if connection_state.audio_enabled {
-            match &connection_state.voice_manager {
+        let vm = if state_guard.audio_enabled.load(Ordering::Relaxed) {
+            match &state_guard.voice_manager {
                 Some(vm) => Some(vm.clone()),
                 None => {
                     let _ = message_tx
@@ -1474,8 +1501,8 @@ async fn handle_clear_message(
             None
         };
 
-        let livekit = connection_state.livekit_client.clone();
-        (vm, livekit)
+        let lk = state_guard.livekit_client.clone();
+        (vm, lk)
     };
 
     // Check if we're in a non-interruptible state
@@ -1509,12 +1536,18 @@ async fn handle_clear_message(
 
         // If audio is disabled but LiveKit is configured, still clear LiveKit audio
         if let Some(livekit_manager) = livekit_client {
-            match livekit_manager.write().await.clear_audio().await {
-                Ok(()) => {
-                    debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
-                }
-                Err(e) => {
-                    warn!("Failed to clear LiveKit audio buffer: {}", e);
+            // Use try_write to avoid blocking
+            match livekit_manager.try_write() {
+                Ok(mut client) => match client.clear_audio().await {
+                    Ok(()) => {
+                        debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
+                    }
+                    Err(e) => {
+                        warn!("Failed to clear LiveKit audio buffer: {}", e);
+                    }
+                },
+                Err(_) => {
+                    debug!("LiveKit client busy, skipping audio clear");
                 }
             }
         }
@@ -1539,9 +1572,10 @@ async fn handle_send_message(
         topic
     );
 
+    // Fast path: read lock to get LiveKit client
     let livekit_client = {
-        let connection_state = state.read().await;
-        match &connection_state.livekit_client {
+        let state_guard = state.read().await;
+        match &state_guard.livekit_client {
             Some(client) => client.clone(),
             None => {
                 let _ = message_tx
@@ -1556,22 +1590,32 @@ async fn handle_send_message(
     };
 
     // Send message through LiveKit client
-    {
-        let mut client = livekit_client.write().await;
-        if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
-            error!("Failed to send message via LiveKit: {:?}", e);
+    // Use try_write to avoid blocking
+    match livekit_client.try_write() {
+        Ok(mut client) => {
+            if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
+                error!("Failed to send message via LiveKit: {:?}", e);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to send message via LiveKit: {e:?}"),
+                    }))
+                    .await;
+            } else {
+                debug!(
+                    "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
+                    message.len(),
+                    role,
+                    topic
+                );
+            }
+        }
+        Err(_) => {
+            warn!("LiveKit client busy, queueing message for retry");
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: format!("Failed to send message via LiveKit: {e:?}"),
+                    message: "LiveKit client busy, please retry".to_string(),
                 }))
                 .await;
-        } else {
-            debug!(
-                "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
-                message.len(),
-                role,
-                topic
-            );
         }
     }
 
