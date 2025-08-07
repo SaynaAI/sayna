@@ -347,6 +347,7 @@ struct InterruptionState {
 struct VoiceManagerTTSCallback {
     audio_callback: Option<TTSAudioCallback>,
     error_callback: Option<TTSErrorCallback>,
+    interruption_state: Option<Arc<InterruptionState>>,
 }
 
 impl AudioCallback for VoiceManagerTTSCallback {
@@ -372,8 +373,21 @@ impl AudioCallback for VoiceManagerTTSCallback {
     }
 
     fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let interruption_state = self.interruption_state.clone();
         Box::pin(async move {
-            // Handle completion if needed
+            // Reset interruption state when TTS completes
+            if let Some(state) = interruption_state {
+                // Only reset if we were in non-interruptible mode
+                if !state.allow_interruption.load(Ordering::Acquire) {
+                    state.allow_interruption.store(true, Ordering::Release);
+                    state.non_interruptible_until_ms.store(0, Ordering::Release);
+                    state.start_time_ms.store(0, Ordering::Release);
+                    
+                    // Reset accumulated duration
+                    let mut duration = state.accumulated_duration.lock();
+                    *duration = 0.0;
+                }
+            }
         })
     }
 }
@@ -516,6 +530,7 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback: self.tts_error_callback.read().clone(),
+                interruption_state: Some(self.interruption_state.clone()),
             });
 
             tts.on_audio(tts_callback)
@@ -742,14 +757,13 @@ impl VoiceManager {
                 .start_time_ms
                 .store(now, Ordering::Release);
 
-            // Calculate audio duration based on text length and sample rate
-            // Estimate: ~150 words per minute average speech rate
-            let word_count = text.split_whitespace().count() as f32;
-            let estimated_duration_seconds = (word_count / 150.0) * 60.0;
-            let until_ms = now + (estimated_duration_seconds * 1000.0) as usize;
+            // Initialize non_interruptible_until_ms to current time
+            // The actual duration will be calculated as TTS chunks arrive
+            // This avoids inaccurate text-based estimates that don't account for
+            // voice speed variations or actual audio processing time
             self.interruption_state
                 .non_interruptible_until_ms
-                .store(until_ms, Ordering::Release);
+                .store(now, Ordering::Release);
         } else {
             self.interruption_state
                 .allow_interruption
@@ -1078,6 +1092,7 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback,
                 error_callback: self.tts_error_callback.read().clone(),
+                interruption_state: Some(self.interruption_state.clone()),
             });
 
             tts.on_audio(tts_callback)
@@ -1111,6 +1126,7 @@ impl VoiceManager {
             let tts_callback = Arc::new(VoiceManagerTTSCallback {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback,
+                interruption_state: Some(self.interruption_state.clone()),
             });
 
             tts.on_audio(tts_callback)
@@ -1236,11 +1252,12 @@ impl VoiceManager {
             // Check if this is a duplicate of a recently forced speech_final
             let last_fired_ms = state.timer_last_fired_ms.load(Ordering::Acquire);
             const DUPLICATE_WINDOW_MS: usize = 500; // 500ms window to prevent duplicates
-            
+
             // If timer fired very recently with the same text, ignore this real speech_final
-            if last_fired_ms > 0 
+            if last_fired_ms > 0
                 && now_ms.saturating_sub(last_fired_ms) < DUPLICATE_WINDOW_MS
-                && state.last_forced_text == result.transcript {
+                && state.last_forced_text == result.transcript
+            {
                 debug!(
                     "Ignoring duplicate real speech_final - timer fired {}ms ago with same text",
                     now_ms.saturating_sub(last_fired_ms)
@@ -1289,7 +1306,7 @@ impl VoiceManager {
                 // Check if we should force speech_final
                 let callback_opt = {
                     let timer_state = speech_final_state_clone.read();
-                    
+
                     // Only fire if we're still waiting for speech_final
                     if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
                         timer_state.user_callback.clone()
@@ -1304,10 +1321,12 @@ impl VoiceManager {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as usize;
-                    
+
                     {
                         let mut timer_state = speech_final_state_clone.write();
-                        timer_state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                        timer_state
+                            .timer_last_fired_ms
+                            .store(fire_time_ms, Ordering::Release);
                         timer_state.last_forced_text = buffered_text.clone();
                         timer_state
                             .waiting_for_speech_final
@@ -1722,7 +1741,9 @@ mod tests {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as usize;
-                state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                state
+                    .timer_last_fired_ms
+                    .store(fire_time_ms, Ordering::Release);
                 state.last_forced_text = "Hello world".to_string();
                 state
                     .waiting_for_speech_final
@@ -1769,10 +1790,15 @@ mod tests {
                 let old_time_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as usize - 1000; // 1 second ago
-                state.timer_last_fired_ms.store(old_time_ms, Ordering::Release);
+                    .as_millis() as usize
+                    - 1000; // 1 second ago
+                state
+                    .timer_last_fired_ms
+                    .store(old_time_ms, Ordering::Release);
                 state.last_forced_text = "First".to_string();
-                state.waiting_for_speech_final.store(false, Ordering::Release);
+                state
+                    .waiting_for_speech_final
+                    .store(false, Ordering::Release);
             }
 
             // 2. Another is_final=true arrives after timer fired
@@ -1823,9 +1849,13 @@ mod tests {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as usize;
-                state.timer_last_fired_ms.store(fire_time_ms, Ordering::Release);
+                state
+                    .timer_last_fired_ms
+                    .store(fire_time_ms, Ordering::Release);
                 state.last_forced_text = "First segment".to_string();
-                state.waiting_for_speech_final.store(false, Ordering::Release);
+                state
+                    .waiting_for_speech_final
+                    .store(false, Ordering::Release);
             }
 
             // Real speech_final arrives but is ignored (timer already fired)

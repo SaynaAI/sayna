@@ -709,6 +709,10 @@ impl LiveKitClient {
             handle.abort();
         }
 
+        if let Some(room) = self.room.take() {
+            let _ = room.close().await;
+        }
+
         // Clean up audio publishing components
         self.audio_source = None;
         self.local_audio_track = None;
