@@ -1228,6 +1228,7 @@ async fn handle_config_message(
                         let livekit = livekit_client_clone.clone();
                         Box::pin(async move {
                             // Use try_write to avoid blocking in callback
+                            // If we can't get the lock, it's okay - audio will be cleared eventually
                             match livekit.try_write() {
                                 Ok(mut client) => {
                                     if let Err(e) = client.clear_audio().await {
@@ -1237,7 +1238,7 @@ async fn handle_config_message(
                                     }
                                 }
                                 Err(_) => {
-                                    debug!("LiveKit client busy during audio clear");
+                                    debug!("LiveKit client busy during audio clear - skipping");
                                 }
                             }
                         })
@@ -1269,7 +1270,8 @@ async fn handle_config_message(
 
                     // Try to send to LiveKit first if available
                     if let Some(livekit_client_arc) = &livekit_client {
-                        // Use try_write to avoid blocking in hot path
+                        // Use try_write for TTS audio to avoid blocking the hot path
+                        // If we can't get the lock immediately, fall back to WebSocket
                         match livekit_client_arc.try_write() {
                             Ok(mut client) => {
                                 // Check if LiveKit is connected before attempting to send
@@ -1294,7 +1296,7 @@ async fn handle_config_message(
                                 }
                             }
                             Err(_) => {
-                                debug!("LiveKit client busy, falling back to WebSocket");
+                                debug!("LiveKit client busy, falling back to WebSocket for TTS audio");
                                 // Will fall back to WebSocket below
                             }
                         }
@@ -1536,18 +1538,14 @@ async fn handle_clear_message(
 
         // If audio is disabled but LiveKit is configured, still clear LiveKit audio
         if let Some(livekit_manager) = livekit_client {
-            // Use try_write to avoid blocking
-            match livekit_manager.try_write() {
-                Ok(mut client) => match client.clear_audio().await {
-                    Ok(()) => {
-                        debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
-                    }
-                    Err(e) => {
-                        warn!("Failed to clear LiveKit audio buffer: {}", e);
-                    }
-                },
-                Err(_) => {
-                    debug!("LiveKit client busy, skipping audio clear");
+            // Use write() to wait for the lock - clear operation is important
+            let mut client = livekit_manager.write().await;
+            match client.clear_audio().await {
+                Ok(()) => {
+                    debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
+                }
+                Err(e) => {
+                    warn!("Failed to clear LiveKit audio buffer: {}", e);
                 }
             }
         }
@@ -1589,34 +1587,24 @@ async fn handle_send_message(
         }
     };
 
-    // Send message through LiveKit client
-    // Use try_write to avoid blocking
-    match livekit_client.try_write() {
-        Ok(mut client) => {
-            if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
-                error!("Failed to send message via LiveKit: {:?}", e);
-                let _ = message_tx
-                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: format!("Failed to send message via LiveKit: {e:?}"),
-                    }))
-                    .await;
-            } else {
-                debug!(
-                    "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
-                    message.len(),
-                    role,
-                    topic
-                );
-            }
-        }
-        Err(_) => {
-            warn!("LiveKit client busy, queueing message for retry");
-            let _ = message_tx
-                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: "LiveKit client busy, please retry".to_string(),
-                }))
-                .await;
-        }
+    // Use write() instead of try_write() to wait for the lock
+    // This is better than complex retry logic since the LiveKit operations are fast
+    let mut client = livekit_client.write().await;
+    
+    if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
+        error!("Failed to send message via LiveKit: {:?}", e);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to send message via LiveKit: {e:?}"),
+            }))
+            .await;
+    } else {
+        debug!(
+            "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
+            message.len(),
+            role,
+            topic
+        );
     }
 
     true
