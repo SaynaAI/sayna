@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -8,6 +9,10 @@ pub struct ServerConfig {
 
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
+
+    // Cache configuration (filesystem or memory)
+    pub cache_path: Option<PathBuf>, // if None, use in-memory cache
+    pub cache_ttl_seconds: Option<u64>,
 }
 
 impl ServerConfig {
@@ -27,12 +32,21 @@ impl ServerConfig {
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
 
+        // Cache configuration from env
+        let cache_path = env::var("CACHE_PATH").ok().map(PathBuf::from);
+        let cache_ttl_seconds = env::var("CACHE_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or(Some(30 * 24 * 60 * 60)); // 1 month (30 days) default
+
         Ok(ServerConfig {
             host,
             port,
             livekit_url,
             deepgram_api_key,
             elevenlabs_api_key,
+            cache_path,
+            cache_ttl_seconds,
         })
     }
 
@@ -85,6 +99,8 @@ mod tests {
             livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
         };
 
         let result = config.get_api_key("deepgram");
@@ -100,6 +116,8 @@ mod tests {
             livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
         };
 
         let result = config.get_api_key("elevenlabs");
@@ -115,6 +133,8 @@ mod tests {
             livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
         };
 
         let result = config.get_api_key("deepgram");
@@ -133,6 +153,8 @@ mod tests {
             livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
         };
 
         let result = config.get_api_key("unsupported_provider");
@@ -151,6 +173,8 @@ mod tests {
             livekit_url: "ws://localhost:7880".to_string(),
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
         };
 
         // Test uppercase

@@ -14,10 +14,12 @@ async fn test_websocket_voice_config() {
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
     };
 
     // Create application state
-    let app_state = AppState::new(config.clone());
+    let app_state = AppState::new(config.clone()).await;
 
     // Create router
     let app = routes::api::create_api_router()
@@ -82,8 +84,7 @@ async fn test_websocket_voice_config() {
             // Accept either "ready" or "error" since we're using test keys
             assert!(
                 msg_type == "ready" || msg_type == "error",
-                "Expected 'ready' or 'error' message, got: {}",
-                msg_type
+                "Expected 'ready' or 'error' message, got: {msg_type}"
             );
 
             if msg_type == "error" {
@@ -149,10 +150,12 @@ async fn test_websocket_invalid_message() {
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
     };
 
     // Create application state
-    let app_state = AppState::new(config.clone());
+    let app_state = AppState::new(config.clone()).await;
 
     // Create router
     let app = routes::api::create_api_router()

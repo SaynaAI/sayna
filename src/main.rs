@@ -16,11 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let config = ServerConfig::from_env()?;
     let address = config.address();
-
     println!("Starting server on {address}");
 
     // Create application state
-    let app_state = AppState::new(config);
+    let app_state = AppState::new(config).await;
 
     // Create router with both API and WebSocket routes
     let app = routes::api::create_api_router()

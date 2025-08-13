@@ -216,22 +216,6 @@ impl LiveKitManager {
             Ok(())
         }
     }
-
-    /// Get a channel receiver for audio data
-    pub async fn get_audio_receiver(&self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
-        if let Some(_sender) = &self.audio_sender {
-            let (_tx, rx) = mpsc::unbounded_channel();
-
-            // TODO: Implement proper audio receiver bridging
-            // This is a simplified approach - in a real implementation,
-            // you'd want a more sophisticated way to handle multiple receivers
-            debug!("Audio receiver requested but not fully implemented");
-
-            Some(rx)
-        } else {
-            None
-        }
-    }
 }
 
 impl Default for LiveKitManager {

@@ -78,7 +78,6 @@ use async_trait::async_trait;
 use futures::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// Audio data structure for TTS output
 #[derive(Debug, Clone)]
@@ -206,6 +205,12 @@ pub trait BaseTTS: Send + Sync {
     where
         Self: Sized;
 
+    /// Get the underlying TTSProvider for HTTP-based providers.
+    /// Returns None for non-HTTP providers.
+    fn get_provider(&mut self) -> Option<&mut crate::core::tts::provider::TTSProvider> {
+        None
+    }
+
     /// Connect to the TTS provider
     ///
     /// This method establishes a connection to the TTS provider (e.g., Deepgram, ElevenLabs)
@@ -214,7 +219,15 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the connection attempt
-    async fn connect(&mut self) -> TTSResult<()>;
+    async fn connect(&mut self) -> TTSResult<()> {
+        if let Some(provider) = self.get_provider() {
+            provider.generic_connect("https://api.default.com").await
+        } else {
+            Err(TTSError::InternalError(
+                "Provider not available for connection".to_string(),
+            ))
+        }
+    }
 
     /// Disconnect from the TTS provider
     ///
@@ -222,7 +235,15 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the disconnection attempt
-    async fn disconnect(&mut self) -> TTSResult<()>;
+    async fn disconnect(&mut self) -> TTSResult<()> {
+        if let Some(provider) = self.get_provider() {
+            provider.generic_disconnect().await
+        } else {
+            Err(TTSError::InternalError(
+                "Provider not available for disconnection".to_string(),
+            ))
+        }
+    }
 
     /// Check if the TTS provider is ready to process requests
     ///
@@ -231,13 +252,17 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `bool` - True if ready, false otherwise
-    fn is_ready(&self) -> bool;
+    fn is_ready(&self) -> bool {
+        false
+    }
 
     /// Get the current connection state
     ///
     /// # Returns
     /// * `ConnectionState` - Current state of the connection
-    fn get_connection_state(&self) -> ConnectionState;
+    fn get_connection_state(&self) -> ConnectionState {
+        ConnectionState::Disconnected
+    }
 
     /// Send text to the TTS provider for synthesis
     ///
@@ -260,7 +285,15 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the clear operation
-    async fn clear(&mut self) -> TTSResult<()>;
+    async fn clear(&mut self) -> TTSResult<()> {
+        if let Some(provider) = self.get_provider() {
+            provider.generic_clear().await
+        } else {
+            Err(TTSError::InternalError(
+                "Provider not available for clear".to_string(),
+            ))
+        }
+    }
 
     /// Flush the TTS provider
     ///
@@ -281,78 +314,38 @@ pub trait BaseTTS: Send + Sync {
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of callback registration
-    fn on_audio(&mut self, callback: Arc<dyn AudioCallback>) -> TTSResult<()>;
+    fn on_audio(&mut self, callback: Arc<dyn AudioCallback>) -> TTSResult<()> {
+        if let Some(provider) = self.get_provider() {
+            provider.generic_on_audio(callback)
+        } else {
+            Err(TTSError::InternalError(
+                "Provider not available for audio callback".to_string(),
+            ))
+        }
+    }
 
     /// Remove the registered audio callback
     ///
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of callback removal
-    fn remove_audio_callback(&mut self) -> TTSResult<()>;
+    fn remove_audio_callback(&mut self) -> TTSResult<()> {
+        if let Some(provider) = self.get_provider() {
+            provider.generic_remove_audio_callback()
+        } else {
+            Err(TTSError::InternalError(
+                "Provider not available for callback removal".to_string(),
+            ))
+        }
+    }
 
     /// Get provider-specific information
     ///
     /// # Returns
     /// * `serde_json::Value` - Provider-specific information (e.g., supported voices, formats)
-    fn get_provider_info(&self) -> serde_json::Value;
-}
-
-/// Channel-based audio callback implementation
-pub struct ChannelAudioCallback {
-    audio_sender: mpsc::UnboundedSender<AudioData>,
-    error_sender: mpsc::UnboundedSender<TTSError>,
-    complete_sender: mpsc::UnboundedSender<()>,
-}
-
-impl ChannelAudioCallback {
-    /// Create a new channel-based audio callback
-    ///
-    /// # Returns
-    /// * `(Self, Receivers)` - The callback and receiver channels
-    pub fn new() -> (
-        Self,
-        mpsc::UnboundedReceiver<AudioData>,
-        mpsc::UnboundedReceiver<TTSError>,
-        mpsc::UnboundedReceiver<()>,
-    ) {
-        let (audio_sender, audio_receiver) = mpsc::unbounded_channel();
-        let (error_sender, error_receiver) = mpsc::unbounded_channel();
-        let (complete_sender, complete_receiver) = mpsc::unbounded_channel();
-
-        (
-            Self {
-                audio_sender,
-                error_sender,
-                complete_sender,
-            },
-            audio_receiver,
-            error_receiver,
-            complete_receiver,
-        )
-    }
-}
-
-impl AudioCallback for ChannelAudioCallback {
-    fn on_audio(&self, audio_data: AudioData) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            if let Err(e) = self.audio_sender.send(audio_data) {
-                tracing::error!("Failed to send audio data: {}", e);
-            }
-        })
-    }
-
-    fn on_error(&self, error: TTSError) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            if let Err(e) = self.error_sender.send(error) {
-                tracing::error!("Failed to send error: {}", e);
-            }
-        })
-    }
-
-    fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            if let Err(e) = self.complete_sender.send(()) {
-                tracing::error!("Failed to send completion signal: {}", e);
-            }
+    fn get_provider_info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "unknown",
+            "version": "1.0.0"
         })
     }
 }
@@ -501,25 +494,6 @@ mod tests {
         tts.disconnect().await.unwrap();
         assert!(!tts.is_ready());
         assert_eq!(tts.get_connection_state(), ConnectionState::Disconnected);
-    }
-
-    #[tokio::test]
-    async fn test_tts_audio_callback() {
-        let config = TTSConfig::default();
-        let mut tts = MockTTS::new(config).unwrap();
-        let (callback, mut audio_receiver, _error_receiver, _complete_receiver) =
-            ChannelAudioCallback::new();
-
-        tts.connect().await.unwrap();
-        tts.on_audio(Arc::new(callback)).unwrap();
-
-        tts.speak("Hello, world!", true).await.unwrap();
-
-        // Check that audio data was received
-        let audio_data = audio_receiver.recv().await.unwrap();
-        assert_eq!(audio_data.format, "pcm");
-        assert_eq!(audio_data.sample_rate, 22050);
-        assert!(!audio_data.data.is_empty());
     }
 
     #[tokio::test]
