@@ -1,13 +1,16 @@
 mod base;
 pub mod deepgram;
 pub mod elevenlabs;
+pub mod provider;
 
 pub use base::{
-    AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState, TTSConfig,
-    TTSError, TTSFactory, TTSResult,
+    AudioCallback, AudioData, BaseTTS, BoxedTTS, ConnectionState, TTSConfig, TTSError, TTSFactory,
+    TTSResult,
 };
-pub use deepgram::DeepgramTTS;
-pub use elevenlabs::ElevenLabsTTS;
+pub use deepgram::{DEEPGRAM_TTS_URL, DeepgramTTS};
+pub use elevenlabs::{ELEVENLABS_TTS_URL, ElevenLabsTTS};
+pub use provider::{TTSProvider, TTSRequestBuilder};
+use std::collections::HashMap;
 
 /// Factory function to create a TTS provider
 pub fn create_tts_provider(provider_type: &str, config: TTSConfig) -> TTSResult<Box<dyn BaseTTS>> {
@@ -18,6 +21,13 @@ pub fn create_tts_provider(provider_type: &str, config: TTSConfig) -> TTSResult<
             "Unsupported TTS provider: {provider_type}. Supported providers: deepgram, elevenlabs"
         ))),
     }
+}
+
+pub fn get_tts_provider_urls() -> HashMap<String, String> {
+    let mut urls = HashMap::new();
+    urls.insert("deepgram".to_string(), DEEPGRAM_TTS_URL.to_string());
+    urls.insert("elevenlabs".to_string(), ELEVENLABS_TTS_URL.to_string());
+    urls
 }
 
 #[cfg(test)]

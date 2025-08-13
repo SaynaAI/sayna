@@ -1,0 +1,166 @@
+//! WebSocket configuration types and handlers
+//!
+//! This module contains all configuration-related types for WebSocket connections,
+//! including STT, TTS, and LiveKit configurations without API keys.
+
+use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh3::xxh3_128;
+
+use crate::{
+    core::{stt::STTConfig, tts::TTSConfig},
+    livekit::LiveKitConfig,
+};
+
+/// Default value for audio enabled flag (true)
+pub fn default_audio_enabled() -> Option<bool> {
+    Some(true)
+}
+
+/// Default value for allow_interruption flag (true)
+pub fn default_allow_interruption() -> Option<bool> {
+    Some(true)
+}
+
+/// STT configuration for WebSocket messages (without API key)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct STTWebSocketConfig {
+    /// Provider name (e.g., "deepgram")
+    pub provider: String,
+    /// Language code for transcription (e.g., "en-US", "es-ES")
+    pub language: String,
+    /// Sample rate of the audio in Hz
+    pub sample_rate: u32,
+    /// Number of audio channels (1 for mono, 2 for stereo)
+    pub channels: u16,
+    /// Enable punctuation in results
+    pub punctuation: bool,
+    /// Encoding of the audio
+    pub encoding: String,
+    /// Model to use for transcription
+    pub model: String,
+}
+
+impl STTWebSocketConfig {
+    /// Convert WebSocket STT config to full STT config with API key
+    ///
+    /// # Arguments
+    /// * `api_key` - The API key to use for this provider
+    ///
+    /// # Returns
+    /// * `STTConfig` - Full STT configuration
+    pub fn to_stt_config(&self, api_key: String) -> STTConfig {
+        STTConfig {
+            provider: self.provider.clone(),
+            api_key,
+            language: self.language.clone(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            punctuation: self.punctuation,
+            encoding: self.encoding.clone(),
+            model: self.model.clone(),
+        }
+    }
+}
+
+/// LiveKit configuration for WebSocket messages
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LiveKitWebSocketConfig {
+    /// LiveKit JWT token for room access
+    pub token: String,
+}
+
+impl LiveKitWebSocketConfig {
+    /// Convert WebSocket LiveKit config to full LiveKit config with audio parameters
+    ///
+    /// # Arguments
+    /// * `tts_config` - TTS configuration containing audio parameters
+    ///
+    /// # Returns
+    /// * `LiveKitConfig` - Full LiveKit configuration with audio parameters
+    pub fn to_livekit_config(
+        &self,
+        tts_config: &TTSWebSocketConfig,
+        livekit_url: &str,
+    ) -> LiveKitConfig {
+        LiveKitConfig {
+            url: livekit_url.to_string(),
+            token: self.token.clone(),
+            // Use TTS config sample rate, default to 24000 if not specified
+            sample_rate: tts_config.sample_rate.unwrap_or(24000),
+            // Assume mono audio for TTS (1 channel)
+            channels: 1,
+            // Enable noise filter by default for better audio quality
+            // Can be disabled via config if lower latency is needed
+            enable_noise_filter: true,
+        }
+    }
+}
+
+/// TTS configuration for WebSocket messages (without API key)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TTSWebSocketConfig {
+    /// Provider name (e.g., "deepgram")
+    pub provider: String,
+    /// Voice ID or name to use for synthesis
+    pub voice_id: Option<String>,
+    /// Speaking rate (0.25 to 4.0, 1.0 is normal)
+    pub speaking_rate: Option<f32>,
+    /// Audio format preference
+    pub audio_format: Option<String>,
+    /// Sample rate preference
+    pub sample_rate: Option<u32>,
+    /// Connection timeout in seconds
+    pub connection_timeout: Option<u64>,
+    /// Request timeout in seconds
+    pub request_timeout: Option<u64>,
+    /// Model to use for TTS
+    pub model: String,
+}
+
+impl TTSWebSocketConfig {
+    /// Convert WebSocket TTS config to full TTS config with API key and proper defaults
+    ///
+    /// # Arguments
+    /// * `api_key` - The API key to use for this provider
+    ///
+    /// # Returns
+    /// * `TTSConfig` - Full TTS configuration with defaults applied
+    pub fn to_tts_config(&self, api_key: String) -> TTSConfig {
+        // Start with defaults
+        let defaults = TTSConfig::default();
+
+        TTSConfig {
+            provider: self.provider.clone(),
+            api_key,
+            model: self.model.clone(),
+            // Use provided values or fall back to defaults
+            voice_id: self.voice_id.clone().or(defaults.voice_id),
+            speaking_rate: self.speaking_rate.or(defaults.speaking_rate),
+            audio_format: self.audio_format.clone().or(defaults.audio_format),
+            sample_rate: self.sample_rate.or(defaults.sample_rate),
+            connection_timeout: self.connection_timeout.or(defaults.connection_timeout),
+            request_timeout: self.request_timeout.or(defaults.request_timeout),
+        }
+    }
+}
+
+/// Compute TTS configuration hash for caching
+pub fn compute_tts_config_hash(tts_config: &TTSConfig) -> String {
+    let mut s = String::new();
+    s.push_str(tts_config.provider.as_str());
+    s.push('|');
+    s.push_str(tts_config.voice_id.as_deref().unwrap_or(""));
+    s.push('|');
+    s.push_str(&tts_config.model);
+    s.push('|');
+    s.push_str(tts_config.audio_format.as_deref().unwrap_or(""));
+    s.push('|');
+    if let Some(sr) = tts_config.sample_rate {
+        s.push_str(&sr.to_string());
+    }
+    s.push('|');
+    if let Some(rate) = tts_config.speaking_rate {
+        s.push_str(&format!("{rate:.3}"));
+    }
+    format!("{:032x}", xxh3_128(s.as_bytes()))
+}

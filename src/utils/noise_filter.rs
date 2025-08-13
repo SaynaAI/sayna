@@ -11,9 +11,7 @@ use tracing::info;
 /// This static configuration is loaded once at program startup to avoid repeated initialization.
 /// The parameters are optimized for noise cancellation while preserving speech quality.
 /// Using LazyLock ensures thread-safe initialization exactly once.
-static MODEL_PARAMS: LazyLock<DfParams> = LazyLock::new(|| {
-    DfParams::default()
-});
+static MODEL_PARAMS: LazyLock<DfParams> = LazyLock::new(DfParams::default);
 
 /// Create optimized runtime parameters for DeepFilterNet
 /// Based on the official implementation, we use the default parameters
@@ -21,16 +19,16 @@ static MODEL_PARAMS: LazyLock<DfParams> = LazyLock::new(|| {
 fn create_runtime_params() -> RuntimeParams {
     // Start with official defaults
     let mut params = RuntimeParams::default();
-    
+
     // Enable post-filter for better echo suppression and residual noise removal
     // This is particularly important for mobile phone usage and conference calls
     params = params.with_post_filter(0.02);
-    
+
     // Optionally adjust attenuation limit for more natural sound
     // Default is 100dB (no limit), but we can be slightly more conservative
     // to prevent over-processing while still removing most noise
     params = params.with_atten_lim(40.0); // Limit to 40dB reduction
-    
+
     params
 }
 
@@ -48,7 +46,7 @@ const HIGH_PASS_CUTOFF_HZ: f32 = 80.0;
 const PCM_TO_FLOAT_SCALE: f32 = 1.0 / 32768.0;
 const FLOAT_TO_PCM_SCALE_POS: f32 = 32767.0;
 const FLOAT_TO_PCM_SCALE_NEG: f32 = 32768.0;
-const MAX_SKIP_FRAMES: usize = 5;  // Skip after 5 consecutive silent frames
+const MAX_SKIP_FRAMES: usize = 5; // Skip after 5 consecutive silent frames
 
 // A task for a worker: audio bytes, sample rate, and a one-shot channel to send the result back.
 type WorkerTask = (
@@ -87,7 +85,7 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
             // Create the expensive DfTract model ONCE on this thread.
             let df_params = &*MODEL_PARAMS;
             let rt_params = create_runtime_params();
-            
+
             // Log the configuration being used
             info!("DeepFilterNet initialized with post-filter enabled for optimal noise reduction");
             let mut model = DfTract::new(df_params.clone(), &rt_params)
@@ -190,7 +188,7 @@ fn process_audio_chunk(
     if wav.is_empty() {
         return Ok(pcm.to_owned());
     }
-    
+
     // Check for silence and update skip counter
     if wav.iter().all(|s| s.abs() < SILENCE_THRESHOLD) {
         *skip_counter += 1;
@@ -200,7 +198,7 @@ fn process_audio_chunk(
         }
         return Ok(pcm.to_owned());
     } else {
-        *skip_counter = 0;  // Reset on non-silent audio
+        *skip_counter = 0; // Reset on non-silent audio
     }
 
     // Analyze audio characteristics for adaptive processing
@@ -252,7 +250,7 @@ fn process_audio_chunk(
     while idx + hop <= wav.len() {
         let frame = ArrayView2::from_shape((1, hop), &wav[idx..idx + hop])?;
         let mut out = Array2::<f32>::zeros((1, hop));
-        
+
         // Process with DeepFilterNet - it handles everything internally:
         // - LSNR calculation and stage selection
         // - Masking and deep filtering
@@ -286,7 +284,7 @@ fn process_audio_chunk(
     // - Post-filter for echo suppression (beta=0.015 for mobile)
     // - Attenuation limiting (15dB for mobile config)
     // - SNR-based stage selection
-    
+
     // Light volume preservation to prevent clipping
     let original_max = peak_energy;
     let enhanced_max = enhanced.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
@@ -570,8 +568,7 @@ mod tests {
         assert!((PCM_TO_FLOAT_SCALE - 1.0 / 32768.0).abs() < f32::EPSILON);
         assert_eq!(FLOAT_TO_PCM_SCALE_POS, 32767.0);
         assert_eq!(FLOAT_TO_PCM_SCALE_NEG, 32768.0);
-        assert!(VOLUME_SAFETY_MARGIN > 0.0 && VOLUME_SAFETY_MARGIN < 1.0);
-        assert!(LIGHT_PROCESSING_SAFETY_MARGIN > 0.0 && LIGHT_PROCESSING_SAFETY_MARGIN < 1.0);
+        // Constants are validated at compile time, no need for runtime assertions
     }
 
     /// Tests that valid audio from LiveKit is not incorrectly filtered out

@@ -105,7 +105,7 @@ mod tests {
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
-        assert_eq!(config.enable_noise_filter, true);
+        assert!(config.enable_noise_filter);
     }
 
     #[test]

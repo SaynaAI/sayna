@@ -1,3 +1,5 @@
+pub mod cache;
+pub mod state;
 pub mod stt;
 pub mod tts;
 pub mod voice_manager;
@@ -10,11 +12,14 @@ pub use stt::{
 };
 
 pub use tts::{
-    AudioCallback, AudioData, BaseTTS, BoxedTTS, ChannelAudioCallback, ConnectionState,
-    DeepgramTTS, ElevenLabsTTS, TTSConfig, TTSError, TTSFactory, TTSResult, create_tts_provider,
+    AudioCallback, AudioData, BaseTTS, BoxedTTS, ConnectionState, DeepgramTTS, TTSConfig, TTSError,
+    TTSFactory, TTSResult, create_tts_provider, get_tts_provider_urls,
 };
 
 pub use voice_manager::{
     STTCallback, TTSAudioCallback, TTSErrorCallback, VoiceManager, VoiceManagerConfig,
     VoiceManagerError, VoiceManagerResult,
 };
+
+// Re-export CoreState for external use
+pub use state::CoreState;

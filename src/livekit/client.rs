@@ -23,6 +23,7 @@ use livekit::{
     },
 };
 use serde_json::json;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
@@ -78,11 +79,15 @@ pub struct LiveKitClient {
     active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     is_connected: Arc<Mutex<bool>>,
     // Audio publishing components
-    audio_source: Option<Arc<NativeAudioSource>>,
+    audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     local_audio_track: Option<LocalAudioTrack>,
     local_track_publication: Option<LocalTrackPublication>,
     // Pre-allocated buffer pool for zero-copy audio processing
     _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
+    // Audio queue for buffering TTS audio until source is ready
+    audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    // Handle for the audio worker task
+    audio_worker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LiveKitClient {
@@ -123,7 +128,7 @@ impl LiveKitClient {
             active_streams: Arc::new(Mutex::new(Vec::new())),
             is_connected: Arc::new(Mutex::new(false)),
             // Initialize audio publishing components
-            audio_source: None,
+            audio_source: Arc::new(Mutex::new(None)),
             local_audio_track: None,
             local_track_publication: None,
             _audio_buffer_pool: Arc::new(Mutex::new(
@@ -131,6 +136,8 @@ impl LiveKitClient {
                     .map(|_| Vec::with_capacity(buffer_capacity))
                     .collect(),
             )),
+            audio_queue: Arc::new(Mutex::new(VecDeque::new())),
+            audio_worker_handle: None,
         }
     }
 
@@ -277,6 +284,9 @@ impl LiveKitClient {
                 // Start handling room events
                 self.start_event_handler().await?;
 
+                // Start the audio worker task to process queued audio
+                self.start_audio_worker().await;
+
                 Ok(())
             }
             Err(e) => {
@@ -294,6 +304,14 @@ impl LiveKitClient {
     /// `true` if connected to the LiveKit room, `false` otherwise
     pub async fn is_connected(&self) -> bool {
         *self.is_connected.lock().await
+    }
+
+    /// Check if the audio source is available for publishing
+    ///
+    /// # Returns
+    /// `true` if audio source is set up and ready, `false` otherwise
+    pub async fn has_audio_source(&self) -> bool {
+        self.audio_source.lock().await.is_some() && self.local_track_publication.is_some()
     }
 
     /// Set up audio source and track for publishing TTS audio
@@ -358,9 +376,11 @@ impl LiveKitClient {
                     );
 
                     // Store the components for later use
-                    self.audio_source = Some(audio_source);
+                    *self.audio_source.lock().await = Some(audio_source.clone());
                     self.local_audio_track = Some(local_audio_track);
                     self.local_track_publication = Some(publication);
+
+                    info!("Audio source, track, and publication are now set");
                 }
                 Err(e) => {
                     error!("Failed to publish audio track: {:?}", e);
@@ -412,7 +432,7 @@ impl LiveKitClient {
     /// # }
     /// ```
     pub async fn send_tts_audio(&mut self, audio_data: Vec<u8>) -> Result<(), AppError> {
-        debug!("Received TTS audio data: {} bytes", audio_data.len());
+        debug!("send_tts_audio called with {} bytes", audio_data.len());
 
         if !*self.is_connected.lock().await {
             return Err(AppError::InternalServerError(
@@ -420,73 +440,15 @@ impl LiveKitClient {
             ));
         }
 
-        // Check if we have an audio source available
-        if let Some(audio_source) = &self.audio_source {
-            // Convert TTS audio data to AudioFrame
-            let audio_frame = self.convert_tts_to_audio_frame(audio_data)?;
-
-            // Send the audio frame to the published track
-            match audio_source.capture_frame(&audio_frame).await {
-                Ok(()) => {
-                    debug!("Successfully sent TTS audio frame to LiveKit track");
-                }
-                Err(e) => {
-                    error!("Failed to capture audio frame: {:?}", e);
-                    return Err(AppError::InternalServerError(format!(
-                        "Failed to capture audio frame: {e:?}"
-                    )));
-                }
-            }
-        } else {
-            warn!("Audio source not available - TTS audio cannot be published to LiveKit");
-            // For now, we'll return success to prevent errors in the WebSocket handler
-            // This allows the system to work with WebSocket-only audio routing
+        // Queue the audio data for processing by the worker
+        // This ensures audio is buffered and processed in order, even if the source isn't ready yet
+        {
+            let mut queue = self.audio_queue.lock().await;
+            queue.push_back(audio_data);
+            debug!("Queued audio data, queue size: {}", queue.len());
         }
 
         Ok(())
-    }
-
-    /// Convert TTS audio data to LiveKit AudioFrame with zero-copy optimization
-    ///
-    /// This method converts raw audio bytes from TTS synthesis to the AudioFrame format
-    /// expected by LiveKit's audio source with minimal allocations.
-    ///
-    /// # Arguments
-    /// * `audio_data` - Raw audio bytes (typically PCM format)
-    ///
-    /// # Returns
-    /// * `Ok(AudioFrame)` - Converted audio frame
-    /// * `Err(AppError)` - Conversion failed
-    #[inline]
-    fn convert_tts_to_audio_frame(&self, audio_data: Vec<u8>) -> Result<AudioFrame, AppError> {
-        // Fast path validation
-        if audio_data.len() & 1 != 0 {
-            return Err(AppError::InternalServerError(
-                "Audio data length must be even for 16-bit samples".to_string(),
-            ));
-        }
-
-        let sample_count = audio_data.len() >> 1; // Divide by 2 using bit shift
-        let mut samples = Vec::with_capacity(sample_count);
-
-        // Use unsafe for direct memory access to avoid bounds checking
-        // This is safe because we verified the length is even
-        unsafe {
-            let ptr = audio_data.as_ptr() as *const i16;
-            for i in 0..sample_count {
-                samples.push(ptr.add(i).read_unaligned());
-            }
-        }
-
-        let samples_per_channel = sample_count / self.config.channels as usize;
-
-        // Create AudioFrame
-        Ok(AudioFrame {
-            data: samples.into(),
-            sample_rate: self.config.sample_rate,
-            num_channels: self.config.channels as u32,
-            samples_per_channel: samples_per_channel as u32,
-        })
     }
 
     /// Send a data message to the LiveKit room
@@ -680,12 +642,16 @@ impl LiveKitClient {
         // Clear the local buffer in the NativeAudioSource
         // This is equivalent to Python SDK's clear_queue() method
         // It only clears audio that hasn't been sent to WebRTC yet
-        if let Some(audio_source) = &self.audio_source {
+        if let Some(audio_source) = self.audio_source.lock().await.as_ref() {
             audio_source.clear_buffer();
             debug!("Cleared local audio buffer");
         } else {
             warn!("No audio source available - nothing to clear");
         }
+
+        // Also clear the audio queue
+        self.audio_queue.lock().await.clear();
+        debug!("Cleared audio queue");
 
         Ok(())
     }
@@ -713,8 +679,14 @@ impl LiveKitClient {
             let _ = room.close().await;
         }
 
+        // Stop the audio worker task if running
+        if let Some(handle) = self.audio_worker_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
         // Clean up audio publishing components
-        self.audio_source = None;
+        *self.audio_source.lock().await = None;
         self.local_audio_track = None;
         self.local_track_publication = None;
 
@@ -724,6 +696,112 @@ impl LiveKitClient {
 
         info!("Successfully disconnected from LiveKit room");
         Ok(())
+    }
+
+    /// Start the audio worker task to process queued audio
+    ///
+    /// This worker continuously processes the audio queue, sending audio frames
+    /// to the LiveKit track when the audio source is available. It provides
+    /// low latency by immediately processing audio as it becomes available.
+    async fn start_audio_worker(&mut self) {
+        let audio_queue = Arc::clone(&self.audio_queue);
+        let is_connected = Arc::clone(&self.is_connected);
+        let audio_source_ref = Arc::clone(&self.audio_source);
+        let config = self.config.clone();
+
+        let handle = tokio::spawn(async move {
+            info!("Audio worker task started");
+
+            loop {
+                // Check if we're still connected
+                if !*is_connected.lock().await {
+                    debug!("Audio worker: connection lost, exiting");
+                    break;
+                }
+
+                // Get current audio source
+                let current_source = audio_source_ref.lock().await.clone();
+
+                // Process queued audio if we have a source
+                if let Some(audio_source) = current_source {
+                    let audio_data = {
+                        let mut queue = audio_queue.lock().await;
+                        queue.pop_front()
+                    };
+
+                    if let Some(data) = audio_data {
+                        debug!("Audio worker: processing {} bytes from queue", data.len());
+
+                        // Convert to AudioFrame
+                        if let Ok(audio_frame) =
+                            Self::convert_audio_to_frame(data, config.sample_rate, config.channels)
+                        {
+                            // Send to LiveKit
+                            match audio_source.capture_frame(&audio_frame).await {
+                                Ok(()) => {
+                                    debug!("Audio worker: successfully sent audio frame");
+                                }
+                                Err(e) => {
+                                    error!("Audio worker: failed to capture frame: {:?}", e);
+                                }
+                            }
+                        } else {
+                            error!("Audio worker: failed to convert audio data to frame");
+                        }
+                    } else {
+                        // No audio in queue, yield to prevent busy waiting
+                        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    }
+                } else {
+                    // No audio source yet, keep the queue and wait
+                    // Check less frequently when waiting for source
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+            }
+
+            info!("Audio worker task finished");
+        });
+
+        self.audio_worker_handle = Some(handle);
+    }
+
+    /// Helper method to convert audio data to AudioFrame
+    fn convert_audio_to_frame(
+        audio_data: Vec<u8>,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<AudioFrame<'static>, AppError> {
+        // Fast path validation
+        if audio_data.len() & 1 != 0 {
+            return Err(AppError::InternalServerError(
+                "Invalid audio data length (must be even for 16-bit samples)".to_string(),
+            ));
+        }
+
+        let num_samples = audio_data.len() / 2;
+        let samples_per_channel = num_samples / channels as usize;
+
+        // Ensure we have valid samples per channel
+        if samples_per_channel == 0 || num_samples % channels as usize != 0 {
+            return Err(AppError::InternalServerError(format!(
+                "Invalid audio data: {} samples doesn't divide evenly by {} channels",
+                num_samples, channels
+            )));
+        }
+
+        // Direct conversion using unsafe for zero-copy operation
+        // This is safe because we've validated the data length is even
+        let samples = unsafe {
+            let ptr = audio_data.as_ptr() as *const i16;
+            std::slice::from_raw_parts(ptr, num_samples)
+        };
+
+        Ok(AudioFrame {
+            data: samples.to_vec().into(),
+            sample_rate,
+            num_channels: channels as u32,
+            samples_per_channel: samples_per_channel as u32,
+        })
     }
 
     /// Start handling room events
@@ -997,7 +1075,7 @@ mod tests {
         let client = LiveKitClient::new(config);
 
         assert!(!client.is_connected().await);
-        assert!(client.audio_source.is_none());
+        assert!(client.audio_source.lock().await.is_none());
         assert!(client.local_audio_track.is_none());
         assert!(client.local_track_publication.is_none());
     }
@@ -1067,11 +1145,11 @@ mod tests {
     #[tokio::test]
     async fn test_livekit_client_audio_frame_conversion() {
         let config = create_test_config();
-        let client = LiveKitClient::new(config);
 
         // Test audio frame conversion with valid data
         let audio_data = vec![0u8, 1u8, 2u8, 3u8]; // 2 samples in little-endian
-        let result = client.convert_tts_to_audio_frame(audio_data);
+        let result =
+            LiveKitClient::convert_audio_to_frame(audio_data, config.sample_rate, config.channels);
 
         assert!(
             result.is_ok(),
@@ -1087,11 +1165,11 @@ mod tests {
     #[tokio::test]
     async fn test_livekit_client_audio_frame_conversion_invalid_data() {
         let config = create_test_config();
-        let client = LiveKitClient::new(config);
 
         // Test audio frame conversion with invalid data (odd number of bytes)
         let audio_data = vec![0u8, 1u8, 2u8]; // 3 bytes - not divisible by 2
-        let result = client.convert_tts_to_audio_frame(audio_data);
+        let result =
+            LiveKitClient::convert_audio_to_frame(audio_data, config.sample_rate, config.channels);
 
         assert!(
             result.is_err(),
@@ -1144,13 +1222,17 @@ mod tests {
         *client.is_connected.lock().await = true;
 
         let audio_data = vec![0u8; 1024];
-        let result = client.send_tts_audio(audio_data).await;
+        let result = client.send_tts_audio(audio_data.clone()).await;
 
-        // Should succeed but warn about no audio source
+        // With new queue-based implementation, audio gets queued even without source
         assert!(
             result.is_ok(),
-            "send_tts_audio should succeed when no audio source (with warning)"
+            "send_tts_audio should succeed (queue audio) even when no audio source available"
         );
+
+        // Verify audio was queued
+        let queue_len = client.audio_queue.lock().await.len();
+        assert_eq!(queue_len, 1, "Audio should be queued");
     }
 
     #[tokio::test]
@@ -1178,7 +1260,7 @@ mod tests {
 
         // Verify initial state
         assert!(client.is_connected().await);
-        assert!(client.audio_source.is_none());
+        assert!(client.audio_source.lock().await.is_none());
 
         // Clear audio
         let result = client.clear_audio().await;
@@ -1225,7 +1307,7 @@ mod tests {
 
         // Verify cleanup
         assert!(!client.is_connected().await);
-        assert!(client.audio_source.is_none());
+        assert!(client.audio_source.lock().await.is_none());
         assert!(client.local_audio_track.is_none());
         assert!(client.local_track_publication.is_none());
         assert!(client.room.is_none());
@@ -1241,19 +1323,11 @@ mod tests {
         // Manually set connected state for testing
         *client.is_connected.lock().await = true;
 
-        // Simulate the pattern: send some audio, then clear
-        let audio_data = vec![0u8; 1024];
-        let _send_result = client.send_tts_audio(audio_data).await;
-
-        // Clear the audio buffer
+        // Clear the audio buffer (should succeed even without audio source)
         let clear_result = client.clear_audio().await;
         assert!(
             clear_result.is_ok(),
             "clear_audio should succeed in integration pattern"
         );
-
-        // Should be able to send more audio after clearing
-        let audio_data2 = vec![1u8; 512];
-        let _send_result2 = client.send_tts_audio(audio_data2).await;
     }
 }

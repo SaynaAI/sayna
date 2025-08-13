@@ -16,10 +16,12 @@ async fn test_health_check() {
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: None,
         elevenlabs_api_key: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
     };
 
     // Create app state
-    let app_state = AppState::new(config);
+    let app_state = AppState::new(config).await;
 
     // Create router with state
     let app = routes::api::create_api_router().with_state(app_state);
