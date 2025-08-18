@@ -912,7 +912,7 @@ impl VoiceManager {
 
                     // Create forced result with the actual buffered text
                     let forced_result = STTResult {
-                        transcript: buffered_text,
+                        transcript: String::new(),
                         is_final: true,
                         is_speech_final: true,
                         confidence: 1.0, // High confidence for forced result
@@ -939,4 +939,3 @@ impl VoiceManager {
 // Ensure VoiceManager is thread-safe
 unsafe impl Send for VoiceManager {}
 unsafe impl Sync for VoiceManager {}
-
