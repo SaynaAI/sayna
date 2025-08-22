@@ -88,17 +88,19 @@ impl ReqManager {
         Client::builder()
             // HTTP/2 configuration for multiplexing (will fallback to HTTP/1.1 if not supported)
             // Do not use http2_prior_knowledge to preserve broader compatibility
-            .http2_keep_alive_interval(Some(Duration::from_secs(10)))
+            .http2_initial_stream_window_size(4_194_304) // 4MB for faster data transfer
+            .http2_initial_connection_window_size(8_388_608) // 8MB for better throughput
+            .http2_keep_alive_interval(Some(Duration::from_secs(5))) // More frequent keep-alive
             .http2_keep_alive_timeout(Duration::from_secs(10))
             .http2_keep_alive_while_idle(true)
             .http2_adaptive_window(true)
             // Connection pool configuration tuned for low-latency reuse
             .pool_idle_timeout(None) // keep idle connections indefinitely
-            .pool_max_idle_per_host(128)
+            .pool_max_idle_per_host(256) // Increased from 128 for better connection reuse
             // TCP optimizations
-            .tcp_keepalive(Duration::from_secs(20))
+            .tcp_keepalive(Duration::from_secs(10)) // More aggressive keep-alive
             .tcp_nodelay(true) // Disable Nagle's algorithm for lower latency
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_millis(1000)) // Reduced from 5s for faster failures
             .timeout(Duration::from_secs(30))
             .user_agent("sayna-req-manager/1.0")
             .build()
@@ -183,6 +185,119 @@ impl ReqManager {
 
         println!("Warmup complete for {parallel_streams} parallel streams");
         Ok(())
+    }
+
+    /// Aggressive warmup by sending 2x max concurrent requests to fully prime the connection pool
+    ///
+    /// This method sends multiple concurrent HEAD requests to establish and warm up
+    /// all potential connections in the pool, reducing first-request latency.
+    ///
+    /// # Arguments
+    /// * `url` - The URL to warm up connections with
+    pub async fn aggressive_warmup(
+        &self,
+        url: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use futures::future::join_all;
+
+        // Send 2x concurrent requests to fully warm the pool
+        let warmup_count = self.max_concurrent_requests * 2;
+        
+        println!("Starting aggressive warmup with {} parallel requests", warmup_count);
+        
+        let warmup_futures: Vec<_> = (0..warmup_count)
+            .map(|i| {
+                let client = Arc::clone(&self.client);
+                let url = url.to_string();
+                
+                async move {
+                    let start = std::time::Instant::now();
+                    
+                    // Use HEAD requests with short timeout for minimal overhead
+                    let result = client
+                        .head(&url)
+                        .timeout(Duration::from_millis(200))
+                        .send()
+                        .await;
+                    
+                    match result {
+                        Ok(resp) => {
+                            // Consume response to properly reuse connection
+                            let _ = resp.bytes().await;
+                            let elapsed = start.elapsed();
+                            if i < 10 {  // Only log first 10 to avoid spam
+                                println!("  Aggressive warmup stream {} completed in {:?}", i, elapsed);
+                            }
+                            Ok(())
+                        }
+                        Err(e) if e.is_timeout() => {
+                            // Timeout is OK for warmup, connection is established
+                            Ok(())
+                        }
+                        Err(e) => {
+                            if i < 10 {  // Only log first 10 errors
+                                eprintln!("  Aggressive warmup stream {} failed: {}", i, e);
+                            }
+                            Err(e)
+                        }
+                    }
+                }
+            })
+            .collect();
+        
+        let results = join_all(warmup_futures).await;
+        
+        let successful = results.iter().filter(|r| r.is_ok()).count();
+        println!("Aggressive warmup complete: {}/{} successful", successful, warmup_count);
+        
+        Ok(())
+    }
+
+    /// Start a background task that keeps connections alive by sending periodic lightweight requests
+    ///
+    /// This prevents connection closure due to idle timeouts and ensures connections
+    /// remain warm for immediate use.
+    ///
+    /// # Arguments
+    /// * `url` - The URL to send keep-alive requests to (should be a lightweight endpoint)
+    ///
+    /// # Returns
+    /// A JoinHandle for the spawned task that can be used to cancel the keep-alive loop
+    pub fn start_keepalive_task(&self, url: String) -> tokio::task::JoinHandle<()> {
+        let client = Arc::clone(&self.client);
+        let interval_secs = 5; // Send keep-alive every 5 seconds
+        
+        println!("Starting keep-alive task for URL: {}", url);
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            
+            loop {
+                interval.tick().await;
+                
+                // Send lightweight HEAD request to keep connection alive
+                let result = client
+                    .head(&url)
+                    .header("X-Keep-Alive", "true")
+                    .timeout(Duration::from_millis(100))
+                    .send()
+                    .await;
+                
+                match result {
+                    Ok(_) => {
+                        // Success - connection kept alive
+                    }
+                    Err(e) if e.is_timeout() => {
+                        // Timeout is acceptable for keep-alive
+                    }
+                    Err(e) => {
+                        // Log error but continue - connection might recover
+                        eprintln!("Keep-alive request failed: {}", e);
+                    }
+                }
+            }
+        })
     }
 
     /// Get the number of currently available clients
@@ -372,6 +487,56 @@ mod tests {
 
         // Test warmup with GET
         manager.warmup(&url, "GET").await.unwrap();
+
+        // Cleanup
+        let _ = tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_warmup() {
+        // Start a local test server for aggressive warmup
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Use a channel to control server shutdown
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept_result = listener.accept() => {
+                        if let Ok((mut socket, _)) = accept_result {
+                            tokio::spawn(async move {
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                let mut buf = [0; 1024];
+                                // Read the request
+                                let _ = socket.read(&mut buf).await;
+                                // Send response
+                                let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                                let _ = socket.write_all(response.as_bytes()).await;
+                                let _ = socket.flush().await;
+                            });
+                        }
+                    }
+                    _ = rx.recv() => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Give server time to start
+        sleep(Duration::from_millis(10)).await;
+
+        let manager = ReqManager::new(3).await.unwrap();
+        let url = format!("http://{addr}/warmup");
+
+        // Test aggressive warmup
+        manager.aggressive_warmup(&url).await.unwrap();
+
+        // Verify manager is still functional after aggressive warmup
+        let guard = manager.acquire().await.unwrap();
+        assert!(guard.client().get(&url).send().await.is_ok());
 
         // Cleanup
         let _ = tx.send(()).await;
