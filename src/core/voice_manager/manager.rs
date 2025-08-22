@@ -876,8 +876,8 @@ impl VoiceManager {
             let speech_final_state_clone = speech_final_state.clone();
 
             let timer_handle = tokio::spawn(async move {
-                // Wait for timeout period (using 2300ms to match Python's 2.3 seconds)
-                tokio::time::sleep(Duration::from_millis(2300)).await;
+                // Wait for timeout period (using 1800ms to match Python's 1.8 seconds)
+                tokio::time::sleep(Duration::from_millis(1800)).await;
 
                 // Check if we should force speech_final
                 let callback_opt = {
