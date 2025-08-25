@@ -11,6 +11,7 @@
 //! - **Event-Driven Architecture**: Handle room events and participant changes
 //! - **Connection Management**: Robust connection lifecycle with cleanup
 
+use crate::utils::noise_filter::reduce_noise_async;
 use futures::StreamExt;
 use livekit::prelude::*;
 use livekit::{
@@ -789,19 +790,37 @@ impl LiveKitClient {
             )));
         }
 
-        // Direct conversion using unsafe for zero-copy operation
-        // This is safe because we've validated the data length is even
-        let samples = unsafe {
-            let ptr = audio_data.as_ptr() as *const i16;
-            std::slice::from_raw_parts(ptr, num_samples)
-        };
+        // Convert bytes to i16 samples with proper endianness handling
+        // Audio data from TTS/files is typically in little-endian PCM format
+        let mut samples = Vec::with_capacity(num_samples);
+        for chunk in audio_data.chunks_exact(2) {
+            // Convert two bytes to one i16 sample (little-endian)
+            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+            samples.push(sample);
+        }
 
         Ok(AudioFrame {
-            data: samples.to_vec().into(),
+            data: samples.into(),
             sample_rate,
             num_channels: channels as u32,
             samples_per_channel: samples_per_channel as u32,
         })
+    }
+
+    /// Helper method to convert AudioFrame to raw audio bytes
+    fn convert_frame_to_audio(audio_frame: &AudioFrame) -> Vec<u8> {
+        // Pre-allocate buffer for efficiency
+        let mut audio_bytes = Vec::with_capacity(audio_frame.data.len() * 2);
+        
+        // Convert i16 samples to bytes with little-endian encoding
+        for sample in audio_frame.data.iter() {
+            // Convert each i16 sample to two bytes (little-endian)
+            let bytes = sample.to_le_bytes();
+            audio_bytes.push(bytes[0]);
+            audio_bytes.push(bytes[1]);
+        }
+        
+        audio_bytes
     }
 
     /// Start handling room events
@@ -883,9 +902,6 @@ impl LiveKitClient {
                                 config.channels as i32,
                             );
 
-                            // Pre-allocate buffer for audio conversion
-                            let buffer_size =
-                                (config.sample_rate as usize * config.channels as usize * 2) / 100;
                             let enable_noise_filter = config.enable_noise_filter;
                             let sample_rate = config.sample_rate;
 
@@ -896,36 +912,17 @@ impl LiveKitClient {
                                     enable_noise_filter
                                 );
 
-                                // Pre-allocate conversion buffer to avoid repeated allocations
-                                let mut audio_buffer = Vec::with_capacity(buffer_size);
-
                                 while let Some(audio_frame) = audio_stream.next().await {
                                     debug!(
                                         "Received audio frame: {} samples",
                                         audio_frame.data.len()
                                     );
 
-                                    // Reuse buffer, clear and resize for new data
-                                    audio_buffer.clear();
-                                    audio_buffer.reserve(audio_frame.data.len() * 2);
-
-                                    // Fast conversion using unsafe for better performance
-                                    // This is safe because we control the buffer size
-                                    unsafe {
-                                        let ptr = audio_buffer.as_mut_ptr();
-                                        let data_ptr = audio_frame.data.as_ptr() as *const u8;
-                                        std::ptr::copy_nonoverlapping(
-                                            data_ptr,
-                                            ptr,
-                                            audio_frame.data.len() * 2,
-                                        );
-                                        audio_buffer.set_len(audio_frame.data.len() * 2);
-                                    }
+                                    // Convert AudioFrame to Vec<u8> using proper endianness handling
+                                    let audio_buffer = Self::convert_frame_to_audio(&audio_frame);
 
                                     // Apply noise filtering only if explicitly enabled
                                     if enable_noise_filter {
-                                        // Import noise filter only when needed
-                                        use crate::utils::noise_filter::reduce_noise_async;
                                         match reduce_noise_async(
                                             audio_buffer.clone().into(),
                                             sample_rate,
@@ -936,12 +933,12 @@ impl LiveKitClient {
                                             Err(e) => {
                                                 error!("Error reducing noise: {:?}", e);
                                                 // Fall back to unfiltered audio on error
-                                                callback_clone(audio_buffer.clone());
+                                                callback_clone(audio_buffer);
                                             }
                                         }
                                     } else {
                                         // Skip noise filtering for lower latency
-                                        callback_clone(audio_buffer.clone());
+                                        callback_clone(audio_buffer);
                                     }
                                 }
 
