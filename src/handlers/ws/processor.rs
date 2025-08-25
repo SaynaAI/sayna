@@ -499,7 +499,7 @@ pub async fn handle_config_message(
                         // Use Tokio-native async lock with timeout
                         // This will wait up to 50ms for the lock to become available
                         const LOCK_TIMEOUT_MS: u64 = 100;
-                        
+
                         match tokio::time::timeout(
                             tokio::time::Duration::from_millis(LOCK_TIMEOUT_MS),
                             livekit_client_arc.write()
@@ -794,6 +794,7 @@ pub async fn handle_send_message(
     message: String,
     role: String,
     topic: Option<String>,
+    debug: Option<serde_json::Value>,
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
@@ -825,7 +826,10 @@ pub async fn handle_send_message(
     // This is better than complex retry logic since the LiveKit operations are fast
     let mut client = livekit_client.write().await;
 
-    if let Err(e) = client.send_message(&message, &role, topic.as_deref()).await {
+    if let Err(e) = client
+        .send_message(&message, &role, topic.as_deref(), debug)
+        .await
+    {
         error!("Failed to send message via LiveKit: {:?}", e);
         let _ = message_tx
             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -875,6 +879,7 @@ pub async fn handle_incoming_message(
             message,
             role,
             topic,
-        } => handle_send_message(message, role, topic, state, message_tx).await,
+            debug,
+        } => handle_send_message(message, role, topic, debug, state, message_tx).await,
     }
 }

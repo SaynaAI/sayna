@@ -202,31 +202,38 @@ impl ReqManager {
 
         // Send 2x concurrent requests to fully warm the pool
         let warmup_count = self.max_concurrent_requests * 2;
-        
-        println!("Starting aggressive warmup with {} parallel requests", warmup_count);
-        
+
+        println!(
+            "Starting aggressive warmup with {} parallel requests",
+            warmup_count
+        );
+
         let warmup_futures: Vec<_> = (0..warmup_count)
             .map(|i| {
                 let client = Arc::clone(&self.client);
                 let url = url.to_string();
-                
+
                 async move {
                     let start = std::time::Instant::now();
-                    
+
                     // Use HEAD requests with short timeout for minimal overhead
                     let result = client
                         .head(&url)
                         .timeout(Duration::from_millis(200))
                         .send()
                         .await;
-                    
+
                     match result {
                         Ok(resp) => {
                             // Consume response to properly reuse connection
                             let _ = resp.bytes().await;
                             let elapsed = start.elapsed();
-                            if i < 10 {  // Only log first 10 to avoid spam
-                                println!("  Aggressive warmup stream {} completed in {:?}", i, elapsed);
+                            if i < 10 {
+                                // Only log first 10 to avoid spam
+                                println!(
+                                    "  Aggressive warmup stream {} completed in {:?}",
+                                    i, elapsed
+                                );
                             }
                             Ok(())
                         }
@@ -235,7 +242,8 @@ impl ReqManager {
                             Ok(())
                         }
                         Err(e) => {
-                            if i < 10 {  // Only log first 10 errors
+                            if i < 10 {
+                                // Only log first 10 errors
                                 eprintln!("  Aggressive warmup stream {} failed: {}", i, e);
                             }
                             Err(e)
@@ -244,12 +252,15 @@ impl ReqManager {
                 }
             })
             .collect();
-        
+
         let results = join_all(warmup_futures).await;
-        
+
         let successful = results.iter().filter(|r| r.is_ok()).count();
-        println!("Aggressive warmup complete: {}/{} successful", successful, warmup_count);
-        
+        println!(
+            "Aggressive warmup complete: {}/{} successful",
+            successful, warmup_count
+        );
+
         Ok(())
     }
 
@@ -266,16 +277,16 @@ impl ReqManager {
     pub fn start_keepalive_task(&self, url: String) -> tokio::task::JoinHandle<()> {
         let client = Arc::clone(&self.client);
         let interval_secs = 5; // Send keep-alive every 5 seconds
-        
+
         println!("Starting keep-alive task for URL: {}", url);
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            
+
             loop {
                 interval.tick().await;
-                
+
                 // Send lightweight HEAD request to keep connection alive
                 let result = client
                     .head(&url)
@@ -283,7 +294,7 @@ impl ReqManager {
                     .timeout(Duration::from_millis(100))
                     .send()
                     .await;
-                
+
                 match result {
                     Ok(_) => {
                         // Success - connection kept alive

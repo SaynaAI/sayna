@@ -152,6 +152,7 @@ fn test_incoming_message_serialization() {
         message: "Hello from client!".to_string(),
         role: "user".to_string(),
         topic: Some("chat".to_string()),
+        debug: None,
     };
     let json = serde_json::to_string(&send_msg).unwrap();
     assert!(json.contains("\"type\":\"send_message\""));
@@ -164,6 +165,7 @@ fn test_incoming_message_serialization() {
         message: "Hello without topic!".to_string(),
         role: "user".to_string(),
         topic: None,
+        debug: None,
     };
     let json = serde_json::to_string(&send_msg_no_topic).unwrap();
     assert!(json.contains("\"type\":\"send_message\""));
@@ -180,6 +182,7 @@ fn test_incoming_message_serialization() {
         message,
         role,
         topic,
+        ..
     } = parsed
     {
         assert_eq!(message, "Hello from JSON!");
@@ -197,6 +200,7 @@ fn test_incoming_message_serialization() {
         message,
         role,
         topic,
+        ..
     } = parsed
     {
         assert_eq!(message, "Hello without topic!");
@@ -211,12 +215,53 @@ fn test_incoming_message_serialization() {
         message: "System notification".to_string(),
         role: "system".to_string(),
         topic: Some("notifications".to_string()),
+        debug: None,
     };
     let json = serde_json::to_string(&send_msg_system).unwrap();
     assert!(json.contains("\"type\":\"send_message\""));
     assert!(json.contains("\"message\":\"System notification\""));
     assert!(json.contains("\"role\":\"system\""));
     assert!(json.contains("\"topic\":\"notifications\""));
+
+    // Test send_message with debug field
+    let send_msg_with_debug = IncomingMessage::SendMessage {
+        message: "Debug message".to_string(),
+        role: "user".to_string(),
+        topic: None,
+        debug: Some(serde_json::json!({
+            "request_id": "123",
+            "metadata": {
+                "source": "test",
+                "timestamp": 1234567890
+            }
+        })),
+    };
+    let json = serde_json::to_string(&send_msg_with_debug).unwrap();
+    assert!(json.contains("\"type\":\"send_message\""));
+    assert!(json.contains("\"message\":\"Debug message\""));
+    assert!(json.contains("\"debug\""));
+    assert!(json.contains("\"request_id\":\"123\""));
+    assert!(json.contains("\"source\":\"test\""));
+
+    // Test parsing send_message with debug field
+    let json_with_debug = r#"{"type":"send_message","message":"Test","role":"user","debug":{"foo":"bar","nested":{"value":42}}}"#;
+    let parsed: IncomingMessage = serde_json::from_str(json_with_debug).unwrap();
+    if let IncomingMessage::SendMessage {
+        message,
+        role,
+        debug,
+        ..
+    } = parsed
+    {
+        assert_eq!(message, "Test");
+        assert_eq!(role, "user");
+        assert!(debug.is_some());
+        let debug_val = debug.unwrap();
+        assert_eq!(debug_val["foo"], "bar");
+        assert_eq!(debug_val["nested"]["value"], 42);
+    } else {
+        panic!("Expected SendMessage message");
+    }
 }
 
 #[test]

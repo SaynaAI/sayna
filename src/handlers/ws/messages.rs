@@ -54,6 +54,8 @@ pub enum IncomingMessage {
         role: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         topic: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        debug: Option<serde_json::Value>,
     },
 }
 
