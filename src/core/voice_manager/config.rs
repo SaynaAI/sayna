@@ -10,4 +10,3 @@ pub struct VoiceManagerConfig {
     /// Configuration for the TTS provider
     pub tts_config: TTSConfig,
 }
-

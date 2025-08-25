@@ -21,4 +21,3 @@ pub enum VoiceManagerError {
 
 /// Result type for VoiceManager operations
 pub type VoiceManagerResult<T> = Result<T, VoiceManagerError>;
-

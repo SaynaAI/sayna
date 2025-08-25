@@ -69,4 +69,3 @@ impl InterruptionState {
         self.is_completed.store(true, Ordering::Release);
     }
 }
-

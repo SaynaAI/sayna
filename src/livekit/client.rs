@@ -563,10 +563,10 @@ impl LiveKitClient {
     /// client.connect().await?;
     ///
     /// // Send a message to the default "messages" topic
-    /// client.send_message("Hello, everyone!", "user", None).await?;
+    /// client.send_message("Hello, everyone!", "user", None, None).await?;
     ///
     /// // Send a message to a specific topic
-    /// client.send_message("TTS synthesis complete", "system", Some("tts-status")).await?;
+    /// client.send_message("TTS synthesis complete", "system", Some("tts-status"), None).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -575,11 +575,13 @@ impl LiveKitClient {
         message: &str,
         role: &str,
         topic: Option<&str>,
+        debug: Option<serde_json::Value>,
     ) -> Result<(), AppError> {
         let topic = topic.unwrap_or("messages");
         let json_message = json!({
             "message": message,
-            "role": role
+            "role": role,
+            "debug": debug
         });
 
         info!(
@@ -811,7 +813,7 @@ impl LiveKitClient {
     fn convert_frame_to_audio(audio_frame: &AudioFrame) -> Vec<u8> {
         // Pre-allocate buffer for efficiency
         let mut audio_bytes = Vec::with_capacity(audio_frame.data.len() * 2);
-        
+
         // Convert i16 samples to bytes with little-endian encoding
         for sample in audio_frame.data.iter() {
             // Convert each i16 sample to two bytes (little-endian)
@@ -819,7 +821,7 @@ impl LiveKitClient {
             audio_bytes.push(bytes[0]);
             audio_bytes.push(bytes[1]);
         }
-        
+
         audio_bytes
     }
 
