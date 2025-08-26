@@ -72,9 +72,9 @@ impl Default for DeepgramSTTConfig {
             keywords: Vec::new(),
             redact: Vec::new(),
             vad_events: true,
-            endpointing: Some(300),
+            endpointing: Some(200),
             tag: None,
-            utterance_end_ms: Some(1000),
+            utterance_end_ms: Some(500),
         }
     }
 }
