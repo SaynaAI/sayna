@@ -1773,16 +1773,6 @@ checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
 name = "libloading"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
-dependencies = [
- "cfg-if",
- "winapi",
-]
-
-[[package]]
-name = "libloading"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
@@ -1921,7 +1911,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "lazy_static",
- "libloading 0.8.8",
+ "libloading",
  "libwebrtc",
  "livekit-api",
  "livekit-protocol",
@@ -2382,7 +2372,6 @@ dependencies = [
  "half",
  "lazy_static",
  "libc",
- "libloading 0.7.4",
  "ndarray",
  "tar",
  "thiserror 1.0.69",
