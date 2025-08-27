@@ -69,7 +69,7 @@ ndarray = "0.15.6"
 num_cpus = "1.17.0"
 
 # Turn detection dependencies
-ort = { version = "1.16" }
+ort = { version = "1.16", features = ["load-dynamic", "download-binaries"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 sha2 = "0.10"
 anyhow = "1.0"
