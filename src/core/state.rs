@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,7 +9,7 @@ use tracing::{debug, info, warn};
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
-use crate::core::turn_detect::TurnDetector;
+use crate::core::turn_detect::{TurnDetector, TurnDetectorConfig};
 use crate::utils::req_manager::ReqManager;
 
 /// Core-specific shared state for the application.
@@ -68,7 +69,7 @@ impl CoreState {
         }
 
         // Initialize and warmup Turn Detector
-        let turn_detector = Self::initialize_turn_detector().await;
+        let turn_detector = Self::initialize_turn_detector(config.cache_path.as_ref()).await;
 
         Arc::new(Self {
             tts_req_managers: Arc::new(RwLock::new(tts_req_managers)),
@@ -83,12 +84,16 @@ impl CoreState {
     }
 
     /// Initialize and warmup the Turn Detector model
-    async fn initialize_turn_detector() -> Option<Arc<RwLock<TurnDetector>>> {
+    async fn initialize_turn_detector(cache_path: Option<&PathBuf>) -> Option<Arc<RwLock<TurnDetector>>> {
         info!("Initializing Turn Detector for speech completion detection");
         
         let start = Instant::now();
         
-        match TurnDetector::new(None).await {
+        // Create config with cache path
+        let mut config = TurnDetectorConfig::default();
+        config.cache_path = cache_path.cloned();
+        
+        match TurnDetector::with_config(config).await {
             Ok(detector) => {
                 let init_elapsed = start.elapsed();
                 info!("Turn Detector initialized in {:?}", init_elapsed);
