@@ -97,7 +97,7 @@ impl Tokenizer {
     }
 
     async fn ensure_tokenizer_downloaded(config: &TurnDetectorConfig) -> Result<PathBuf> {
-        let cache_dir = Self::get_cache_dir()?;
+        let cache_dir = config.get_cache_dir()?;
         fs::create_dir_all(&cache_dir).await?;
 
         let tokenizer_path = cache_dir.join("tokenizer.json");
@@ -116,18 +116,6 @@ impl Tokenizer {
         Self::download_file(tokenizer_url, &tokenizer_path).await?;
 
         Ok(tokenizer_path)
-    }
-
-    fn get_cache_dir() -> Result<PathBuf> {
-        let cache_dir = if let Ok(dir) = std::env::var("TURN_DETECT_CACHE_DIR") {
-            PathBuf::from(dir)
-        } else {
-            dirs_cache_dir()
-                .context("Failed to get cache directory")?
-                .join("sayna")
-                .join("turn_detect")
-        };
-        Ok(cache_dir)
     }
 
     async fn download_file(url: &str, path: &Path) -> Result<()> {
@@ -150,33 +138,4 @@ impl Tokenizer {
     pub fn max_length(&self) -> usize {
         self.max_length
     }
-}
-
-fn dirs_cache_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        home_dir().map(|h| h.join("Library").join("Caches"))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("XDG_CACHE_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| home_dir().map(|h| h.join(".cache")))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
-    }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
 }

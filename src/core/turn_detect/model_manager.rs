@@ -138,7 +138,7 @@ impl ModelManager {
         let shape = logits_view.shape();
 
         debug!("Model output shape: {:?}", shape);
-        
+
         // Log some sample values to understand the output range
         if shape.len() > 0 && shape[0] > 0 {
             let first_values: Vec<f32> = (0..10.min(logits_view.len()))
@@ -181,44 +181,48 @@ impl ModelManager {
         } else if shape.len() == 3 && shape[0] == 1 {
             // LiveKit turn detector output format: [batch_size=1, sequence_length, num_classes]
             // The model outputs LOGITS that need to be converted to probabilities
-            
+
             let seq_len = shape[1];
             let num_classes = shape[2];
-            
+
             debug!(
                 "Turn detector output: seq_len={}, num_classes={}",
                 seq_len, num_classes
             );
-            
+
             // Get all logits at the last sequence position
             let last_position_start = (seq_len - 1) * num_classes;
-            
+
             // Let's examine what tokens have high probability at the last position
-            let slice = logits_view.as_slice()
+            let slice = logits_view
+                .as_slice()
                 .ok_or_else(|| anyhow::anyhow!("Failed to get slice from logits view"))?;
-            
+
             // Get the logits for key tokens at the last position
             // Token 2 is </s> (standard end-of-sequence)
             // Token 49153 is <|im_end|> (chat format end marker)
             let eos_token_id = 2;
             let eos_logit = slice[last_position_start + eos_token_id];
-            
+
             // Find the maximum logit for numerical stability in softmax
             let max_logit = slice[last_position_start..(last_position_start + num_classes)]
                 .iter()
                 .cloned()
                 .fold(f32::NEG_INFINITY, f32::max);
-            
+
             // Apply softmax to get probability
             let exp_sum: f32 = (0..num_classes)
                 .map(|i| (slice[last_position_start + i] - max_logit).exp())
                 .sum();
-            
+
             let eos_prob = (eos_logit - max_logit).exp() / exp_sum;
-            
-            debug!("EOS token (</s>) logit: {:.4}, probability: {:.6}", eos_logit, eos_prob);
+
+            debug!(
+                "EOS token (</s>) logit: {:.4}, probability: {:.6}",
+                eos_logit, eos_prob
+            );
             info!("Turn completion probability: {:.4}", eos_prob);
-            
+
             // The model predicts </s> (end-of-sequence) token for complete turns
             eos_prob
         } else {
@@ -242,7 +246,7 @@ impl ModelManager {
     }
 
     async fn ensure_model_downloaded(config: &TurnDetectorConfig) -> Result<PathBuf> {
-        let cache_dir = Self::get_cache_dir()?;
+        let cache_dir = config.get_cache_dir()?;
         fs::create_dir_all(&cache_dir).await?;
 
         let model_filename = "model_quantized.onnx";
@@ -263,18 +267,6 @@ impl ModelManager {
         Self::download_file(model_url, &model_path).await?;
 
         Ok(model_path)
-    }
-
-    fn get_cache_dir() -> Result<PathBuf> {
-        let cache_dir = if let Ok(dir) = std::env::var("TURN_DETECT_CACHE_DIR") {
-            PathBuf::from(dir)
-        } else {
-            dirs::cache_dir()
-                .context("Failed to get cache directory")?
-                .join("sayna")
-                .join("turn_detect")
-        };
-        Ok(cache_dir)
     }
 
     async fn download_file(url: &str, path: &Path) -> Result<()> {
@@ -323,46 +315,5 @@ impl ModelManager {
 
     pub fn config(&self) -> &TurnDetectorConfig {
         &self.config
-    }
-}
-
-fn dirs_cache_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        home::home_dir().map(|h| h.join("Library").join("Caches"))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("XDG_CACHE_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| home::home_dir().map(|h| h.join(".cache")))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
-    }
-}
-
-mod dirs {
-    use super::*;
-
-    pub fn cache_dir() -> Option<PathBuf> {
-        super::dirs_cache_dir()
-    }
-}
-
-mod home {
-    use std::path::PathBuf;
-
-    pub fn home_dir() -> Option<PathBuf> {
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()
-            .map(PathBuf::from)
     }
 }
