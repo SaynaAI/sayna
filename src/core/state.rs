@@ -1,23 +1,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
+use crate::core::turn_detect::TurnDetector;
 use crate::utils::req_manager::ReqManager;
 
 /// Core-specific shared state for the application.
 ///
 /// Holds resources owned by the core layer, such as HTTP request managers
-/// for TTS providers.
+/// for TTS providers and the turn detector for speech completion detection.
 #[derive(Clone)]
 pub struct CoreState {
     /// HTTP request managers for TTS providers - key is provider name (e.g., "deepgram")
     pub tts_req_managers: Arc<RwLock<HashMap<String, Arc<ReqManager>>>>,
     /// Unified cache store (in-memory by default)
     pub cache: Arc<CacheStore>,
+    /// Turn detector for determining end of user speech turns
+    pub turn_detector: Option<Arc<RwLock<TurnDetector>>>,
 }
 
 impl CoreState {
@@ -62,14 +67,100 @@ impl CoreState {
             }
         }
 
+        // Initialize and warmup Turn Detector
+        let turn_detector = Self::initialize_turn_detector().await;
+
         Arc::new(Self {
             tts_req_managers: Arc::new(RwLock::new(tts_req_managers)),
             cache,
+            turn_detector,
         })
     }
 
     /// Get a TTS request manager for a specific provider
     pub async fn get_tts_req_manager(&self, provider: &str) -> Option<Arc<ReqManager>> {
         self.tts_req_managers.read().await.get(provider).cloned()
+    }
+
+    /// Initialize and warmup the Turn Detector model
+    async fn initialize_turn_detector() -> Option<Arc<RwLock<TurnDetector>>> {
+        info!("Initializing Turn Detector for speech completion detection");
+        
+        let start = Instant::now();
+        
+        match TurnDetector::new(None).await {
+            Ok(detector) => {
+                let init_elapsed = start.elapsed();
+                info!("Turn Detector initialized in {:?}", init_elapsed);
+                
+                // Warmup the model with sample inputs to ensure it's fully loaded
+                let warmup_start = Instant::now();
+                if let Err(e) = Self::warmup_turn_detector(&detector).await {
+                    warn!("Turn Detector warmup failed: {:?}", e);
+                } else {
+                    let warmup_elapsed = warmup_start.elapsed();
+                    info!("Turn Detector warmup completed in {:?}", warmup_elapsed);
+                }
+                
+                let total_elapsed = start.elapsed();
+                info!("Turn Detector fully ready in {:?}", total_elapsed);
+                
+                Some(Arc::new(RwLock::new(detector)))
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to initialize Turn Detector: {:?}. \
+                    Falling back to timer-based detection.",
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Warmup the Turn Detector model with sample inputs
+    async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
+        debug!("Starting Turn Detector warmup with sample inputs");
+        
+        // Sample inputs that cover common speech patterns
+        let warmup_samples = vec![
+            "Hello",
+            "How are you?",
+            "What is the weather like today?",
+            "Thank you very much",
+            "I was wondering if",
+            "Can you help me with",
+            "That's great, thanks!",
+            "Let me think about it",
+            "I need to",
+        ];
+        
+        // Run predictions on all samples to ensure model is fully loaded
+        for (i, sample) in warmup_samples.iter().enumerate() {
+            let start = Instant::now();
+            match detector.predict_end_of_turn(sample).await {
+                Ok(probability) => {
+                    let elapsed = start.elapsed();
+                    debug!(
+                        "Warmup sample {} ('{}...'): probability={:.3}, time={:?}",
+                        i + 1,
+                        &sample.chars().take(20).collect::<String>(),
+                        probability,
+                        elapsed
+                    );
+                }
+                Err(e) => {
+                    warn!("Warmup sample {} failed: {:?}", i + 1, e);
+                }
+            }
+        }
+        
+        debug!("Turn Detector warmup completed");
+        Ok(())
+    }
+
+    /// Get the Turn Detector if available
+    pub fn get_turn_detector(&self) -> Option<Arc<RwLock<TurnDetector>>> {
+        self.turn_detector.clone()
     }
 }
