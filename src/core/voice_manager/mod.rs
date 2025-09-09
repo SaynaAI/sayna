@@ -49,7 +49,7 @@
 //!     };
 //!
 //!     // Create and start the voice manager
-//!     let voice_manager = VoiceManager::new(config)?;
+//!     let voice_manager = VoiceManager::new(config, None)?;
 //!     voice_manager.start().await?;
 //!
 //!     // Wait for both providers to be ready
@@ -138,7 +138,7 @@
 //!             ..Default::default()
 //!         },
 //!     };
-//!     let voice_manager = Arc::new(VoiceManager::new(config)?);
+//!     let voice_manager = Arc::new(VoiceManager::new(config, None)?);
 //!     let vm = voice_manager.clone();
 //!     
 //!     // Start the voice manager
@@ -202,7 +202,7 @@
 //!             ..Default::default()
 //!         },
 //!     };
-//!     let voice_manager = VoiceManager::new(config)?;
+//!     let voice_manager = VoiceManager::new(config, None)?;
 //!     
 //!     // Start with error handling
 //!     match voice_manager.start().await {
@@ -250,6 +250,7 @@ pub mod config;
 pub mod errors;
 pub mod manager;
 pub mod state;
+pub mod stt_result;
 
 #[cfg(test)]
 mod tests;

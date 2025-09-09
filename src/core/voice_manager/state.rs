@@ -12,15 +12,15 @@ pub struct SpeechFinalState {
     pub text_buffer: String,
     /// Last seen text for comparison - pre-allocated with capacity
     pub last_text: String,
-    /// Timer handle for speech final timeout
-    pub timer_handle: Option<JoinHandle<()>>,
+    /// Turn detection task handle
+    pub turn_detection_handle: Option<JoinHandle<()>>,
     /// Whether we're currently waiting for speech_final - atomic for lock-free reads
     pub waiting_for_speech_final: AtomicBool,
-    /// User callback to call when timer expires
+    /// User callback to call when turn detection completes
     pub user_callback: Option<STTCallback>,
-    /// Timestamp (ms since epoch) when timer last fired - used to prevent duplicates
-    pub timer_last_fired_ms: AtomicUsize,
-    /// Last text that was force-finalized by timer
+    /// Timestamp (ms since epoch) when turn detection last fired - used to prevent duplicates
+    pub turn_detection_last_fired_ms: AtomicUsize,
+    /// Last text that was force-finalized by turn detection
     pub last_forced_text: String,
 }
 

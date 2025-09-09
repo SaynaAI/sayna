@@ -14,6 +14,7 @@ use crate::core::{
     create_stt_provider, create_tts_provider,
     stt::{BaseSTT, STTResult, STTResultCallback},
     tts::{AudioData, BaseTTS, TTSError},
+    turn_detect::TurnDetector,
 };
 
 use super::{
@@ -24,6 +25,7 @@ use super::{
     config::VoiceManagerConfig,
     errors::{VoiceManagerError, VoiceManagerResult},
     state::{InterruptionState, SpeechFinalState},
+    stt_result::STTResultProcessor,
 };
 
 /// VoiceManager provides a unified interface for managing STT and TTS providers
@@ -40,6 +42,9 @@ pub struct VoiceManager {
 
     // Speech final timing control - using parking_lot for faster access
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+
+    // Turn detection for better end-of-speech detection
+    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
 
     // Interruption control - mostly lock-free with atomics
     interruption_state: Arc<InterruptionState>,
@@ -80,11 +85,14 @@ impl VoiceManager {
     ///         },
     ///     };
     ///
-    ///     let voice_manager = VoiceManager::new(config)?;
+    ///     let voice_manager = VoiceManager::new(config, None)?;
     ///     Ok(())
     /// }
     /// ```
-    pub fn new(config: VoiceManagerConfig) -> VoiceManagerResult<Self> {
+    pub fn new(
+        config: VoiceManagerConfig,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    ) -> VoiceManagerResult<Self> {
         let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
             .map_err(VoiceManagerError::TTSError)?;
         let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
@@ -105,12 +113,13 @@ impl VoiceManager {
             speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                 text_buffer,
                 last_text,
-                timer_handle: None,
+                turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
-                timer_last_fired_ms: AtomicUsize::new(0),
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
             })),
+            turn_detector,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -158,7 +167,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.start().await?;
     /// # Ok(())
     /// # }
@@ -208,7 +217,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.stop().await?;
     /// # Ok(())
     /// # }
@@ -217,7 +226,7 @@ impl VoiceManager {
         // Cancel any pending speech final timer
         {
             let mut state = self.speech_final_state.write();
-            if let Some(handle) = state.timer_handle.take() {
+            if let Some(handle) = state.turn_detection_handle.take() {
                 handle.abort();
             }
             // Reset speech final state - reuse allocated capacity
@@ -227,7 +236,9 @@ impl VoiceManager {
                 .waiting_for_speech_final
                 .store(false, Ordering::Release);
             state.user_callback = None;
-            state.timer_last_fired_ms.store(0, Ordering::Release);
+            state
+                .turn_detection_last_fired_ms
+                .store(0, Ordering::Release);
             state.last_forced_text.clear();
         }
 
@@ -266,7 +277,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// if voice_manager.is_ready().await {
     ///     println!("VoiceManager is ready!");
     /// }
@@ -306,7 +317,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// let audio_data = vec![0u8; 1024]; // Your audio data
     /// voice_manager.receive_audio(audio_data).await?;
     /// # Ok(())
@@ -341,7 +352,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// // Queue text without immediate processing
     /// voice_manager.speak("Hello, world!", false).await?;
     /// voice_manager.speak("How are you?", false).await?;
@@ -505,7 +516,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_stt_result(|result| {
     ///     Box::pin(async move {
     ///         println!("Transcription: {}", result.transcript);
@@ -535,11 +546,15 @@ impl VoiceManager {
         // Create wrapper callback that processes timing and interruption control before forwarding to user
         let speech_final_state_clone = self.speech_final_state.clone();
         let interruption_state_clone = self.interruption_state.clone();
+        let turn_detector_clone = self.turn_detector.clone();
+        let stt_processor = STTResultProcessor::default();
 
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
             let callback = callback.clone();
             let speech_final_state = speech_final_state_clone.clone();
             let interruption_state = interruption_state_clone.clone();
+            let turn_detector = turn_detector_clone.clone();
+            let stt_processor = stt_processor.clone();
 
             Box::pin(async move {
                 // Check if we should ignore STT results due to non-interruptible audio
@@ -548,9 +563,13 @@ impl VoiceManager {
                     return;
                 }
 
-                // Process result with timing control inline
-                let processed_result =
-                    Self::process_stt_result_with_timing_static(result, speech_final_state).await;
+                // Process result with timing control using the processor
+                let processed_result = stt_processor.process_result(
+                    result,
+                    speech_final_state,
+                    turn_detector,
+                )
+                .await;
 
                 if let Some(processed_result) = processed_result {
                     // Call user callback with processed result
@@ -590,7 +609,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_tts_audio(|audio_data| {
     ///     Box::pin(async move {
     ///         println!("Received {} bytes of audio", audio_data.data.len());
@@ -735,7 +754,7 @@ impl VoiceManager {
     /// #     stt_config: STTConfig::default(),
     /// #     tts_config: TTSConfig::default(),
     /// # };
-    /// # let voice_manager = VoiceManager::new(config)?;
+    /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_audio_clear(|| {
     ///     Box::pin(async move {
     ///         // Clear LiveKit audio buffer or other audio sources
@@ -798,142 +817,6 @@ impl VoiceManager {
         tts.get_provider_info()
     }
 
-    /// Static method to process STT results with speech final timing control
-    ///
-    /// This method implements the following behavior:
-    /// - Returns results immediately to callback (no waiting)
-    /// - Starts background timer for is_final=true results  
-    /// - Timer generates additional callback invocation when it expires
-    /// - Cancels timer when real is_speech_final=true arrives
-    /// - Allows continuous speech processing with multiple timer firings
-    /// - Prevents duplicate speech_final events within a short time window
-    pub(crate) async fn process_stt_result_with_timing_static(
-        result: STTResult,
-        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-    ) -> Option<STTResult> {
-        // Skip empty final results that aren't speech_final
-        if result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final {
-            return None;
-        }
-
-        // Get current time in milliseconds
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as usize;
-
-        // Case 1: Real is_speech_final=true received
-        if result.is_speech_final {
-            let mut state = speech_final_state.write();
-
-            // Check if this is a duplicate of a recently forced speech_final
-            let last_fired_ms = state.timer_last_fired_ms.load(Ordering::Acquire);
-            const DUPLICATE_WINDOW_MS: usize = 500; // 500ms window to prevent duplicates
-
-            // If timer fired very recently with the same text, ignore this real speech_final
-            if last_fired_ms > 0
-                && now_ms.saturating_sub(last_fired_ms) < DUPLICATE_WINDOW_MS
-                && state.last_forced_text == result.transcript
-            {
-                debug!(
-                    "Ignoring duplicate real speech_final - timer fired {}ms ago with same text",
-                    now_ms.saturating_sub(last_fired_ms)
-                );
-                return None;
-            }
-            // Cancel any existing timer
-            if let Some(handle) = state.timer_handle.take() {
-                handle.abort();
-            }
-
-            // Reset state for next speech segment
-            state.text_buffer.clear();
-            state.last_text.clear();
-            state.last_forced_text.clear();
-            state
-                .waiting_for_speech_final
-                .store(false, Ordering::Release);
-            state.timer_last_fired_ms.store(0, Ordering::Release);
-
-            return Some(result);
-        }
-
-        // Case 2: is_final=true (but not speech_final) with non-empty text
-        if result.is_final && !result.transcript.trim().is_empty() {
-            let mut state = speech_final_state.write();
-
-            // Update buffer with current transcript
-            state.text_buffer = result.transcript.clone();
-
-            // Cancel existing timer and restart it (always allow new timers)
-            if let Some(handle) = state.timer_handle.take() {
-                handle.abort();
-            }
-
-            let buffered_text = state.text_buffer.clone(); // Store the text for the timer
-
-            // Start new background timer
-            let speech_final_state_clone = speech_final_state.clone();
-
-            let timer_handle = tokio::spawn(async move {
-                // Wait for timeout period (using 1800ms to match Python's 0.8 seconds)
-                tokio::time::sleep(Duration::from_millis(1800)).await;
-
-                // Check if we should force speech_final
-                let callback_opt = {
-                    let timer_state = speech_final_state_clone.read();
-
-                    // Only fire if we're still waiting for speech_final
-                    if timer_state.waiting_for_speech_final.load(Ordering::Acquire) {
-                        timer_state.user_callback.clone()
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(callback) = callback_opt {
-                    // Record when timer fired and what text was sent
-                    let fire_time_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as usize;
-
-                    {
-                        let mut timer_state = speech_final_state_clone.write();
-                        timer_state
-                            .timer_last_fired_ms
-                            .store(fire_time_ms, Ordering::Release);
-                        timer_state.last_forced_text = buffered_text.clone();
-                        timer_state
-                            .waiting_for_speech_final
-                            .store(false, Ordering::Release);
-                        timer_state.timer_handle = None;
-                    }
-
-                    // Create forced result with the actual buffered text
-                    let forced_result = STTResult {
-                        transcript: String::new(),
-                        is_final: true,
-                        is_speech_final: true,
-                        confidence: 1.0, // High confidence for forced result
-                    };
-                    debug!(
-                        "Timer firing forced speech_final with text: '{}'",
-                        forced_result.transcript
-                    );
-                    callback(forced_result).await;
-                }
-            });
-
-            state.timer_handle = Some(timer_handle);
-            state
-                .waiting_for_speech_final
-                .store(true, Ordering::Release);
-        }
-
-        // Always return the original result immediately
-        Some(result)
-    }
 }
 
 // Ensure VoiceManager is thread-safe
