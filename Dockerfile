@@ -35,6 +35,8 @@ RUN cargo build --release
 ############################
 FROM debian:bookworm-slim AS runtime
 
+WORKDIR /app
+
 # Install OpenSSL
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -45,11 +47,15 @@ RUN apt-get update && \
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # The statically-linked binary
-COPY --from=builder /app/target/release/sayna /usr/bin/sayna
+COPY --from=builder /app/target/release/sayna /app/sayna
+COPY --from=builder /app/target/release/*.so /app/
+COPY --from=builder /app/target/release/*.so.* /app/
+COPY --from=builder /app/target/release/*.d /app/
+COPY --from=builder /app/target/release/*.rlib /app/
 
 # Default logging level & port (override with -e if needed)
 ENV RUST_LOG=info \
     PORT=3001
 
 EXPOSE 3001
-CMD ["/usr/bin/sayna"]
+CMD ["/app/sayna"]

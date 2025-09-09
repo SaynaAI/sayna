@@ -2,6 +2,7 @@ pub mod cache;
 pub mod state;
 pub mod stt;
 pub mod tts;
+pub mod turn_detect;
 pub mod voice_manager;
 
 // Re-export commonly used types for convenience

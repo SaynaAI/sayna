@@ -2,7 +2,7 @@
 
 use crate::core::stt::{STTConfig, STTResult};
 use crate::core::tts::TTSConfig;
-use crate::core::voice_manager::manager::VoiceManager as ManagerImpl;
+use crate::core::voice_manager::stt_result::STTResultProcessor;
 use crate::core::voice_manager::state::SpeechFinalState;
 use crate::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 use parking_lot::RwLock as SyncRwLock;
@@ -25,7 +25,7 @@ async fn test_voice_manager_creation() {
         },
     };
 
-    let result = VoiceManager::new(config);
+    let result = VoiceManager::new(config, None);
     assert!(result.is_ok());
 }
 
@@ -44,7 +44,7 @@ async fn test_voice_manager_config_access() {
         },
     };
 
-    let voice_manager = VoiceManager::new(config).unwrap();
+    let voice_manager = VoiceManager::new(config, None).unwrap();
     let retrieved_config = voice_manager.get_config();
 
     assert_eq!(retrieved_config.stt_config.provider, "deepgram");
@@ -66,7 +66,7 @@ async fn test_voice_manager_callback_registration() {
         },
     };
 
-    let voice_manager = VoiceManager::new(config).unwrap();
+    let voice_manager = VoiceManager::new(config, None).unwrap();
 
     // Test STT callback registration
     let stt_result = voice_manager
@@ -106,7 +106,7 @@ async fn test_speech_final_timing_control() {
         },
     };
 
-    let voice_manager = VoiceManager::new(config).unwrap();
+    let voice_manager = VoiceManager::new(config, None).unwrap();
 
     // Channel to collect results
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -131,10 +131,10 @@ async fn test_speech_final_timing_control() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
@@ -144,19 +144,23 @@ async fn test_speech_final_timing_control() {
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
                 last_text: String::with_capacity(1024),
-                timer_handle: None,
+                turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
-                timer_last_fired_ms: AtomicUsize::new(0),
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
             };
         }
 
         // Send is_final=true without is_speech_final=true
         let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
-        let processed =
-            ManagerImpl::process_stt_result_with_timing_static(result1, speech_final_state.clone())
-                .await;
+        let processor = STTResultProcessor::default();
+        let processed = processor.process_result(
+            result1,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Should return original result immediately
         assert!(processed.is_some());
@@ -169,7 +173,7 @@ async fn test_speech_final_timing_control() {
         let state = speech_final_state.read();
         assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
         assert_eq!(state.text_buffer, "Hello");
-        assert!(state.timer_handle.is_some());
+        assert!(state.turn_detection_handle.is_some());
     }
 
     // Test Case 2: Timer should be started for final results and state should be set correctly
@@ -177,10 +181,10 @@ async fn test_speech_final_timing_control() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
@@ -190,19 +194,23 @@ async fn test_speech_final_timing_control() {
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
                 last_text: String::with_capacity(1024),
-                timer_handle: None,
+                turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
-                timer_last_fired_ms: AtomicUsize::new(0),
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
             };
         }
 
         // Send is_final=true without is_speech_final=true
         let result1 = STTResult::new("Test message".to_string(), true, false, 0.8);
-        let processed =
-            ManagerImpl::process_stt_result_with_timing_static(result1, speech_final_state.clone())
-                .await;
+        let processor = STTResultProcessor::default();
+        let processed = processor.process_result(
+            result1,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Should return the original result immediately
         assert!(processed.is_some());
@@ -215,7 +223,7 @@ async fn test_speech_final_timing_control() {
         let state = speech_final_state.read();
         assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
         assert_eq!(state.text_buffer, "Test message");
-        assert!(state.timer_handle.is_some());
+        assert!(state.turn_detection_handle.is_some());
     }
 
     // Test Case 3: Real speech_final should cancel timer and reset state
@@ -223,10 +231,10 @@ async fn test_speech_final_timing_control() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
@@ -236,33 +244,41 @@ async fn test_speech_final_timing_control() {
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
                 last_text: String::with_capacity(1024),
-                timer_handle: None,
+                turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
-                timer_last_fired_ms: AtomicUsize::new(0),
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
             };
         }
 
         // Send is_final=true result to start timer
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
-        let _processed1 =
-            ManagerImpl::process_stt_result_with_timing_static(result1, speech_final_state.clone())
-                .await;
+        let processor = STTResultProcessor::default();
+        let _processed1 = processor.process_result(
+            result1,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Verify timer was started
         {
             let state = speech_final_state.read();
             assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
-            assert!(state.timer_handle.is_some());
+            assert!(state.turn_detection_handle.is_some());
             assert_eq!(state.text_buffer, "Hello world");
         }
 
         // Send is_speech_final=true (should cancel timer and reset state)
         let result2 = STTResult::new("final result".to_string(), true, true, 0.95);
-        let processed2 =
-            ManagerImpl::process_stt_result_with_timing_static(result2, speech_final_state.clone())
-                .await;
+        let processor2 = STTResultProcessor::default();
+        let processed2 = processor2.process_result(
+            result2,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Should return the original speech_final result
         assert!(processed2.is_some());
@@ -277,7 +293,7 @@ async fn test_speech_final_timing_control() {
         assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
         assert!(state.text_buffer.is_empty());
         assert!(state.last_text.is_empty());
-        assert!(state.timer_handle.is_none());
+        assert!(state.turn_detection_handle.is_none());
     }
 
     // Test Case 4: Direct speech_final with no prior timer should return original result
@@ -285,10 +301,10 @@ async fn test_speech_final_timing_control() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
@@ -298,19 +314,23 @@ async fn test_speech_final_timing_control() {
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
                 last_text: String::with_capacity(1024),
-                timer_handle: None,
+                turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
-                timer_last_fired_ms: AtomicUsize::new(0),
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
             };
         }
 
         // Send is_speech_final=true with no prior timer (direct speech final)
         let result = STTResult::new("Direct speech final".to_string(), true, true, 0.85);
-        let processed =
-            ManagerImpl::process_stt_result_with_timing_static(result, speech_final_state.clone())
-                .await;
+        let processor = STTResultProcessor::default();
+        let processed = processor.process_result(
+            result,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         assert!(processed.is_some());
         let final_result = processed.unwrap();
@@ -334,19 +354,21 @@ async fn test_duplicate_speech_final_prevention() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
         // Simulate the scenario:
         // 1. is_final=true arrives
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
-        let processed1 = ManagerImpl::process_stt_result_with_timing_static(
+        let processor1 = STTResultProcessor::default();
+        let processed1 = processor1.process_result(
             result1.clone(),
             speech_final_state.clone(),
+            None,
         )
         .await;
 
@@ -357,7 +379,7 @@ async fn test_duplicate_speech_final_prevention() {
         {
             let state = speech_final_state.read();
             assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
-            assert!(state.timer_handle.is_some());
+            assert!(state.turn_detection_handle.is_some());
         }
 
         // 2. Simulate timer firing (mark as fired)
@@ -368,7 +390,7 @@ async fn test_duplicate_speech_final_prevention() {
                 .unwrap_or_default()
                 .as_millis() as usize;
             state
-                .timer_last_fired_ms
+                .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
             state.last_forced_text = "Hello world".to_string();
             state
@@ -378,9 +400,13 @@ async fn test_duplicate_speech_final_prevention() {
 
         // 3. Real speech_final arrives after timer fired
         let result2 = STTResult::new("Hello world".to_string(), true, true, 0.95);
-        let processed2 =
-            ManagerImpl::process_stt_result_with_timing_static(result2, speech_final_state.clone())
-                .await;
+        let processor2 = STTResultProcessor::default();
+        let processed2 = processor2.process_result(
+            result2,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Should be None (ignored) because timer already fired
         assert!(processed2.is_none());
@@ -391,18 +417,22 @@ async fn test_duplicate_speech_final_prevention() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
         // 1. First is_final=true
         let result1 = STTResult::new("First".to_string(), true, false, 0.9);
-        let processed1 =
-            ManagerImpl::process_stt_result_with_timing_static(result1, speech_final_state.clone())
-                .await;
+        let processor1 = STTResultProcessor::default();
+        let processed1 = processor1.process_result(
+            result1,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         assert!(processed1.is_some());
 
@@ -415,7 +445,7 @@ async fn test_duplicate_speech_final_prevention() {
                 .as_millis() as usize
                 - 1000; // 1 second ago
             state
-                .timer_last_fired_ms
+                .turn_detection_last_fired_ms
                 .store(old_time_ms, Ordering::Release);
             state.last_forced_text = "First".to_string();
             state
@@ -425,9 +455,13 @@ async fn test_duplicate_speech_final_prevention() {
 
         // 2. Another is_final=true arrives after timer fired
         let result2 = STTResult::new("Second".to_string(), true, false, 0.9);
-        let processed2 =
-            ManagerImpl::process_stt_result_with_timing_static(result2, speech_final_state.clone())
-                .await;
+        let processor2 = STTResultProcessor::default();
+        let processed2 = processor2.process_result(
+            result2,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
 
         // Should still return the result but NOT start a new timer
         assert!(processed2.is_some());
@@ -437,7 +471,7 @@ async fn test_duplicate_speech_final_prevention() {
         {
             let state = speech_final_state.read();
             assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
-            assert!(state.timer_handle.is_some());
+            assert!(state.turn_detection_handle.is_some());
         }
     }
 
@@ -446,18 +480,22 @@ async fn test_duplicate_speech_final_prevention() {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
             last_text: String::with_capacity(1024),
-            timer_handle: None,
+            turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
-            timer_last_fired_ms: AtomicUsize::new(0),
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
         }));
 
         // First sequence: is_final=true starts timer
         let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
-        let processed1 =
-            ManagerImpl::process_stt_result_with_timing_static(result1, speech_final_state.clone())
-                .await;
+        let processor1 = STTResultProcessor::default();
+        let processed1 = processor1.process_result(
+            result1,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
         assert!(processed1.is_some());
 
         // Mark timer as fired (with recent timestamp)
@@ -468,7 +506,7 @@ async fn test_duplicate_speech_final_prevention() {
                 .unwrap_or_default()
                 .as_millis() as usize;
             state
-                .timer_last_fired_ms
+                .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
             state.last_forced_text = "First segment".to_string();
             state
@@ -478,9 +516,13 @@ async fn test_duplicate_speech_final_prevention() {
 
         // Real speech_final arrives but is ignored (timer already fired)
         let result2 = STTResult::new("First segment".to_string(), true, true, 0.9);
-        let processed2 =
-            ManagerImpl::process_stt_result_with_timing_static(result2, speech_final_state.clone())
-                .await;
+        let processor2 = STTResultProcessor::default();
+        let processed2 = processor2.process_result(
+            result2,
+            speech_final_state.clone(),
+            None,
+        )
+        .await;
         assert!(processed2.is_none()); // Ignored due to timer fired recently with same text
 
         // Clear the state to simulate a clean new segment
@@ -495,9 +537,11 @@ async fn test_duplicate_speech_final_prevention() {
 
         // Now a completely new segment starts (new is_final without speech_final)
         let new_result = STTResult::new("New segment".to_string(), true, false, 0.9);
-        let processed_new = ManagerImpl::process_stt_result_with_timing_static(
+        let processor_new = STTResultProcessor::default();
+        let processed_new = processor_new.process_result(
             new_result,
             speech_final_state.clone(),
+            None,
         )
         .await;
 
@@ -509,7 +553,7 @@ async fn test_duplicate_speech_final_prevention() {
             let state = speech_final_state.read();
             // New timer should be started for continuous speech
             assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
-            assert!(state.timer_handle.is_some());
+            assert!(state.turn_detection_handle.is_some());
         }
     }
 }

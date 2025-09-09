@@ -129,8 +129,10 @@ pub async fn handle_config_message(
             tts_config,
         };
 
+        let turn_detector = app_state.core_state.get_turn_detector();
+
         // Create voice manager
-        let voice_manager = match VoiceManager::new(voice_config) {
+        let voice_manager = match VoiceManager::new(voice_config, turn_detector) {
             Ok(vm) => Arc::new(vm),
             Err(e) => {
                 error!("Failed to create voice manager: {}", e);
