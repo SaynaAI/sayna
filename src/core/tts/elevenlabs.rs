@@ -31,8 +31,8 @@ pub struct VoiceSettings {
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
-            stability: Some(0.5),
-            similarity_boost: Some(0.75),
+            stability: Some(0.6),
+            similarity_boost: Some(0.9),
             style: Some(0.0),
             use_speaker_boost: Some(false),
             speed: Some(1.0),
@@ -121,7 +121,7 @@ impl TTSRequestBuilder for ElevenLabsRequestBuilder {
         if !self.config.model.is_empty() {
             body["model_id"] = json!(self.config.model);
         } else {
-            body["model_id"] = json!("eleven_multilingual_v2");
+            body["model_id"] = json!("eleven_turbo_v2_5");
         }
 
         // Build the request with ElevenLabs-specific headers
