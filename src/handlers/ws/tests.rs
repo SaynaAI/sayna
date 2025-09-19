@@ -34,6 +34,7 @@ fn test_ws_config_serialization() {
         connection_timeout: Some(30),
         request_timeout: Some(60),
         model: "".to_string(), // Model is in Voice ID for Deepgram
+        pronunciations: Vec::new(),
     };
 
     let json = serde_json::to_string(&tts_ws_config).unwrap();
@@ -65,6 +66,7 @@ fn test_incoming_message_serialization() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(), // Model is in Voice ID for Deepgram
+            pronunciations: Vec::new(),
         }),
         livekit: None,
     };
@@ -341,6 +343,7 @@ fn test_tts_ws_config_conversion_with_all_values() {
         connection_timeout: Some(60),
         request_timeout: Some(120),
         model: "".to_string(), // Model is in Voice ID for Deepgram
+        pronunciations: Vec::new(),
     };
 
     let api_key = "test_api_key".to_string();
@@ -367,6 +370,7 @@ fn test_tts_ws_config_conversion_with_defaults() {
         connection_timeout: None,
         request_timeout: None,
         model: "".to_string(), // Model is in Voice ID for Deepgram
+        pronunciations: Vec::new(),
     };
 
     let api_key = "test_api_key".to_string();
@@ -412,6 +416,7 @@ fn test_livekit_ws_config_conversion() {
         connection_timeout: Some(30),
         request_timeout: Some(60),
         model: "".to_string(),
+        pronunciations: Vec::new(),
     };
 
     let livekit_url = "wss://test-livekit.com".to_string();
@@ -445,6 +450,7 @@ fn test_incoming_message_config_with_livekit() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(),
+            pronunciations: Vec::new(),
         }),
         livekit: Some(LiveKitWebSocketConfig {
             token: "test-jwt-token".to_string(),
@@ -480,6 +486,7 @@ fn test_incoming_message_config_without_livekit() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(),
+            pronunciations: Vec::new(),
         }),
         livekit: None,
     };
@@ -643,6 +650,7 @@ fn test_tts_ws_config_conversion_mixed_values() {
         connection_timeout: Some(45),
         request_timeout: None, // Should use default
         model: "".to_string(), // Model is in Voice ID for Deepgram
+        pronunciations: Vec::new(),
     };
 
     let api_key = "test_api_key".to_string();
@@ -681,6 +689,7 @@ fn test_config_message_without_livekit_routing() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(),
+            pronunciations: Vec::new(),
         }),
         livekit: None, // No LiveKit configuration
     };
@@ -724,6 +733,7 @@ fn test_config_message_with_livekit_routing() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(),
+            pronunciations: Vec::new(),
         }),
         livekit: Some(LiveKitWebSocketConfig {
             token: "test-jwt-token".to_string(),
@@ -962,6 +972,7 @@ fn test_config_message_audio_default() {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             model: "".to_string(),
+            pronunciations: Vec::new(),
         }),
         livekit: None,
     };

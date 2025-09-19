@@ -290,6 +290,7 @@ pub async fn handle_config_message(
                 connection_timeout: None,
                 request_timeout: None,
                 model: "".to_string(),
+                pronunciations: Vec::new(),
             };
 
             let tts_config_for_livekit = tts_ws_config.as_ref().unwrap_or(&default_tts_config);

@@ -564,12 +564,9 @@ impl VoiceManager {
                 }
 
                 // Process result with timing control using the processor
-                let processed_result = stt_processor.process_result(
-                    result,
-                    speech_final_state,
-                    turn_detector,
-                )
-                .await;
+                let processed_result = stt_processor
+                    .process_result(result, speech_final_state, turn_detector)
+                    .await;
 
                 if let Some(processed_result) = processed_result {
                     // Call user callback with processed result
@@ -816,7 +813,6 @@ impl VoiceManager {
         let tts = self.tts.read().await;
         tts.get_provider_info()
     }
-
 }
 
 // Ensure VoiceManager is thread-safe
