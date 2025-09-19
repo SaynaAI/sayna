@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::{
-    core::{stt::STTConfig, tts::TTSConfig},
+    core::{
+        stt::STTConfig,
+        tts::{Pronunciation, TTSConfig},
+    },
     livekit::LiveKitConfig,
 };
 
@@ -115,6 +118,9 @@ pub struct TTSWebSocketConfig {
     pub request_timeout: Option<u64>,
     /// Model to use for TTS
     pub model: String,
+    /// Pronunciation replacements to apply before TTS
+    #[serde(default)]
+    pub pronunciations: Vec<Pronunciation>,
 }
 
 impl TTSWebSocketConfig {
@@ -140,6 +146,7 @@ impl TTSWebSocketConfig {
             sample_rate: self.sample_rate.or(defaults.sample_rate),
             connection_timeout: self.connection_timeout.or(defaults.connection_timeout),
             request_timeout: self.request_timeout.or(defaults.request_timeout),
+            pronunciations: self.pronunciations.clone(),
         }
     }
 }

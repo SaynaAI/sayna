@@ -4,8 +4,8 @@ pub mod elevenlabs;
 pub mod provider;
 
 pub use base::{
-    AudioCallback, AudioData, BaseTTS, BoxedTTS, ConnectionState, TTSConfig, TTSError, TTSFactory,
-    TTSResult,
+    AudioCallback, AudioData, BaseTTS, BoxedTTS, ConnectionState, Pronunciation, TTSConfig,
+    TTSError, TTSFactory, TTSResult,
 };
 pub use deepgram::{DEEPGRAM_TTS_URL, DeepgramTTS};
 pub use elevenlabs::{ELEVENLABS_TTS_URL, ElevenLabsTTS};

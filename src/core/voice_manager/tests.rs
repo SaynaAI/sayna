@@ -2,8 +2,8 @@
 
 use crate::core::stt::{STTConfig, STTResult};
 use crate::core::tts::TTSConfig;
-use crate::core::voice_manager::stt_result::STTResultProcessor;
 use crate::core::voice_manager::state::SpeechFinalState;
+use crate::core::voice_manager::stt_result::STTResultProcessor;
 use crate::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -155,12 +155,9 @@ async fn test_speech_final_timing_control() {
         // Send is_final=true without is_speech_final=true
         let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
-        let processed = processor.process_result(
-            result1,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed = processor
+            .process_result(result1, speech_final_state.clone(), None)
+            .await;
 
         // Should return original result immediately
         assert!(processed.is_some());
@@ -205,12 +202,9 @@ async fn test_speech_final_timing_control() {
         // Send is_final=true without is_speech_final=true
         let result1 = STTResult::new("Test message".to_string(), true, false, 0.8);
         let processor = STTResultProcessor::default();
-        let processed = processor.process_result(
-            result1,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed = processor
+            .process_result(result1, speech_final_state.clone(), None)
+            .await;
 
         // Should return the original result immediately
         assert!(processed.is_some());
@@ -255,12 +249,9 @@ async fn test_speech_final_timing_control() {
         // Send is_final=true result to start timer
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
-        let _processed1 = processor.process_result(
-            result1,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let _processed1 = processor
+            .process_result(result1, speech_final_state.clone(), None)
+            .await;
 
         // Verify timer was started
         {
@@ -273,12 +264,9 @@ async fn test_speech_final_timing_control() {
         // Send is_speech_final=true (should cancel timer and reset state)
         let result2 = STTResult::new("final result".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
-        let processed2 = processor2.process_result(
-            result2,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed2 = processor2
+            .process_result(result2, speech_final_state.clone(), None)
+            .await;
 
         // Should return the original speech_final result
         assert!(processed2.is_some());
@@ -325,12 +313,9 @@ async fn test_speech_final_timing_control() {
         // Send is_speech_final=true with no prior timer (direct speech final)
         let result = STTResult::new("Direct speech final".to_string(), true, true, 0.85);
         let processor = STTResultProcessor::default();
-        let processed = processor.process_result(
-            result,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed = processor
+            .process_result(result, speech_final_state.clone(), None)
+            .await;
 
         assert!(processed.is_some());
         let final_result = processed.unwrap();
@@ -365,12 +350,9 @@ async fn test_duplicate_speech_final_prevention() {
         // 1. is_final=true arrives
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
-        let processed1 = processor1.process_result(
-            result1.clone(),
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed1 = processor1
+            .process_result(result1.clone(), speech_final_state.clone(), None)
+            .await;
 
         assert!(processed1.is_some());
         assert_eq!(processed1.unwrap().transcript, "Hello world");
@@ -401,12 +383,9 @@ async fn test_duplicate_speech_final_prevention() {
         // 3. Real speech_final arrives after timer fired
         let result2 = STTResult::new("Hello world".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
-        let processed2 = processor2.process_result(
-            result2,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed2 = processor2
+            .process_result(result2, speech_final_state.clone(), None)
+            .await;
 
         // Should be None (ignored) because timer already fired
         assert!(processed2.is_none());
@@ -427,12 +406,9 @@ async fn test_duplicate_speech_final_prevention() {
         // 1. First is_final=true
         let result1 = STTResult::new("First".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
-        let processed1 = processor1.process_result(
-            result1,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed1 = processor1
+            .process_result(result1, speech_final_state.clone(), None)
+            .await;
 
         assert!(processed1.is_some());
 
@@ -456,12 +432,9 @@ async fn test_duplicate_speech_final_prevention() {
         // 2. Another is_final=true arrives after timer fired
         let result2 = STTResult::new("Second".to_string(), true, false, 0.9);
         let processor2 = STTResultProcessor::default();
-        let processed2 = processor2.process_result(
-            result2,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed2 = processor2
+            .process_result(result2, speech_final_state.clone(), None)
+            .await;
 
         // Should still return the result but NOT start a new timer
         assert!(processed2.is_some());
@@ -490,12 +463,9 @@ async fn test_duplicate_speech_final_prevention() {
         // First sequence: is_final=true starts timer
         let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
-        let processed1 = processor1.process_result(
-            result1,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed1 = processor1
+            .process_result(result1, speech_final_state.clone(), None)
+            .await;
         assert!(processed1.is_some());
 
         // Mark timer as fired (with recent timestamp)
@@ -517,12 +487,9 @@ async fn test_duplicate_speech_final_prevention() {
         // Real speech_final arrives but is ignored (timer already fired)
         let result2 = STTResult::new("First segment".to_string(), true, true, 0.9);
         let processor2 = STTResultProcessor::default();
-        let processed2 = processor2.process_result(
-            result2,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed2 = processor2
+            .process_result(result2, speech_final_state.clone(), None)
+            .await;
         assert!(processed2.is_none()); // Ignored due to timer fired recently with same text
 
         // Clear the state to simulate a clean new segment
@@ -538,12 +505,9 @@ async fn test_duplicate_speech_final_prevention() {
         // Now a completely new segment starts (new is_final without speech_final)
         let new_result = STTResult::new("New segment".to_string(), true, false, 0.9);
         let processor_new = STTResultProcessor::default();
-        let processed_new = processor_new.process_result(
-            new_result,
-            speech_final_state.clone(),
-            None,
-        )
-        .await;
+        let processed_new = processor_new
+            .process_result(new_result, speech_final_state.clone(), None)
+            .await;
 
         assert!(processed_new.is_some());
         assert_eq!(processed_new.unwrap().transcript, "New segment");

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod speak;
 pub mod voices;
 pub mod ws;
 

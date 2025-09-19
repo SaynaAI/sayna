@@ -84,20 +84,22 @@ impl CoreState {
     }
 
     /// Initialize and warmup the Turn Detector model
-    async fn initialize_turn_detector(cache_path: Option<&PathBuf>) -> Option<Arc<RwLock<TurnDetector>>> {
+    async fn initialize_turn_detector(
+        cache_path: Option<&PathBuf>,
+    ) -> Option<Arc<RwLock<TurnDetector>>> {
         info!("Initializing Turn Detector for speech completion detection");
-        
+
         let start = Instant::now();
-        
+
         // Create config with cache path
         let mut config = TurnDetectorConfig::default();
         config.cache_path = cache_path.cloned();
-        
+
         match TurnDetector::with_config(config).await {
             Ok(detector) => {
                 let init_elapsed = start.elapsed();
                 info!("Turn Detector initialized in {:?}", init_elapsed);
-                
+
                 // Warmup the model with sample inputs to ensure it's fully loaded
                 let warmup_start = Instant::now();
                 if let Err(e) = Self::warmup_turn_detector(&detector).await {
@@ -106,10 +108,10 @@ impl CoreState {
                     let warmup_elapsed = warmup_start.elapsed();
                     info!("Turn Detector warmup completed in {:?}", warmup_elapsed);
                 }
-                
+
                 let total_elapsed = start.elapsed();
                 info!("Turn Detector fully ready in {:?}", total_elapsed);
-                
+
                 Some(Arc::new(RwLock::new(detector)))
             }
             Err(e) => {
@@ -126,7 +128,7 @@ impl CoreState {
     /// Warmup the Turn Detector model with sample inputs
     async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
         debug!("Starting Turn Detector warmup with sample inputs");
-        
+
         // Sample inputs that cover common speech patterns
         let warmup_samples = vec![
             "Hello",
@@ -139,7 +141,7 @@ impl CoreState {
             "Let me think about it",
             "I need to",
         ];
-        
+
         // Run predictions on all samples to ensure model is fully loaded
         for (i, sample) in warmup_samples.iter().enumerate() {
             let start = Instant::now();
@@ -159,7 +161,7 @@ impl CoreState {
                 }
             }
         }
-        
+
         debug!("Turn Detector warmup completed");
         Ok(())
     }

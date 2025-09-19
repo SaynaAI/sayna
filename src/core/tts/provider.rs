@@ -89,13 +89,21 @@ impl TTSProvider {
             return;
         }
 
+        // Apply pronunciation replacements
+        let config = request_builder.get_config();
+        let mut processed_text = text.clone();
+        for pronunciation in &config.pronunciations {
+            processed_text =
+                processed_text.replace(&pronunciation.word, &pronunciation.pronunciation);
+        }
+
         // Try cache first
         if let Some((cache, key)) = cache_and_key.as_ref() {
             match cache.get(key).await {
                 Ok(Some(bytes)) => {
                     debug!(
                         "Cache HIT - Sending cached audio for text: '{}', {} bytes",
-                        text,
+                        processed_text,
                         bytes.len()
                     );
                     // Send cached audio as a single chunk
@@ -107,13 +115,13 @@ impl TTSProvider {
                     } else {
                         debug!(
                             "Successfully sent cached audio through channel for text: '{}' (receiver has read it)",
-                            text
+                            processed_text
                         );
                     }
                     return;
                 }
                 Ok(None) => {
-                    debug!("Cache miss for text: '{}'", text);
+                    debug!("Cache miss for text: '{}'", processed_text);
                 }
                 Err(e) => {
                     error!("Cache get error: {:?}", e);
@@ -135,8 +143,8 @@ impl TTSProvider {
             }
         };
 
-        // Build request with provider-specific URL, headers and body
-        let request = request_builder.build_http_request(client_guard.client(), &text);
+        // Build request with provider-specific URL, headers and body using processed text
+        let request = request_builder.build_http_request(client_guard.client(), &processed_text);
 
         // Send request
         let response_result = request.send().await;
@@ -145,7 +153,7 @@ impl TTSProvider {
         match response_result {
             Ok(response) => {
                 if !response.status().is_success() {
-                    info!("ERROR Response for text: {}", text);
+                    info!("ERROR Response for text: {}", processed_text);
                     let status = response.status();
                     let error_body = response
                         .text()

@@ -150,6 +150,15 @@ pub trait AudioCallback: Send + Sync {
     fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
+/// Pronunciation replacement configuration
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Pronunciation {
+    /// Word to replace
+    pub word: String,
+    /// Pronunciation to use instead
+    pub pronunciation: String,
+}
+
 /// Configuration for TTS providers
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TTSConfig {
@@ -170,6 +179,8 @@ pub struct TTSConfig {
     pub connection_timeout: Option<u64>,
     /// Request timeout in seconds
     pub request_timeout: Option<u64>,
+    /// Pronunciation replacements to apply before TTS
+    pub pronunciations: Vec<Pronunciation>,
 }
 
 impl Default for TTSConfig {
@@ -184,6 +195,7 @@ impl Default for TTSConfig {
             sample_rate: Some(24000),
             connection_timeout: Some(30),
             request_timeout: Some(60),
+            pronunciations: Vec::new(),
         }
     }
 }

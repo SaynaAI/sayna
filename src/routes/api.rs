@@ -1,7 +1,10 @@
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{api, voices};
+use crate::handlers::{api, speak, voices};
 use crate::state::AppState;
 use std::sync::Arc;
 
@@ -9,5 +12,6 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(api::health_check))
         .route("/voices", get(voices::list_voices))
+        .route("/speak", post(speak::speak_handler))
         .layer(TraceLayer::new_for_http())
 }

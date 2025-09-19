@@ -1,23 +1,19 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
-use regex::Regex;
-use once_cell::sync::Lazy;
 
 use crate::core::turn_detect::{
     config::TurnDetectorConfig, model_manager::ModelManager, tokenizer::Tokenizer,
 };
 
 // Static regex for text normalization
-static PUNCT_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[^\w\s'-]").unwrap()
-});
+static PUNCT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\s'-]").unwrap());
 
-static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\s+").unwrap()
-});
+static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 pub struct TurnDetector {
     model: Arc<ModelManager>,
@@ -63,25 +59,25 @@ impl TurnDetector {
         if text.is_empty() {
             return String::new();
         }
-        
+
         // Convert to lowercase
         let text = text.to_lowercase();
-        
-        // Remove all punctuation except apostrophes and hyphens  
+
+        // Remove all punctuation except apostrophes and hyphens
         let text = PUNCT_REGEX.replace_all(&text, " ");
-        
+
         // Normalize whitespace
         let text = WHITESPACE_REGEX.replace_all(&text, " ");
-        
+
         text.trim().to_string()
     }
-    
+
     /// Format text as a chat message for the model
     fn format_as_chat(&self, user_input: &str) -> String {
         // The model expects chat-formatted input
         // For single turn detection, we format it as a user message
         let normalized = Self::normalize_text(user_input);
-        
+
         // Apply chat template format (simplified version)
         // The model was trained with SmolLM chat format
         // We don't include the final <|im_end|> as per LiveKit's implementation
@@ -95,7 +91,7 @@ impl TurnDetector {
         }
 
         let start = Instant::now();
-        
+
         // Format the input as a chat message with proper normalization
         let formatted_input = self.format_as_chat(user_input);
         debug!("Formatted input for model: '{}'", formatted_input);
