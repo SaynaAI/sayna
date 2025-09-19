@@ -170,9 +170,9 @@ impl ElevenLabsTTS {
 
         // Create voice settings from config
         let voice_settings = VoiceSettings {
-            stability: Some(0.5),
-            similarity_boost: Some(0.75),
-            style: Some(0.0),
+            stability: Some(0.4),
+            similarity_boost: Some(0.8),
+            style: Some(0.2),
             use_speaker_boost: Some(false),
             speed: config.speaking_rate,
         };
