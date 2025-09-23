@@ -52,7 +52,7 @@ impl CoreState {
 
         let tts_provider_urls = get_tts_provider_urls();
         for (provider, url) in tts_provider_urls {
-            match ReqManager::new(10).await {
+            match ReqManager::new(14).await {
                 Ok(manager) => {
                     // Optionally warm up connections to providers (e.g., Deepgram)
                     let _ = manager.warmup(url.as_str(), "OPTIONS").await;
