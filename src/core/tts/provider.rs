@@ -409,7 +409,7 @@ impl TTSProvider {
         // Check if we have a request manager
         if self.req_manager.read().await.is_none() {
             // If no external request manager provided, create a default one
-            match ReqManager::new(4).await {
+            match ReqManager::new(14).await {
                 Ok(manager) => {
                     // Warm up connections
                     let _ = manager.warmup(default_url, "OPTIONS").await;
