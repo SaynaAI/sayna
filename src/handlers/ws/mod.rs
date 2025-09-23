@@ -360,7 +360,11 @@
 //!
 //! All errors are sent back to the client as JSON messages with `type: "error"`.
 
+pub mod audio_handler;
+pub mod command_handler;
 pub mod config;
+pub mod config_handler;
+pub mod error;
 pub mod handler;
 pub mod messages;
 pub mod processor;
