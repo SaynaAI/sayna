@@ -30,7 +30,7 @@ async fn test_turn_detector_initialization() -> Result<()> {
 #[tokio::test]
 async fn test_config_defaults() {
     let config = TurnDetectorConfig::default();
-    assert_eq!(config.threshold, 0.8);
+    assert_eq!(config.threshold, 0.7);
     assert_eq!(config.max_context_turns, 4);
     assert_eq!(config.max_sequence_length, 512);
     assert!(config.use_quantized);

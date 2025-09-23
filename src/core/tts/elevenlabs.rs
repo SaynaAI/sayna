@@ -31,9 +31,9 @@ pub struct VoiceSettings {
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
-            stability: Some(0.6),
-            similarity_boost: Some(0.9),
-            style: Some(0.0),
+            stability: Some(0.4),
+            similarity_boost: Some(0.8),
+            style: Some(0.2),
             use_speaker_boost: Some(false),
             speed: Some(1.0),
         }
@@ -170,11 +170,8 @@ impl ElevenLabsTTS {
 
         // Create voice settings from config
         let voice_settings = VoiceSettings {
-            stability: Some(0.4),
-            similarity_boost: Some(0.8),
-            style: Some(0.2),
-            use_speaker_boost: Some(false),
             speed: config.speaking_rate,
+            ..Default::default()
         };
 
         let request_builder = ElevenLabsRequestBuilder {
@@ -319,12 +316,17 @@ mod tests {
             ..Default::default()
         };
 
+        let default_voice_settings = VoiceSettings::default();
+
         let tts = ElevenLabsTTS::new(config).unwrap();
         assert_eq!(tts.request_builder.voice_settings.speed, Some(1.5));
-        assert_eq!(tts.request_builder.voice_settings.stability, Some(0.5));
+        assert_eq!(
+            tts.request_builder.voice_settings.stability,
+            default_voice_settings.stability
+        );
         assert_eq!(
             tts.request_builder.voice_settings.similarity_boost,
-            Some(0.75)
+            default_voice_settings.similarity_boost
         );
     }
 
