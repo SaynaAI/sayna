@@ -19,8 +19,9 @@ use tracing::{debug, error, info, warn};
 use crate::state::AppState;
 
 use super::{
+    audio_handler::handle_audio_message,
     messages::{IncomingMessage, MessageRoute, OutgoingMessage},
-    processor::{handle_audio_message, handle_incoming_message},
+    processor::handle_incoming_message,
     state::ConnectionState,
 };
 
@@ -30,7 +31,16 @@ use super::{
 const CHANNEL_BUFFER_SIZE: usize = 1024;
 
 /// WebSocket voice processing handler
-/// Upgrades the HTTP connection to WebSocket for real-time voice processing
+///
+/// Upgrades the HTTP connection to WebSocket for real-time voice processing.
+/// This is the main entry point for WebSocket connections to the voice service.
+///
+/// # Arguments
+/// * `ws` - The WebSocket upgrade request from Axum
+/// * `state` - Application state containing configuration and shared resources
+///
+/// # Returns
+/// * `Response` - HTTP response that upgrades the connection to WebSocket
 pub async fn ws_voice_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -40,7 +50,25 @@ pub async fn ws_voice_handler(
 }
 
 /// Handle WebSocket voice connection with optimized performance
-/// This function manages the entire WebSocket session for voice processing
+///
+/// This function manages the entire WebSocket session for voice processing,
+/// including message routing, resource management, and graceful cleanup.
+///
+/// # Arguments
+/// * `socket` - The established WebSocket connection
+/// * `app_state` - Application state containing shared resources
+///
+/// # Lifecycle
+/// 1. Split socket into sender/receiver for bidirectional communication
+/// 2. Set up message routing channels with optimized buffer sizes
+/// 3. Spawn sender task for outgoing messages
+/// 4. Process incoming messages in a loop
+/// 5. Clean up resources on connection close
+///
+/// # Performance Optimizations
+/// - Large channel buffer (1024) for reduced contention
+/// - RwLock for connection state (frequent reads, rare writes)
+/// - Timeout handling for stale connection detection
 async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     info!("WebSocket voice connection established");
 
@@ -148,6 +176,23 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
 }
 
 /// Process incoming WebSocket message with optimizations
+///
+/// Routes different message types to appropriate handlers and manages
+/// the connection lifecycle based on message processing results.
+///
+/// # Arguments
+/// * `msg` - The WebSocket message to process
+/// * `state` - Connection state for this WebSocket session
+/// * `message_tx` - Channel for sending response messages
+/// * `app_state` - Application state with global configuration
+///
+/// # Returns
+/// * `bool` - true to continue processing, false to close connection
+///
+/// # Performance Notes
+/// - Marked inline(always) for hot path optimization
+/// - Fast JSON parsing with pre-validation
+/// - Zero-copy audio data handling where possible
 #[inline(always)]
 async fn process_message(
     msg: Message,
