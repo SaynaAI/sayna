@@ -35,6 +35,8 @@ pub async fn handle_send_message(
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
+    return true;
+
     debug!(
         "Processing send_message command: {} chars, role: {}, topic: {:?}",
         message.len(),
