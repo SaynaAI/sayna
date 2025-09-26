@@ -24,9 +24,7 @@ use super::{
     config::{
         LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, compute_tts_config_hash,
     },
-    messages::{
-        MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage,
-    },
+    messages::{MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
     state::ConnectionState,
 };
 
@@ -97,7 +95,9 @@ pub async fn handle_config_message(
             tts_ws_config.as_ref().unwrap(),
             app_state,
             message_tx,
-        ).await {
+        )
+        .await
+        {
             Some(vm) => {
                 // Store in connection state
                 let mut state_guard = state.write().await;
@@ -124,11 +124,14 @@ pub async fn handle_config_message(
             &app_state.config.livekit_url,
             voice_manager.as_ref(),
             message_tx,
-        ).await {
-            Some(client) => {
+        )
+        .await
+        {
+            Some((client, operation_queue)) => {
                 // Store in connection state
                 let mut state_guard = state.write().await;
                 state_guard.livekit_client = Some(client.clone());
+                state_guard.livekit_operation_queue = operation_queue;
                 Some(client)
             }
             None => return true,
@@ -139,7 +142,19 @@ pub async fn handle_config_message(
 
     // Register final TTS callback with LiveKit routing
     if let Some(ref vm) = voice_manager {
-        register_final_tts_callback(vm, livekit_client.as_ref(), message_tx).await;
+        let operation_queue = if let Some(ref _client) = livekit_client {
+            let state_guard = state.read().await;
+            state_guard.livekit_operation_queue.clone()
+        } else {
+            None
+        };
+        register_final_tts_callback(
+            vm,
+            livekit_client.as_ref(),
+            operation_queue.as_ref(),
+            message_tx,
+        )
+        .await;
     }
 
     // Send ready message
@@ -403,21 +418,51 @@ async fn register_early_tts_callback(
 async fn register_final_tts_callback(
     voice_manager: &Arc<VoiceManager>,
     livekit_client: Option<&Arc<RwLock<LiveKitClient>>>,
+    operation_queue: Option<&crate::livekit::OperationQueue>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) {
     let message_tx_for_tts = message_tx.clone();
     let livekit_client_for_tts = livekit_client.cloned();
+    let operation_queue_for_tts = operation_queue.cloned();
 
     if let Err(e) = voice_manager
         .on_tts_audio(move |audio_data: AudioData| {
             let message_tx = message_tx_for_tts.clone();
             let livekit_client = livekit_client_for_tts.clone();
+            let operation_queue = operation_queue_for_tts.clone();
 
             Box::pin(async move {
                 let mut sent_to_livekit = false;
 
-                // Try to send to LiveKit first if available
-                if let Some(livekit_client_arc) = &livekit_client {
+                // Try to send to LiveKit using operation queue if available
+                if let Some(queue) = operation_queue {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    if queue
+                        .queue(crate::livekit::LiveKitOperation::SendAudio {
+                            audio_data: audio_data.data.clone(),
+                            response_tx: tx,
+                        })
+                        .await
+                        .is_ok()
+                    {
+                        match rx.await {
+                            Ok(Ok(())) => {
+                                debug!(
+                                    "TTS audio successfully sent to LiveKit via queue: {} bytes",
+                                    audio_data.data.len()
+                                );
+                                sent_to_livekit = true;
+                            }
+                            Ok(Err(e)) => {
+                                error!("Failed to send TTS audio to LiveKit: {:?}", e);
+                            }
+                            Err(_) => {
+                                error!("Operation worker disconnected while sending TTS audio");
+                            }
+                        }
+                    }
+                } else if let Some(livekit_client_arc) = &livekit_client {
+                    // Fallback to lock-based approach
                     match tokio::time::timeout(
                         tokio::time::Duration::from_millis(LIVEKIT_LOCK_TIMEOUT_MS),
                         livekit_client_arc.write()
@@ -481,7 +526,10 @@ async fn initialize_livekit_client(
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
-) -> Option<Arc<RwLock<LiveKitClient>>> {
+) -> Option<(
+    Arc<RwLock<LiveKitClient>>,
+    Option<crate::livekit::OperationQueue>,
+)> {
     info!("Setting up LiveKit client with URL: {}", livekit_url);
 
     // Use default TTS config for LiveKit audio parameters when TTS is not configured
@@ -526,15 +574,18 @@ async fn initialize_livekit_client(
     // Wait for audio source to be available
     wait_for_livekit_audio(&livekit_client).await;
 
+    // Get the operation queue for non-blocking operations
+    let operation_queue = livekit_client.get_operation_queue();
+
     let livekit_client_arc = Arc::new(RwLock::new(livekit_client));
 
     // Register audio clear callback with VoiceManager
     if let Some(vm) = voice_manager {
-        register_audio_clear_callback(vm, &livekit_client_arc).await;
+        register_audio_clear_callback(vm, &livekit_client_arc, operation_queue.as_ref()).await;
     }
 
     info!("LiveKit client connected and ready");
-    Some(livekit_client_arc)
+    Some((livekit_client_arc, operation_queue))
 }
 
 /// Set up LiveKit audio callback to forward audio to STT
@@ -686,31 +737,69 @@ async fn wait_for_livekit_audio(livekit_client: &LiveKitClient) {
 async fn register_audio_clear_callback(
     voice_manager: &Arc<VoiceManager>,
     livekit_client: &Arc<RwLock<LiveKitClient>>,
+    operation_queue: Option<&crate::livekit::OperationQueue>,
 ) {
-    let livekit_client_clone = livekit_client.clone();
+    if let Some(queue) = operation_queue {
+        // Use operation queue for non-blocking clear
+        let queue_clone = queue.clone();
 
-    if let Err(e) = voice_manager
-        .on_audio_clear(move || {
-            let livekit = livekit_client_clone.clone();
-            Box::pin(async move {
-                // Use try_write to avoid blocking in callback
-                // If we can't get the lock, it's okay - audio will be cleared eventually
-                match livekit.try_write() {
-                    Ok(mut client) => {
-                        if let Err(e) = client.clear_audio().await {
-                            warn!("Failed to clear LiveKit audio buffer: {:?}", e);
-                        } else {
-                            debug!("Cleared LiveKit audio buffer during interruption");
+        if let Err(e) = voice_manager
+            .on_audio_clear(move || {
+                let queue = queue_clone.clone();
+                Box::pin(async move {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    if let Err(e) = queue
+                        .queue(crate::livekit::LiveKitOperation::ClearAudio { response_tx: tx })
+                        .await
+                    {
+                        warn!("Failed to queue clear audio operation: {:?}", e);
+                    } else {
+                        // Wait for the operation to complete
+                        match rx.await {
+                            Ok(Ok(())) => {
+                                debug!("Cleared LiveKit audio buffer during interruption");
+                            }
+                            Ok(Err(e)) => {
+                                warn!("Failed to clear LiveKit audio buffer: {:?}", e);
+                            }
+                            Err(_) => {
+                                warn!("Operation worker disconnected during audio clear");
+                            }
                         }
                     }
-                    Err(_) => {
-                        debug!("LiveKit client busy during audio clear - skipping");
-                    }
-                }
+                })
             })
-        })
-        .await
-    {
-        warn!("Failed to register audio clear callback: {:?}", e);
+            .await
+        {
+            warn!("Failed to register audio clear callback: {:?}", e);
+        }
+    } else {
+        // Fallback to lock-based approach
+        let livekit_client_clone = livekit_client.clone();
+
+        if let Err(e) = voice_manager
+            .on_audio_clear(move || {
+                let livekit = livekit_client_clone.clone();
+                Box::pin(async move {
+                    // Use try_write to avoid blocking in callback
+                    // If we can't get the lock, it's okay - audio will be cleared eventually
+                    match livekit.try_write() {
+                        Ok(mut client) => {
+                            if let Err(e) = client.clear_audio().await {
+                                warn!("Failed to clear LiveKit audio buffer: {:?}", e);
+                            } else {
+                                debug!("Cleared LiveKit audio buffer during interruption");
+                            }
+                        }
+                        Err(_) => {
+                            debug!("LiveKit client busy during audio clear - skipping");
+                        }
+                    }
+                })
+            })
+            .await
+        {
+            warn!("Failed to register audio clear callback: {:?}", e);
+        }
     }
 }

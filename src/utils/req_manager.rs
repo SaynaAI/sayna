@@ -104,7 +104,10 @@ impl<'a> ClientGuard<'a> {
 
     /// Make a GET request with automatic metrics tracking
     pub async fn get(&self, url: &str) -> Result<Response, reqwest::Error> {
-        self.manager.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.manager
+            .metrics
+            .total_requests
+            .fetch_add(1, Ordering::Relaxed);
         let result = self.client.get(url).send().await;
         self.update_metrics(&result);
         result
@@ -112,7 +115,10 @@ impl<'a> ClientGuard<'a> {
 
     /// Make a POST request with automatic metrics tracking
     pub async fn post(&self, url: &str) -> Result<Response, reqwest::Error> {
-        self.manager.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.manager
+            .metrics
+            .total_requests
+            .fetch_add(1, Ordering::Relaxed);
         let result = self.client.post(url).send().await;
         self.update_metrics(&result);
         result
@@ -122,10 +128,16 @@ impl<'a> ClientGuard<'a> {
     fn update_metrics(&self, result: &Result<Response, reqwest::Error>) {
         match result {
             Ok(_) => {
-                self.manager.metrics.successful_requests.fetch_add(1, Ordering::Relaxed);
+                self.manager
+                    .metrics
+                    .successful_requests
+                    .fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => {
-                self.manager.metrics.failed_requests.fetch_add(1, Ordering::Relaxed);
+                self.manager
+                    .metrics
+                    .failed_requests
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -133,7 +145,10 @@ impl<'a> ClientGuard<'a> {
 
 impl<'a> Drop for ClientGuard<'a> {
     fn drop(&mut self) {
-        self.manager.metrics.active_requests.fetch_sub(1, Ordering::Relaxed);
+        self.manager
+            .metrics
+            .active_requests
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -181,8 +196,8 @@ impl ReqManagerConfig {
     pub fn low_latency() -> Self {
         Self {
             max_concurrent_requests: 20,
-            http2_stream_window_size: 4_194_304,      // 4MB
-            http2_connection_window_size: 8_388_608,  // 8MB
+            http2_stream_window_size: 4_194_304,     // 4MB
+            http2_connection_window_size: 8_388_608, // 8MB
             http2_keep_alive_interval: Duration::from_secs(2),
             http2_keep_alive_timeout: Duration::from_secs(5),
             pool_max_idle_per_host: 1024,
@@ -303,7 +318,9 @@ impl ReqManager {
 
         // Update metrics
         let active = self.metrics.active_requests.fetch_add(1, Ordering::Relaxed) + 1;
-        self.metrics.peak_concurrent.fetch_max(active, Ordering::Relaxed);
+        self.metrics
+            .peak_concurrent
+            .fetch_max(active, Ordering::Relaxed);
 
         let client = Arc::clone(&self.client);
 
@@ -346,18 +363,34 @@ impl ReqManager {
                     let start = Instant::now();
 
                     let result = match warmup_type.as_str() {
-                        "HEAD" => client.head(&url)
-                            .timeout(Duration::from_millis(500))
-                            .send().await,
-                        "OPTIONS" => client.request(reqwest::Method::OPTIONS, &url)
-                            .timeout(Duration::from_millis(500))
-                            .send().await,
-                        "GET" => client.get(&url)
-                            .timeout(Duration::from_millis(500))
-                            .send().await,
-                        _ => client.request(reqwest::Method::OPTIONS, &url)
-                            .timeout(Duration::from_millis(500))
-                            .send().await,
+                        "HEAD" => {
+                            client
+                                .head(&url)
+                                .timeout(Duration::from_millis(500))
+                                .send()
+                                .await
+                        }
+                        "OPTIONS" => {
+                            client
+                                .request(reqwest::Method::OPTIONS, &url)
+                                .timeout(Duration::from_millis(500))
+                                .send()
+                                .await
+                        }
+                        "GET" => {
+                            client
+                                .get(&url)
+                                .timeout(Duration::from_millis(500))
+                                .send()
+                                .await
+                        }
+                        _ => {
+                            client
+                                .request(reqwest::Method::OPTIONS, &url)
+                                .timeout(Duration::from_millis(500))
+                                .send()
+                                .await
+                        }
                     };
 
                     match result {
@@ -365,7 +398,8 @@ impl ReqManager {
                             // Consume response to properly reuse connection
                             let _ = resp.bytes().await;
                             let elapsed = start.elapsed();
-                            if i < 5 { // Only log first few to avoid spam
+                            if i < 5 {
+                                // Only log first few to avoid spam
                                 println!("  Warmup stream {i} completed in {elapsed:?}");
                             }
                             Ok(elapsed)
@@ -388,17 +422,20 @@ impl ReqManager {
         let results = join_all(warmup_futures).await;
 
         // Calculate average latency for diagnostics
-        let successful_times: Vec<Duration> = results.iter()
+        let successful_times: Vec<Duration> = results
+            .iter()
             .filter_map(|r| r.as_ref().ok())
             .cloned()
             .collect();
 
         if !successful_times.is_empty() {
-            let avg_ms = successful_times.iter()
-                .map(|d| d.as_millis())
-                .sum::<u128>() / successful_times.len() as u128;
-            println!("Warmup complete: {} streams, avg latency: {}ms",
-                     successful_times.len(), avg_ms);
+            let avg_ms = successful_times.iter().map(|d| d.as_millis()).sum::<u128>()
+                / successful_times.len() as u128;
+            println!(
+                "Warmup complete: {} streams, avg latency: {}ms",
+                successful_times.len(),
+                avg_ms
+            );
         }
 
         Ok(())
@@ -441,17 +478,19 @@ impl ReqManager {
                             let _ = resp.bytes().await;
                             Ok(start.elapsed())
                         }
-                        Err(_) => Err(())
+                        Err(_) => Err(()),
                     }
                 }
             })
             .collect();
 
         let probe_results = join_all(probe_futures).await;
-        let avg_latency_ms = probe_results.iter()
+        let avg_latency_ms = probe_results
+            .iter()
             .filter_map(|r| r.as_ref().ok())
             .map(|d| d.as_millis())
-            .sum::<u128>() / probe_count as u128;
+            .sum::<u128>()
+            / probe_count as u128;
 
         println!("  Phase 1 probe: avg latency {}ms", avg_latency_ms);
 
@@ -478,7 +517,7 @@ impl ReqManager {
                                 Ok(())
                             }
                             Err(e) if e.is_timeout() => Ok(()), // Timeout is fine for warmup
-                            Err(_) => Err(())
+                            Err(_) => Err(()),
                         }
                     }
                 })
@@ -487,7 +526,10 @@ impl ReqManager {
             let results = join_all(warmup_futures).await;
             let successful = results.iter().filter(|r| r.is_ok()).count();
 
-            println!("  Phase 2 aggressive: {}/{} successful", successful, warmup_count);
+            println!(
+                "  Phase 2 aggressive: {}/{} successful",
+                successful, warmup_count
+            );
         } else {
             println!("  Skipping phase 2 due to high latency");
         }
@@ -539,7 +581,8 @@ impl ReqManager {
                         // Gradually increase interval if stable (up to 10s)
                         if current_interval_secs < 10 {
                             current_interval_secs += 1;
-                            interval = tokio::time::interval(Duration::from_secs(current_interval_secs));
+                            interval =
+                                tokio::time::interval(Duration::from_secs(current_interval_secs));
                             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                         }
                     }
@@ -553,13 +596,17 @@ impl ReqManager {
                         // Decrease interval if failing (down to 2s)
                         if consecutive_failures > 2 && current_interval_secs > 2 {
                             current_interval_secs = 2;
-                            interval = tokio::time::interval(Duration::from_secs(current_interval_secs));
+                            interval =
+                                tokio::time::interval(Duration::from_secs(current_interval_secs));
                             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                         }
 
                         // Stop after too many failures
                         if consecutive_failures > 10 {
-                            eprintln!("Keep-alive task stopping after {} failures", consecutive_failures);
+                            eprintln!(
+                                "Keep-alive task stopping after {} failures",
+                                consecutive_failures
+                            );
                             break;
                         }
 

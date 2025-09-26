@@ -4,8 +4,10 @@
 //! through the LiveKit data channel.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, error};
+
+use crate::livekit::LiveKitOperation;
 
 use super::{
     messages::{MessageRoute, OutgoingMessage},
@@ -35,8 +37,6 @@ pub async fn handle_send_message(
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> bool {
-    return true;
-
     debug!(
         "Processing send_message command: {} chars, role: {}, topic: {:?}",
         message.len(),
@@ -44,44 +44,71 @@ pub async fn handle_send_message(
         topic
     );
 
-    // Fast path: read lock to get LiveKit client
-    let livekit_client = {
+    // Non-blocking path: use operation queue if available
+    let operation_queue = {
         let state_guard = state.read().await;
-        match &state_guard.livekit_client {
-            Some(client) => client.clone(),
-            None => {
-                let _ = message_tx
-                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: "LiveKit client not configured. Send config message with livekit configuration first."
-                            .to_string(),
-                    }))
-                    .await;
-                return true;
-            }
-        }
+        state_guard.livekit_operation_queue.clone()
     };
 
-    // Use write() instead of try_write() to wait for the lock
-    // This is better than complex retry logic since the LiveKit operations are fast
-    let mut client = livekit_client.write().await;
+    if let Some(queue) = operation_queue {
+        // Queue the operation non-blocking
+        let (response_tx, response_rx) = oneshot::channel();
 
-    if let Err(e) = client
-        .send_message(&message, &role, topic.as_deref(), debug)
-        .await
-    {
-        error!("Failed to send message via LiveKit: {:?}", e);
+        if let Err(e) = queue
+            .queue(LiveKitOperation::SendMessage {
+                message: message.clone(),
+                role: role.clone(),
+                topic: topic.clone(),
+                debug,
+                response_tx,
+                retry_count: 0,
+            })
+            .await
+        {
+            error!("Failed to queue send message operation: {:?}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to queue send message operation: {e:?}"),
+                }))
+                .await;
+            return true;
+        }
+
+        // Wait for response asynchronously
+        match response_rx.await {
+            Ok(Ok(())) => {
+                debug!(
+                    "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
+                    message.len(),
+                    role,
+                    topic
+                );
+            }
+            Ok(Err(e)) => {
+                error!("Failed to send message via LiveKit: {:?}", e);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to send message via LiveKit: {e:?}"),
+                    }))
+                    .await;
+            }
+            Err(_) => {
+                error!("Operation worker disconnected");
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: "Operation worker disconnected".to_string(),
+                    }))
+                    .await;
+            }
+        }
+    } else {
+        // Fallback: no queue available
         let _ = message_tx
             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to send message via LiveKit: {e:?}"),
+                message: "LiveKit client not configured. Send config message with livekit configuration first."
+                    .to_string(),
             }))
             .await;
-    } else {
-        debug!(
-            "Message sent via LiveKit: {} chars, role: {}, topic: {:?}",
-            message.len(),
-            role,
-            topic
-        );
     }
 
     true

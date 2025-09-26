@@ -9,7 +9,10 @@ use std::sync::{
 };
 use tokio::sync::RwLock;
 
-use crate::{core::voice_manager::VoiceManager, livekit::LiveKitClient};
+use crate::{
+    core::voice_manager::VoiceManager,
+    livekit::{LiveKitClient, operations::OperationQueue},
+};
 
 /// WebSocket connection state optimized for low latency
 ///
@@ -20,6 +23,8 @@ use crate::{core::voice_manager::VoiceManager, livekit::LiveKitClient};
 pub struct ConnectionState {
     pub voice_manager: Option<Arc<VoiceManager>>,
     pub livekit_client: Option<Arc<RwLock<LiveKitClient>>>,
+    /// Operation queue for non-blocking LiveKit operations
+    pub livekit_operation_queue: Option<OperationQueue>,
     /// Whether audio processing (STT/TTS) is enabled for this connection
     pub audio_enabled: AtomicBool,
 }
@@ -35,6 +40,7 @@ impl ConnectionState {
         Self {
             voice_manager: None,
             livekit_client: None,
+            livekit_operation_queue: None,
             audio_enabled: AtomicBool::new(false),
         }
     }
