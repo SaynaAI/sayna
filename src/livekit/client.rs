@@ -26,9 +26,10 @@ use livekit::{
 use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use super::operations::{LiveKitOperation, OperationQueue, QueueStats};
 use super::types::*;
 use crate::AppError;
 
@@ -67,12 +68,15 @@ pub struct ParticipantDisconnectEvent {
     pub timestamp: u64,
 }
 
+/// Reliable data channel threshold (200 MB) to handle bursty payloads without premature backpressure
+const RELIABLE_BUFFER_THRESHOLD_BYTES: u64 = 200 * 1024 * 1024;
+
 /// LiveKit client for handling audio streaming and publishing
 ///
-/// Optimized for low latency with buffer pooling and minimal allocations
+/// Optimized for low latency with queue-based operations to eliminate lock contention
 pub struct LiveKitClient {
     config: LiveKitConfig,
-    room: Option<Room>,
+    room: Arc<Mutex<Option<Room>>>,
     room_events: Option<mpsc::UnboundedReceiver<RoomEvent>>,
     audio_callback: Option<AudioCallback>,
     data_callback: Option<DataCallback>,
@@ -82,13 +86,17 @@ pub struct LiveKitClient {
     // Audio publishing components
     audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     local_audio_track: Option<LocalAudioTrack>,
-    local_track_publication: Option<LocalTrackPublication>,
+    local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
     // Pre-allocated buffer pool for zero-copy audio processing
     _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     // Audio queue for buffering TTS audio until source is ready
     audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    // Handle for the audio worker task
-    audio_worker_handle: Option<tokio::task::JoinHandle<()>>,
+    // Operation queue for non-blocking operations
+    operation_queue: Option<OperationQueue>,
+    // Handle for the operation worker task
+    operation_worker_handle: Option<tokio::task::JoinHandle<()>>,
+    // Stats for monitoring
+    stats: Arc<Mutex<QueueStats>>,
 }
 
 impl LiveKitClient {
@@ -121,7 +129,7 @@ impl LiveKitClient {
 
         Self {
             config,
-            room: None,
+            room: Arc::new(Mutex::new(None)),
             room_events: None,
             audio_callback: None,
             data_callback: None,
@@ -131,15 +139,25 @@ impl LiveKitClient {
             // Initialize audio publishing components
             audio_source: Arc::new(Mutex::new(None)),
             local_audio_track: None,
-            local_track_publication: None,
+            local_track_publication: Arc::new(Mutex::new(None)),
             _audio_buffer_pool: Arc::new(Mutex::new(
                 (0..4)
                     .map(|_| Vec::with_capacity(buffer_capacity))
                     .collect(),
             )),
             audio_queue: Arc::new(Mutex::new(VecDeque::new())),
-            audio_worker_handle: None,
+            operation_queue: None,
+            operation_worker_handle: None,
+            stats: Arc::new(Mutex::new(QueueStats::default())),
         }
+    }
+
+    /// Get a reference to the operation queue for non-blocking operations
+    ///
+    /// This allows external code to queue operations without locking the client.
+    /// Returns None if the client hasn't been connected yet.
+    pub fn get_operation_queue(&self) -> Option<OperationQueue> {
+        self.operation_queue.clone()
     }
 
     /// Set the callback function for handling incoming audio chunks
@@ -273,11 +291,30 @@ impl LiveKitClient {
 
         match Room::connect(&self.config.url, &self.config.token, RoomOptions::default()).await {
             Ok((room, room_events)) => {
-                self.room = Some(room);
+                *self.room.lock().await = Some(room);
                 self.room_events = Some(room_events);
                 *self.is_connected.lock().await = true;
 
                 info!("Successfully connected to LiveKit room");
+
+                // Increase reliable data channel buffer threshold to accommodate larger payload bursts
+                {
+                    let room_guard = self.room.lock().await;
+                    if let Some(room_ref) = room_guard.as_ref() {
+                        let participant = room_ref.local_participant();
+                        if let Err(e) = participant.set_data_channel_buffered_amount_low_threshold(
+                            RELIABLE_BUFFER_THRESHOLD_BYTES,
+                            DataPacketKind::Reliable,
+                        ) {
+                            warn!(
+                                "Failed to set data channel buffered amount threshold: {:?}",
+                                e
+                            );
+                        } else {
+                            debug!("Set reliable data channel buffered amount threshold to 200 MB");
+                        }
+                    }
+                }
 
                 // Set up audio source and track for publishing TTS audio
                 self.setup_audio_publishing().await?;
@@ -285,8 +322,8 @@ impl LiveKitClient {
                 // Start handling room events
                 self.start_event_handler().await?;
 
-                // Start the audio worker task to process queued audio
-                self.start_audio_worker().await;
+                // Start the operation worker to process queued operations
+                self.start_operation_worker().await;
 
                 Ok(())
             }
@@ -304,7 +341,21 @@ impl LiveKitClient {
     /// # Returns
     /// `true` if connected to the LiveKit room, `false` otherwise
     pub async fn is_connected(&self) -> bool {
-        *self.is_connected.lock().await
+        // Use direct access for read-only operation
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            if queue
+                .queue(LiveKitOperation::IsConnected { response_tx: tx })
+                .await
+                .is_ok()
+            {
+                rx.await.unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            *self.is_connected.lock().await
+        }
     }
 
     /// Check if the audio source is available for publishing
@@ -312,7 +363,22 @@ impl LiveKitClient {
     /// # Returns
     /// `true` if audio source is set up and ready, `false` otherwise
     pub async fn has_audio_source(&self) -> bool {
-        self.audio_source.lock().await.is_some() && self.local_track_publication.is_some()
+        // Use direct access for read-only operation
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            if queue
+                .queue(LiveKitOperation::HasAudioSource { response_tx: tx })
+                .await
+                .is_ok()
+            {
+                rx.await.unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            self.audio_source.lock().await.is_some()
+                && self.local_track_publication.lock().await.is_some()
+        }
     }
 
     /// Set up audio source and track for publishing TTS audio
@@ -356,7 +422,7 @@ impl LiveKitClient {
         let local_audio_track = LocalAudioTrack::create_audio_track("tts-audio", rtc_audio_source);
 
         // Publish the track to the room
-        if let Some(room) = &self.room {
+        if let Some(room) = &*self.room.lock().await {
             let publish_options = TrackPublishOptions {
                 source: TrackSource::Microphone,
                 ..Default::default()
@@ -379,7 +445,7 @@ impl LiveKitClient {
                     // Store the components for later use
                     *self.audio_source.lock().await = Some(audio_source.clone());
                     self.local_audio_track = Some(local_audio_track);
-                    self.local_track_publication = Some(publication);
+                    *self.local_track_publication.lock().await = Some(publication);
 
                     info!("Audio source, track, and publication are now set");
                 }
@@ -435,21 +501,33 @@ impl LiveKitClient {
     pub async fn send_tts_audio(&mut self, audio_data: Vec<u8>) -> Result<(), AppError> {
         debug!("send_tts_audio called with {} bytes", audio_data.len());
 
-        if !*self.is_connected.lock().await {
-            return Err(AppError::InternalServerError(
-                "Not connected to LiveKit room".to_string(),
-            ));
-        }
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            queue
+                .queue(LiveKitOperation::SendAudio {
+                    audio_data,
+                    response_tx: tx,
+                })
+                .await?;
+            rx.await.map_err(|_| {
+                AppError::InternalServerError("Operation worker disconnected".to_string())
+            })?
+        } else {
+            // Fallback for when queue is not initialized
+            if !*self.is_connected.lock().await {
+                return Err(AppError::InternalServerError(
+                    "Not connected to LiveKit room".to_string(),
+                ));
+            }
 
-        // Queue the audio data for processing by the worker
-        // This ensures audio is buffered and processed in order, even if the source isn't ready yet
-        {
-            let mut queue = self.audio_queue.lock().await;
-            queue.push_back(audio_data);
-            debug!("Queued audio data, queue size: {}", queue.len());
+            // Queue the audio data for processing
+            {
+                let mut queue = self.audio_queue.lock().await;
+                queue.push_back(audio_data);
+                debug!("Queued audio data, queue size: {}", queue.len());
+            }
+            Ok(())
         }
-
-        Ok(())
     }
 
     /// Send a data message to the LiveKit room
@@ -497,40 +575,56 @@ impl LiveKitClient {
     ) -> Result<(), AppError> {
         debug!("Sending data message to topic: {}, data: {:?}", topic, data);
 
-        if !*self.is_connected.lock().await {
-            return Err(AppError::InternalServerError(
-                "Not connected to LiveKit room".to_string(),
-            ));
-        }
-
-        let serialized_data = serde_json::to_vec(&data).map_err(|e| {
-            AppError::InternalServerError(format!("Failed to serialize JSON data: {e}"))
-        })?;
-
-        if let Some(room) = &self.room {
-            let data_packet = DataPacket {
-                payload: serialized_data,
-                topic: Some(topic.to_string()),
-                ..Default::default()
-            };
-            match room.local_participant().publish_data(data_packet).await {
-                Ok(_) => {
-                    debug!("Successfully sent data message to topic: {}", topic);
-                }
-                Err(e) => {
-                    error!("Failed to send data message to topic {}: {:?}", topic, e);
-                    return Err(AppError::InternalServerError(format!(
-                        "Failed to send data message to topic {topic}: {e:?}"
-                    )));
-                }
-            }
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            queue
+                .queue(LiveKitOperation::SendDataMessage {
+                    topic: topic.to_string(),
+                    data,
+                    response_tx: tx,
+                    retry_count: 0,
+                })
+                .await?;
+            rx.await.map_err(|_| {
+                AppError::InternalServerError("Operation worker disconnected".to_string())
+            })?
         } else {
-            return Err(AppError::InternalServerError(
-                "Room not available for data message publishing".to_string(),
-            ));
-        }
+            // Fallback for when queue is not initialized
+            if !*self.is_connected.lock().await {
+                return Err(AppError::InternalServerError(
+                    "Not connected to LiveKit room".to_string(),
+                ));
+            }
 
-        Ok(())
+            let serialized_data = serde_json::to_vec(&data).map_err(|e| {
+                AppError::InternalServerError(format!("Failed to serialize JSON data: {e}"))
+            })?;
+
+            let room_guard = self.room.lock().await;
+            if let Some(room) = room_guard.as_ref() {
+                let data_packet = DataPacket {
+                    payload: serialized_data,
+                    topic: Some(topic.to_string()),
+                    ..Default::default()
+                };
+                match room.local_participant().publish_data(data_packet).await {
+                    Ok(_) => {
+                        debug!("Successfully sent data message to topic: {}", topic);
+                    }
+                    Err(e) => {
+                        error!("Failed to send data message to topic {}: {:?}", topic, e);
+                        return Err(AppError::InternalServerError(format!(
+                            "Failed to send data message to topic {topic}: {e:?}"
+                        )));
+                    }
+                }
+            } else {
+                return Err(AppError::InternalServerError(
+                    "Room not available for data message publishing".to_string(),
+                ));
+            }
+            Ok(())
+        }
     }
 
     /// Send a text message to the LiveKit room in the specified JSON format
@@ -577,18 +671,38 @@ impl LiveKitClient {
         topic: Option<&str>,
         debug: Option<serde_json::Value>,
     ) -> Result<(), AppError> {
-        let topic = topic.unwrap_or("messages");
-        let json_message = json!({
-            "message": message,
-            "role": role,
-            "debug": debug
-        });
-
         info!(
             "Sending message to topic '{}': {} (role: {})",
-            topic, message, role
+            topic.unwrap_or("messages"),
+            message,
+            role
         );
-        self.send_data_message(topic, json_message).await
+
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            queue
+                .queue(LiveKitOperation::SendMessage {
+                    message: message.to_string(),
+                    role: role.to_string(),
+                    topic: topic.map(|s| s.to_string()),
+                    debug,
+                    response_tx: tx,
+                    retry_count: 0,
+                })
+                .await?;
+            rx.await.map_err(|_| {
+                AppError::InternalServerError("Operation worker disconnected".to_string())
+            })?
+        } else {
+            // Fallback to direct send
+            let topic = topic.unwrap_or("messages");
+            let json_message = json!({
+                "message": message,
+                "role": role,
+                "debug": debug
+            });
+            self.send_data_message(topic, json_message).await
+        }
     }
 
     /// Clear all pending buffered audio from the published track
@@ -636,27 +750,35 @@ impl LiveKitClient {
     pub async fn clear_audio(&mut self) -> Result<(), AppError> {
         debug!("Clearing pending buffered audio from LiveKit track");
 
-        if !*self.is_connected.lock().await {
-            return Err(AppError::InternalServerError(
-                "Not connected to LiveKit room".to_string(),
-            ));
-        }
-
-        // Clear the local buffer in the NativeAudioSource
-        // This is equivalent to Python SDK's clear_queue() method
-        // It only clears audio that hasn't been sent to WebRTC yet
-        if let Some(audio_source) = self.audio_source.lock().await.as_ref() {
-            audio_source.clear_buffer();
-            debug!("Cleared local audio buffer");
+        if let Some(queue) = &self.operation_queue {
+            let (tx, rx) = oneshot::channel();
+            queue
+                .queue(LiveKitOperation::ClearAudio { response_tx: tx })
+                .await?;
+            rx.await.map_err(|_| {
+                AppError::InternalServerError("Operation worker disconnected".to_string())
+            })?
         } else {
-            warn!("No audio source available - nothing to clear");
+            // Fallback for when queue is not initialized
+            if !*self.is_connected.lock().await {
+                return Err(AppError::InternalServerError(
+                    "Not connected to LiveKit room".to_string(),
+                ));
+            }
+
+            // Clear the local buffer in the NativeAudioSource
+            if let Some(audio_source) = self.audio_source.lock().await.as_ref() {
+                audio_source.clear_buffer();
+                debug!("Cleared local audio buffer");
+            } else {
+                warn!("No audio source available - nothing to clear");
+            }
+
+            // Also clear the audio queue
+            self.audio_queue.lock().await.clear();
+            debug!("Cleared audio queue");
+            Ok(())
         }
-
-        // Also clear the audio queue
-        self.audio_queue.lock().await.clear();
-        debug!("Cleared audio queue");
-
-        Ok(())
     }
 
     /// Disconnect from the LiveKit room
@@ -678,12 +800,12 @@ impl LiveKitClient {
             handle.abort();
         }
 
-        if let Some(room) = self.room.take() {
+        if let Some(room) = self.room.lock().await.take() {
             let _ = room.close().await;
         }
 
-        // Stop the audio worker task if running
-        if let Some(handle) = self.audio_worker_handle.take() {
+        // Stop the operation worker task if running
+        if let Some(handle) = self.operation_worker_handle.take() {
             handle.abort();
             let _ = handle.await;
         }
@@ -691,81 +813,410 @@ impl LiveKitClient {
         // Clean up audio publishing components
         *self.audio_source.lock().await = None;
         self.local_audio_track = None;
-        self.local_track_publication = None;
+        *self.local_track_publication.lock().await = None;
 
         // Clean up room and events
-        self.room = None;
+        *self.room.lock().await = None;
         self.room_events = None;
 
         info!("Successfully disconnected from LiveKit room");
         Ok(())
     }
 
-    /// Start the audio worker task to process queued audio
+    /// Start the operation worker task to process queued operations
     ///
-    /// This worker continuously processes the audio queue, sending audio frames
-    /// to the LiveKit track when the audio source is available. It provides
-    /// low latency by immediately processing audio as it becomes available.
-    async fn start_audio_worker(&mut self) {
+    /// This worker processes all LiveKit operations sequentially, eliminating
+    /// lock contention by being the sole accessor of the underlying LiveKit resources.
+    async fn start_operation_worker(&mut self) {
+        // Create operation queue with large buffer for high throughput
+        let (queue, mut receiver) = OperationQueue::new(1024);
+        let queue_clone = queue.clone();
+        self.operation_queue = Some(queue);
+
+        // Clone references needed by the worker
+        let room = Arc::clone(&self.room);
         let audio_queue = Arc::clone(&self.audio_queue);
+        let audio_source = Arc::clone(&self.audio_source);
         let is_connected = Arc::clone(&self.is_connected);
-        let audio_source_ref = Arc::clone(&self.audio_source);
+        let stats = Arc::clone(&self.stats);
         let config = self.config.clone();
-
+        let local_track_publication = Arc::clone(&self.local_track_publication);
         let handle = tokio::spawn(async move {
-            info!("Audio worker task started");
+            info!("Operation worker started");
+            let mut operation_count = 0u64;
+            let queue = queue_clone;
 
-            loop {
-                // Check if we're still connected
-                if !*is_connected.lock().await {
-                    debug!("Audio worker: connection lost, exiting");
-                    break;
+            while let Some(queued_op) = receiver.recv().await {
+                let start_time = std::time::Instant::now();
+
+                // Check for shutdown signal first
+                let is_shutdown = matches!(&queued_op.operation, LiveKitOperation::Shutdown);
+
+                let result = Self::process_operation(
+                    queued_op.operation,
+                    &room,
+                    &audio_queue,
+                    &audio_source,
+                    &is_connected,
+                    &config,
+                    &local_track_publication,
+                    &queue,
+                )
+                .await;
+
+                // Update stats
+                if let Ok(mut stats_guard) = stats.try_lock() {
+                    // Note: we can't access queued_op.operation here since it was moved
+                    // The stats recording is less detailed now
+                    stats_guard.total_operations += 1;
+                    if result.is_ok() {
+                        stats_guard.successful_operations += 1;
+                    } else {
+                        stats_guard.failed_operations += 1;
+                    }
+
+                    let latency = start_time.elapsed();
+                    let latency_ms = latency.as_millis() as u64;
+                    stats_guard.max_latency_ms = stats_guard.max_latency_ms.max(latency_ms);
+                    if stats_guard.total_operations == 1 {
+                        stats_guard.average_latency_ms = latency_ms;
+                    } else {
+                        stats_guard.average_latency_ms = (stats_guard.average_latency_ms
+                            * (stats_guard.total_operations - 1)
+                            + latency_ms)
+                            / stats_guard.total_operations;
+                    }
+
+                    operation_count += 1;
+                    if operation_count % 100 == 0 {
+                        stats_guard.log_stats();
+                    }
                 }
 
-                // Get current audio source
-                let current_source = audio_source_ref.lock().await.clone();
-
-                // Process queued audio if we have a source
-                if let Some(audio_source) = current_source {
-                    let audio_data = {
-                        let mut queue = audio_queue.lock().await;
-                        queue.pop_front()
-                    };
-
-                    if let Some(data) = audio_data {
-                        debug!("Audio worker: processing {} bytes from queue", data.len());
-
-                        // Convert to AudioFrame
-                        if let Ok(audio_frame) =
-                            Self::convert_audio_to_frame(data, config.sample_rate, config.channels)
-                        {
-                            // Send to LiveKit
-                            match audio_source.capture_frame(&audio_frame).await {
-                                Ok(()) => {
-                                    debug!("Audio worker: successfully sent audio frame");
-                                }
-                                Err(e) => {
-                                    error!("Audio worker: failed to capture frame: {:?}", e);
-                                }
-                            }
-                        } else {
-                            error!("Audio worker: failed to convert audio data to frame");
-                        }
-                    } else {
-                        // No audio in queue, yield to prevent busy waiting
-                        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-                    }
-                } else {
-                    // No audio source yet, keep the queue and wait
-                    // Check less frequently when waiting for source
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                if is_shutdown {
+                    info!("Operation worker shutting down");
+                    break;
                 }
             }
 
-            info!("Audio worker task finished");
+            info!("Operation worker finished");
         });
 
-        self.audio_worker_handle = Some(handle);
+        self.operation_worker_handle = Some(handle);
+    }
+
+    /// Process a single operation
+    async fn process_operation(
+        operation: LiveKitOperation,
+        room: &Arc<Mutex<Option<Room>>>,
+        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
+        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+        is_connected: &Arc<Mutex<bool>>,
+        config: &LiveKitConfig,
+        local_track_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
+        _queue: &OperationQueue,
+    ) -> Result<(), AppError> {
+        match operation {
+            LiveKitOperation::SendAudio {
+                audio_data,
+                response_tx,
+            } => {
+                let result = Self::process_send_audio(
+                    audio_data,
+                    audio_queue,
+                    audio_source,
+                    is_connected,
+                    config,
+                )
+                .await;
+                let _ = response_tx.send(result);
+            }
+            LiveKitOperation::SendMessage {
+                message,
+                role,
+                topic,
+                debug,
+                response_tx,
+                retry_count: _, // Ignore retry count - keep-alive should prevent timeouts
+            } => {
+                let result =
+                    Self::process_send_message(message, role, topic, debug, room, is_connected)
+                        .await;
+                let _ = response_tx.send(result);
+            }
+            LiveKitOperation::SendDataMessage {
+                topic,
+                data,
+                response_tx,
+                retry_count: _, // Ignore retry count - keep-alive should prevent timeouts
+            } => {
+                let result = Self::process_send_data_message(topic, data, room, is_connected).await;
+                let _ = response_tx.send(result);
+            }
+            LiveKitOperation::ClearAudio { response_tx } => {
+                let result =
+                    Self::process_clear_audio(audio_queue, audio_source, is_connected).await;
+                let _ = response_tx.send(result);
+            }
+            LiveKitOperation::IsConnected { response_tx } => {
+                let connected = *is_connected.lock().await;
+                let _ = response_tx.send(connected);
+            }
+            LiveKitOperation::HasAudioSource { response_tx } => {
+                let has_source = audio_source.lock().await.is_some()
+                    && local_track_publication.lock().await.is_some();
+                let _ = response_tx.send(has_source);
+            }
+            LiveKitOperation::Reconnect { response_tx } => {
+                // With keep-alive, we shouldn't need reconnection
+                // But keep it for manual reconnection if needed
+                warn!("Manual reconnect requested (should be rare with keep-alive)");
+                let result = Self::process_reconnect(
+                    room,
+                    audio_source,
+                    local_track_publication,
+                    is_connected,
+                    config,
+                )
+                .await;
+                let _ = response_tx.send(result);
+            }
+            LiveKitOperation::Shutdown => {}
+        }
+        Ok(())
+    }
+
+    /// Process send audio operation
+    async fn process_send_audio(
+        audio_data: Vec<u8>,
+        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
+        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+        is_connected: &Arc<Mutex<bool>>,
+        config: &LiveKitConfig,
+    ) -> Result<(), AppError> {
+        if !*is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        // Try to send directly if we have an audio source
+        if let Some(source) = audio_source.lock().await.as_ref() {
+            if let Ok(audio_frame) = Self::convert_audio_to_frame(
+                audio_data.clone(),
+                config.sample_rate,
+                config.channels,
+            ) {
+                match source.capture_frame(&audio_frame).await {
+                    Ok(()) => {
+                        debug!("Successfully sent audio frame directly");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        error!("Failed to capture frame: {:?}, queuing for retry", e);
+                    }
+                }
+            }
+        }
+
+        // Queue for later if direct send failed or no source
+        audio_queue.lock().await.push_back(audio_data);
+        debug!("Queued audio data for later processing");
+        Ok(())
+    }
+
+    /// Process send message operation
+    async fn process_send_message(
+        message: String,
+        role: String,
+        topic: Option<String>,
+        debug: Option<serde_json::Value>,
+        room: &Arc<Mutex<Option<Room>>>,
+        is_connected: &Arc<Mutex<bool>>,
+    ) -> Result<(), AppError> {
+        if !*is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        let topic = topic.as_deref().unwrap_or("messages");
+        let json_message = json!({
+            "message": message,
+            "role": role,
+            "debug": debug
+        });
+
+        Self::process_send_data_message(topic.to_string(), json_message, room, is_connected).await
+    }
+
+    /// Process send data message operation with graceful failure
+    async fn process_send_data_message(
+        topic: String,
+        data: serde_json::Value,
+        room: &Arc<Mutex<Option<Room>>>,
+        is_connected: &Arc<Mutex<bool>>,
+    ) -> Result<(), AppError> {
+        if !*is_connected.lock().await {
+            warn!("Not connected to LiveKit room, skipping data message");
+            return Ok(()); // Don't fail, just skip
+        }
+
+        let serialized_data = match serde_json::to_vec(&data) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to serialize JSON data: {}, skipping message", e);
+                return Ok(()); // Don't fail, just skip
+            }
+        };
+
+        let room_guard = room.lock().await;
+        if let Some(room) = room_guard.as_ref() {
+            let data_packet = DataPacket {
+                payload: serialized_data,
+                topic: Some(topic.clone()),
+                ..Default::default()
+            };
+
+            // Rely on LiveKit's backpressure handling rather than a local timeout
+            let participant = room.local_participant();
+
+            match participant.publish_data(data_packet).await {
+                Ok(_) => {
+                    debug!("Successfully sent data message to topic: {}", topic);
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to send data message to topic {}: {:?} - continuing anyway",
+                        topic, e
+                    );
+                    Ok(()) // Don't fail the whole process
+                }
+            }
+        } else {
+            debug!("Room not available for data message publishing, skipping");
+            Ok(()) // Don't fail, just skip
+        }
+    }
+
+    /// Process reconnect operation
+    async fn process_reconnect(
+        room: &Arc<Mutex<Option<Room>>>,
+        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+        local_track_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
+        is_connected: &Arc<Mutex<bool>>,
+        config: &LiveKitConfig,
+    ) -> Result<(), AppError> {
+        warn!("Processing reconnect operation due to publisher timeout");
+
+        // Check if we're actually disconnected
+        if !*is_connected.lock().await {
+            info!("Already disconnected, skipping reconnect");
+            return Ok(());
+        }
+
+        // Try to reconnect to the room
+        match Room::connect(&config.url, &config.token, RoomOptions::default()).await {
+            Ok((new_room, _room_events)) => {
+                // Replace the old room with the new one
+                *room.lock().await = Some(new_room);
+
+                // Clear the old audio source and publication
+                *audio_source.lock().await = None;
+                *local_track_publication.lock().await = None;
+
+                // Re-setup audio publishing
+                if let Some(room_ref) = &*room.lock().await {
+                    // Create audio source options
+                    let audio_source_options = AudioSourceOptions {
+                        echo_cancellation: false,
+                        noise_suppression: false,
+                        auto_gain_control: false,
+                    };
+
+                    let samples_per_frame = (config.sample_rate * 10) / 1000;
+                    let new_audio_source = Arc::new(NativeAudioSource::new(
+                        audio_source_options,
+                        config.sample_rate,
+                        config.channels as u32,
+                        samples_per_frame,
+                    ));
+
+                    let rtc_audio_source = RtcAudioSource::Native((*new_audio_source).clone());
+                    let local_audio_track =
+                        LocalAudioTrack::create_audio_track("tts-audio", rtc_audio_source);
+
+                    let publish_options = TrackPublishOptions {
+                        source: TrackSource::Microphone,
+                        ..Default::default()
+                    };
+
+                    match room_ref
+                        .local_participant()
+                        .publish_track(
+                            LocalTrack::Audio(local_audio_track.clone()),
+                            publish_options,
+                        )
+                        .await
+                    {
+                        Ok(publication) => {
+                            *audio_source.lock().await = Some(new_audio_source);
+                            *local_track_publication.lock().await = Some(publication);
+                            info!("Successfully reconnected and re-published audio track");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            error!("Failed to re-publish audio track after reconnect: {:?}", e);
+                            *is_connected.lock().await = false;
+                            Err(AppError::InternalServerError(format!(
+                                "Failed to re-publish audio track: {e:?}"
+                            )))
+                        }
+                    }
+                } else {
+                    error!("Room not available after reconnect");
+                    *is_connected.lock().await = false;
+                    Err(AppError::InternalServerError(
+                        "Room not available after reconnect".to_string(),
+                    ))
+                }
+            }
+            Err(e) => {
+                error!("Failed to reconnect to LiveKit room: {:?}", e);
+                *is_connected.lock().await = false;
+                Err(AppError::InternalServerError(format!(
+                    "Failed to reconnect: {e:?}"
+                )))
+            }
+        }
+    }
+
+    /// Process clear audio operation
+    async fn process_clear_audio(
+        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
+        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+        is_connected: &Arc<Mutex<bool>>,
+    ) -> Result<(), AppError> {
+        if !*is_connected.lock().await {
+            return Err(AppError::InternalServerError(
+                "Not connected to LiveKit room".to_string(),
+            ));
+        }
+
+        // Clear the local buffer in the NativeAudioSource
+        if let Some(source) = audio_source.lock().await.as_ref() {
+            source.clear_buffer();
+            debug!("Cleared local audio buffer");
+        } else {
+            warn!("No audio source available - nothing to clear");
+        }
+
+        // Also clear the audio queue
+        audio_queue.lock().await.clear();
+        debug!("Cleared audio queue");
+
+        Ok(())
     }
 
     /// Helper method to convert audio data to AudioFrame
@@ -1047,7 +1498,8 @@ impl Drop for LiveKitClient {
     fn drop(&mut self) {
         // Note: We can't use async methods in Drop, so we log a warning
         // The actual cleanup should be done by calling disconnect() explicitly
-        if self.room.is_some() {
+        // We can't check the room field here since it requires async lock
+        if self.operation_worker_handle.is_some() {
             warn!("LiveKitClient dropped without explicit disconnect call");
         }
     }

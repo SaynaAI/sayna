@@ -270,9 +270,8 @@ async fn get_voice_manager_if_audio_enabled(
     if !state_guard.is_audio_enabled() {
         let _ = message_tx
             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message:
-                    "Audio processing is disabled. Send config message with audio=true first."
-                        .to_string(),
+                message: "Audio processing is disabled. Send config message with audio=true first."
+                    .to_string(),
             }))
             .await;
         return None;
@@ -283,8 +282,9 @@ async fn get_voice_manager_if_audio_enabled(
         None => {
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: "Voice manager not configured. Send config message with audio=true first."
-                        .to_string(),
+                    message:
+                        "Voice manager not configured. Send config message with audio=true first."
+                            .to_string(),
                 }))
                 .await;
             None
