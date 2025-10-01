@@ -12,6 +12,13 @@ pub struct ServerConfig {
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
 
+    // LiveKit recording configuration
+    pub recording_s3_bucket: Option<String>,
+    pub recording_s3_region: Option<String>,
+    pub recording_s3_endpoint: Option<String>,
+    pub recording_s3_access_key: Option<String>,
+    pub recording_s3_secret_key: Option<String>,
+
     // Cache configuration (filesystem or memory)
     pub cache_path: Option<PathBuf>, // if None, use in-memory cache
     pub cache_ttl_seconds: Option<u64>,
@@ -36,6 +43,13 @@ impl ServerConfig {
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
 
+        // LiveKit recording S3 configuration from env
+        let recording_s3_bucket = env::var("RECORDING_S3_BUCKET").ok();
+        let recording_s3_region = env::var("RECORDING_S3_REGION").ok();
+        let recording_s3_endpoint = env::var("RECORDING_S3_ENDPOINT").ok();
+        let recording_s3_access_key = env::var("RECORDING_S3_ACCESS_KEY").ok();
+        let recording_s3_secret_key = env::var("RECORDING_S3_SECRET_KEY").ok();
+
         // Cache configuration from env
         let cache_path = env::var("CACHE_PATH").ok().map(PathBuf::from);
         let cache_ttl_seconds = env::var("CACHE_TTL_SECONDS")
@@ -51,6 +65,11 @@ impl ServerConfig {
             livekit_api_secret,
             deepgram_api_key,
             elevenlabs_api_key,
+            recording_s3_bucket,
+            recording_s3_region,
+            recording_s3_endpoint,
+            recording_s3_access_key,
+            recording_s3_secret_key,
             cache_path,
             cache_ttl_seconds,
         })
@@ -107,6 +126,11 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
         };
@@ -126,6 +150,11 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
         };
@@ -145,6 +174,11 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
         };
@@ -167,6 +201,11 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
         };
@@ -189,6 +228,11 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
         };

@@ -268,10 +268,20 @@ fn test_incoming_message_serialization() {
 
 #[test]
 fn test_outgoing_message_serialization() {
-    // Test ready message
-    let ready_msg = OutgoingMessage::Ready;
+    // Test ready message without token
+    let ready_msg = OutgoingMessage::Ready {
+        livekit_token: None,
+    };
     let json = serde_json::to_string(&ready_msg).unwrap();
     assert!(json.contains("\"type\":\"ready\""));
+
+    // Test ready message with token
+    let ready_msg_with_token = OutgoingMessage::Ready {
+        livekit_token: Some("test_token".to_string()),
+    };
+    let json_with_token = serde_json::to_string(&ready_msg_with_token).unwrap();
+    assert!(json_with_token.contains("\"type\":\"ready\""));
+    assert!(json_with_token.contains("\"livekit_token\":\"test_token\""));
 
     // Test STT result message
     let stt_msg = OutgoingMessage::STTResult {
@@ -391,20 +401,23 @@ fn test_tts_ws_config_conversion_with_defaults() {
 #[test]
 fn test_livekit_ws_config_serialization() {
     let livekit_config = LiveKitWebSocketConfig {
-        token: "test-jwt-token".to_string(),
+        room_name: "test-room".to_string(),
+        enable_recording: true,
+        recording_file_key: Some("test-file-key".to_string()),
     };
 
     let json = serde_json::to_string(&livekit_config).unwrap();
-    // LiveKitWebSocketConfig only contains token, URL is provided separately
-    assert!(json.contains("\"token\":\"test-jwt-token\""));
-    // Verify the JSON structure is correct
-    assert!(!json.contains("\"url\"")); // URL should not be in WebSocket config
+    assert!(json.contains("\"room_name\":\"test-room\""));
+    assert!(json.contains("\"enable_recording\":true"));
+    assert!(json.contains("\"recording_file_key\":\"test-file-key\""));
 }
 
 #[test]
 fn test_livekit_ws_config_conversion() {
     let livekit_ws_config = LiveKitWebSocketConfig {
-        token: "test-jwt-token".to_string(),
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        recording_file_key: None,
     };
 
     let tts_ws_config = TTSWebSocketConfig {
@@ -420,9 +433,11 @@ fn test_livekit_ws_config_conversion() {
     };
 
     let livekit_url = "wss://test-livekit.com".to_string();
-    let livekit_config = livekit_ws_config.to_livekit_config(&tts_ws_config, &livekit_url);
+    let test_token = "test-jwt-token".to_string();
+    let livekit_config = livekit_ws_config.to_livekit_config(test_token.clone(), &tts_ws_config, &livekit_url);
     assert_eq!(livekit_config.url, "wss://test-livekit.com");
-    assert_eq!(livekit_config.token, "test-jwt-token");
+    assert_eq!(livekit_config.token, test_token);
+    assert_eq!(livekit_config.room_name, "test-room");
     assert_eq!(livekit_config.sample_rate, 22050);
     assert_eq!(livekit_config.channels, 1);
     assert!(livekit_config.enable_noise_filter); // Should be true by default
@@ -453,14 +468,15 @@ fn test_incoming_message_config_with_livekit() {
             pronunciations: Vec::new(),
         }),
         livekit: Some(LiveKitWebSocketConfig {
-            token: "test-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            enable_recording: true,
+            recording_file_key: Some("test-file-key".to_string()),
         }),
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
     assert!(json.contains("\"type\":\"config\""));
-    // LiveKitWebSocketConfig only contains token, URL is provided separately when converting
-    assert!(json.contains("\"token\":\"test-jwt-token\""));
+    assert!(json.contains("\"room_name\":\"test-room\""));
     assert!(json.contains("\"livekit\"")); // Verify LiveKit section is present
 }
 
@@ -521,8 +537,9 @@ fn test_parse_config_message_with_livekit() {
                 "model": ""
             },
             "livekit": {
-                "url": "wss://test-livekit.com",
-                "token": "test-jwt-token"
+                "room_name": "test-room",
+                "enable_recording": true,
+                "recording_file_key": "test-file-key"
             }
         }"#;
 
@@ -539,7 +556,9 @@ fn test_parse_config_message_with_livekit() {
         assert_eq!(tts_config.as_ref().unwrap().provider, "deepgram");
 
         let livekit_config = livekit.unwrap();
-        assert_eq!(livekit_config.token, "test-jwt-token");
+        assert_eq!(livekit_config.room_name, "test-room");
+        assert!(livekit_config.enable_recording);
+        assert_eq!(livekit_config.recording_file_key, Some("test-file-key".to_string()));
     } else {
         panic!("Expected Config message");
     }
@@ -736,21 +755,23 @@ fn test_config_message_with_livekit_routing() {
             pronunciations: Vec::new(),
         }),
         livekit: Some(LiveKitWebSocketConfig {
-            token: "test-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            enable_recording: false,
+            recording_file_key: None,
         }),
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
     assert!(json.contains("\"type\":\"config\""));
-    // LiveKitWebSocketConfig only contains token, URL is provided separately when converting
-    assert!(json.contains("\"token\":\"test-jwt-token\""));
+    assert!(json.contains("\"room_name\":\"test-room\""));
     assert!(json.contains("\"livekit\"")); // Verify LiveKit section is present
 
     // Parse back to ensure structure is correct
     let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
     if let IncomingMessage::Config { livekit, .. } = parsed {
         let livekit_config = livekit.unwrap();
-        assert_eq!(livekit_config.token, "test-jwt-token");
+        assert_eq!(livekit_config.room_name, "test-room");
+        assert!(!livekit_config.enable_recording);
     } else {
         panic!("Expected Config message");
     }
@@ -918,14 +939,16 @@ fn test_config_message_audio_disabled() {
         stt_config: None, // Not required when audio=false
         tts_config: None, // Not required when audio=false
         livekit: Some(LiveKitWebSocketConfig {
-            token: "test-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            enable_recording: false,
+            recording_file_key: None,
         }),
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
     assert!(json.contains("\"type\":\"config\""));
     assert!(json.contains("\"audio\":false"));
-    assert!(json.contains("\"token\":\"test-jwt-token\""));
+    assert!(json.contains("\"room_name\":\"test-room\""));
     assert!(json.contains("\"livekit\""));
     // Should not contain stt_config or tts_config fields when None
     assert!(!json.contains("stt_config"));

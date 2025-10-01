@@ -278,11 +278,44 @@ impl LiveKitRoomHandler {
         &self.api_key
     }
 
+    /// Delete a LiveKit room
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room to delete
+    ///
+    /// # Returns
+    /// * `Result<(), LiveKitError>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// handler.delete_room("my-room").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_room(&self, room_name: &str) -> Result<(), LiveKitError> {
+        self.room_client
+            .delete_room(room_name)
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to delete room: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Setup room recording with S3 upload
     ///
     /// # Arguments
     /// * `room_name` - Name of the LiveKit room to record
-    /// * `stream_id` - Unique identifier for the recording stream
+    /// * `file_key` - Unique identifier for the recording stream
     ///
     /// # Returns
     /// * `Result<String, LiveKitError>` - Egress ID for the started recording or error
@@ -313,7 +346,7 @@ impl LiveKitRoomHandler {
     pub async fn setup_room_recording(
         &self,
         room_name: &str,
-        stream_id: &str,
+        file_key: &str,
     ) -> Result<String, LiveKitError> {
         // Validate that recording configuration is present
         let config = self.recording_config.as_ref().ok_or_else(|| {
@@ -334,7 +367,7 @@ impl LiveKitRoomHandler {
         // Create encoded file output with S3 upload
         let file_output = proto::EncodedFileOutput {
             file_type: proto::EncodedFileType::Ogg as i32,
-            filepath: format!("{}/audio.ogg", stream_id),
+            filepath: file_key.to_string(),
             disable_manifest: false,
             output: Some(proto::encoded_file_output::Output::S3(s3_upload)),
         };
