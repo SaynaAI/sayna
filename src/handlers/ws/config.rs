@@ -85,9 +85,14 @@ impl LiveKitWebSocketConfig {
         tts_config: &TTSWebSocketConfig,
         livekit_url: &str,
     ) -> LiveKitConfig {
+        // TODO: Extract room name from JWT token claims
+        // For now, use a default value
+        let room_name = "default".to_string();
+
         LiveKitConfig {
             url: livekit_url.to_string(),
             token: self.token.clone(),
+            room_name,
             // Use TTS config sample rate, default to 24000 if not specified
             sample_rate: tts_config.sample_rate.unwrap_or(24000),
             // Assume mono audio for TTS (1 channel)
@@ -147,6 +152,7 @@ impl TTSWebSocketConfig {
             connection_timeout: self.connection_timeout.or(defaults.connection_timeout),
             request_timeout: self.request_timeout.or(defaults.request_timeout),
             pronunciations: self.pronunciations.clone(),
+            request_pool_size: defaults.request_pool_size,
         }
     }
 }

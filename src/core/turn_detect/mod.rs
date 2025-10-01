@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod config;
 pub mod detector;
 pub mod model_manager;

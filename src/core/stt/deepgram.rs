@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -25,7 +26,8 @@ enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    Error(()),
+    #[allow(dead_code)] // We store error details for debugging but don't actively use them
+    Error(String),
 }
 
 /// Configuration specific to Deepgram STT
@@ -33,8 +35,6 @@ enum ConnectionState {
 pub struct DeepgramSTTConfig {
     /// Base STT configuration
     pub base: STTConfig,
-    /// Enable punctuation in transcription
-    pub punctuation: bool,
     /// Enable speaker diarization
     pub diarize: bool,
     /// Enable interim results
@@ -63,7 +63,6 @@ impl Default for DeepgramSTTConfig {
     fn default() -> Self {
         Self {
             base: STTConfig::default(),
-            punctuation: true,
             diarize: false,
             interim_results: true,
             filler_words: false,
@@ -153,14 +152,16 @@ pub struct DeepgramSTT {
     state: ConnectionState,
     /// State change notification
     state_notify: Arc<Notify>,
-    /// WebSocket sender for audio data
-    ws_sender: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// WebSocket sender for audio data (bounded channel for backpressure)
+    ws_sender: Option<mpsc::Sender<Bytes>>,
     /// Shutdown signal sender
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Result channel sender
     result_tx: Option<mpsc::UnboundedSender<STTResult>>,
     /// Connection handle
     connection_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Result forwarding task handle
+    result_forward_handle: Option<tokio::task::JoinHandle<()>>,
     /// Shared callback storage for async access
     result_callback: Arc<Mutex<Option<AsyncSTTCallback>>>,
 }
@@ -177,8 +178,8 @@ impl DeepgramSTT {
         url.push_str(&config.base.sample_rate.to_string());
         url.push_str("&channels=");
         url.push_str(&config.base.channels.to_string());
-        url.push_str("&punctuation=");
-        url.push_str(&config.punctuation.to_string());
+        url.push_str("&punctuate=");
+        url.push_str(&config.base.punctuation.to_string());
         url.push_str("&interim_results=");
         url.push_str(&config.interim_results.to_string());
         url.push_str("&smart_format=");
@@ -214,38 +215,62 @@ impl DeepgramSTT {
             Message::Text(text) => {
                 debug!("Received text message: {}", text);
 
-                // Fast path: check response type before full parsing
-                if text.contains("\"type\"") && text.contains("\"Results\"") {
-                    // Parse the JSON response
-                    let response: DeepgramResponse = serde_json::from_str(&text).map_err(|e| {
-                        STTError::ProviderError(format!("Failed to parse response: {e}"))
-                    })?;
+                // Parse the response once and branch on type
+                match serde_json::from_str::<DeepgramResponse>(&text) {
+                    Ok(response) => {
+                        match response.response_type.as_str() {
+                            "Results" => {
+                                if let Some(channel) = response.channel {
+                                    if let Some(alternative) = channel.alternatives.first() {
+                                        let stt_result = STTResult::new(
+                                            alternative.transcript.clone(),
+                                            response.is_final.unwrap_or(false),
+                                            response.speech_final.unwrap_or(false),
+                                            alternative.confidence,
+                                        );
 
-                    if let Some(channel) = response.channel {
-                        if let Some(alternative) = channel.alternatives.first() {
-                            let stt_result = STTResult::new(
-                                alternative.transcript.clone(),
-                                response.is_final.unwrap_or(false),
-                                response.speech_final.unwrap_or(false),
-                                alternative.confidence,
-                            );
-
-                            // Send result (non-blocking)
-                            if result_tx.send(stt_result).is_err() {
-                                warn!("Failed to send result - channel closed");
+                                        // Send result (non-blocking)
+                                        if result_tx.send(stt_result).is_err() {
+                                            warn!("Failed to send result - channel closed");
+                                        }
+                                    }
+                                }
+                            }
+                            "Metadata" => {
+                                // Log metadata for debugging but don't process
+                                debug!("Received metadata response");
+                            }
+                            "Error" => {
+                                // Try to parse as error for better message
+                                let error_msg = if let Ok(error) =
+                                    serde_json::from_str::<DeepgramError>(&text)
+                                {
+                                    format!("{}: {}", error.error_type, error.description)
+                                } else {
+                                    "Unknown error from Deepgram".to_string()
+                                };
+                                return Err(STTError::ProviderError(error_msg));
+                            }
+                            _ => {
+                                // Ignore unknown message types
+                                debug!("Received unknown message type: {}", response.response_type);
                             }
                         }
                     }
-                } else if text.contains("\"type\":\"Error\"") {
-                    let error_msg = if let Ok(error) = serde_json::from_str::<DeepgramError>(&text)
-                    {
-                        format!("{}: {}", error.error_type, error.description)
-                    } else {
-                        "Unknown error from Deepgram".to_string()
-                    };
-                    return Err(STTError::ProviderError(error_msg));
+                    Err(_) => {
+                        // Not a DeepgramResponse, might be a simple error or other message
+                        if text.contains("\"type\":\"Error\"") {
+                            let error_msg =
+                                if let Ok(error) = serde_json::from_str::<DeepgramError>(&text) {
+                                    format!("{}: {}", error.error_type, error.description)
+                                } else {
+                                    "Unknown error from Deepgram".to_string()
+                                };
+                            return Err(STTError::ProviderError(error_msg));
+                        }
+                        // Ignore other non-parseable messages
+                    }
                 }
-                // Ignore metadata and other message types for performance
             }
             Message::Close(close_frame) => {
                 info!("WebSocket connection closed: {:?}", close_frame);
@@ -262,8 +287,8 @@ impl DeepgramSTT {
     async fn start_connection(&mut self, config: DeepgramSTTConfig) -> Result<(), STTError> {
         let ws_url = self.build_websocket_url(&config)?;
 
-        // Create channels for communication
-        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Create channels for communication (bounded for backpressure)
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Bytes>(32);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let (result_tx, mut result_rx) = mpsc::unbounded_channel::<STTResult>();
         let (connected_tx, connected_rx) = oneshot::channel::<()>();
@@ -327,7 +352,7 @@ impl DeepgramSTT {
                 tokio::select! {
                     // Handle outgoing audio data
                     Some(audio_data) = ws_rx.recv() => {
-                        let message = Message::Binary(audio_data.into());
+                        let message = Message::Binary(audio_data);
                         if let Err(e) = ws_sink.send(message).await {
                             error!("Failed to send WebSocket message: {}", e);
                             break;
@@ -385,7 +410,7 @@ impl DeepgramSTT {
 
         // Start result forwarding task with shared callback
         let callback_ref = self.result_callback.clone();
-        let _result_forwarding_handle = tokio::spawn(async move {
+        let result_forwarding_handle = tokio::spawn(async move {
             while let Some(result) = result_rx.recv().await {
                 if let Some(callback) = callback_ref.lock().await.as_ref() {
                     callback(result).await;
@@ -399,8 +424,8 @@ impl DeepgramSTT {
             }
         });
 
-        // Store the result forwarding handle (we'll need to clean it up later)
-        // For now, we'll just let it run and clean up when the connection is closed
+        // Store the result forwarding handle for cleanup
+        self.result_forward_handle = Some(result_forwarding_handle);
 
         // Update state and wait for connection
         self.state = ConnectionState::Connecting;
@@ -414,14 +439,14 @@ impl DeepgramSTT {
                 Ok(())
             }
             Ok(Err(_)) => {
-                self.state = ConnectionState::Error(());
-                Err(STTError::ConnectionFailed(
-                    "Connection channel closed".to_string(),
-                ))
+                let error_msg = "Connection channel closed".to_string();
+                self.state = ConnectionState::Error(error_msg.clone());
+                Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
-                self.state = ConnectionState::Error(());
-                Err(STTError::ConnectionFailed("Connection timeout".to_string()))
+                let error_msg = "Connection timeout".to_string();
+                self.state = ConnectionState::Error(error_msg.clone());
+                Err(STTError::ConnectionFailed(error_msg))
             }
         }
     }
@@ -437,6 +462,7 @@ impl Default for DeepgramSTT {
             shutdown_tx: None,
             result_tx: None,
             connection_handle: None,
+            result_forward_handle: None,
             result_callback: Arc::new(Mutex::new(None)),
         }
     }
@@ -452,10 +478,20 @@ impl BaseSTT for DeepgramSTT {
             ));
         }
 
-        // Create Deepgram-specific configuration
+        // Create Deepgram-specific configuration, preserving config values
         let deepgram_config = DeepgramSTTConfig {
             base: config,
-            ..Default::default()
+            diarize: false,
+            interim_results: true,
+            filler_words: false,
+            profanity_filter: false,
+            smart_format: true,
+            keywords: Vec::new(),
+            redact: Vec::new(),
+            vad_events: true,
+            endpointing: Some(200),
+            tag: None,
+            utterance_end_ms: Some(500),
         };
 
         Ok(Self {
@@ -466,6 +502,7 @@ impl BaseSTT for DeepgramSTT {
             shutdown_tx: None,
             result_tx: None,
             connection_handle: None,
+            result_forward_handle: None,
             result_callback: Arc::new(Mutex::new(None)),
         })
     }
@@ -491,7 +528,13 @@ impl BaseSTT for DeepgramSTT {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        // Clean up
+        // Clean up result forwarding task
+        if let Some(handle) = self.result_forward_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // Clean up channels and callback
         self.ws_sender = None;
         self.result_tx = None;
         *self.result_callback.lock().await = None;
@@ -517,10 +560,12 @@ impl BaseSTT for DeepgramSTT {
 
         if let Some(ws_sender) = &self.ws_sender {
             let data_len = audio_data.len();
+            let audio_bytes = Bytes::from(audio_data);
 
-            // Send audio data directly (no cloning)
+            // Send audio data with backpressure handling
             ws_sender
-                .send(audio_data)
+                .send(audio_bytes)
+                .await
                 .map_err(|e| STTError::NetworkError(format!("Failed to send audio data: {e}")))?;
 
             debug!("Sent {} bytes of audio data", data_len);
@@ -549,10 +594,20 @@ impl BaseSTT for DeepgramSTT {
             self.disconnect().await?;
         }
 
-        // Update stored configuration
+        // Update stored configuration, preserving config values
         let deepgram_config = DeepgramSTTConfig {
             base: config,
-            ..Default::default()
+            diarize: false,
+            interim_results: true,
+            filler_words: false,
+            profanity_filter: false,
+            smart_format: true,
+            keywords: Vec::new(),
+            redact: Vec::new(),
+            vad_events: true,
+            endpointing: Some(200),
+            tag: None,
+            utterance_end_ms: Some(500),
         };
         self.config = Some(deepgram_config);
 
@@ -631,10 +686,9 @@ mod tests {
                 language: "en-US".to_string(),
                 sample_rate: 16000,
                 channels: 1,
-                punctuation: true,
+                punctuation: false, // Set to false here for testing
                 encoding: "linear16".to_string(),
             },
-            punctuation: false,
             interim_results: true,
             smart_format: false,
             endpointing: Some(300),
@@ -650,7 +704,7 @@ mod tests {
         assert!(url.contains("language=en-US"));
         assert!(url.contains("sample_rate=16000"));
         assert!(url.contains("channels=1"));
-        assert!(url.contains("punctuation=false"));
+        assert!(url.contains("punctuate=false"));
         assert!(url.contains("interim_results=true"));
         assert!(url.contains("smart_format=false"));
         assert!(url.contains("keywords=hello,world"));

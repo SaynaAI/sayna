@@ -10,12 +10,59 @@ use tracing::{debug, error, info};
 
 use super::base::{AudioCallback, AudioData, ConnectionState, TTSConfig, TTSError, TTSResult};
 use crate::core::cache::store::CacheStore;
-use crate::utils::req_manager::ReqManager;
+use crate::utils::req_manager::{ReqManager, ReqManagerConfig};
+use regex::Regex;
+use std::time::Duration;
 use xxhash_rust::xxh3::xxh3_128;
 
 /// Request entry for ordered processing
 struct RequestEntry {
     receiver: mpsc::Receiver<Result<Vec<u8>, TTSError>>,
+    /// Audio format for this specific request
+    format: String,
+    /// Sample rate for this specific request
+    sample_rate: u32,
+}
+
+/// Compiled pronunciation replacement patterns
+#[derive(Clone)]
+pub struct PronunciationReplacer {
+    patterns: Vec<(Regex, String)>,
+}
+
+impl PronunciationReplacer {
+    /// Create a new pronunciation replacer from config
+    pub fn new(pronunciations: &[super::base::Pronunciation]) -> Self {
+        let patterns = pronunciations
+            .iter()
+            .filter_map(|p| {
+                // Create word-boundary aware regex for each pronunciation
+                let pattern = format!(r"\b{}\b", regex::escape(&p.word));
+                match Regex::new(&pattern) {
+                    Ok(regex) => Some((regex, p.pronunciation.clone())),
+                    Err(e) => {
+                        error!(
+                            "Failed to compile pronunciation pattern for '{}': {}",
+                            p.word, e
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+        Self { patterns }
+    }
+
+    /// Apply all pronunciation replacements to text
+    pub fn apply(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (pattern, replacement) in &self.patterns {
+            result = pattern
+                .replace_all(&result, replacement.as_str())
+                .into_owned();
+        }
+        result
+    }
 }
 
 /// Trait for creating HTTP requests for TTS providers
@@ -33,6 +80,11 @@ pub trait TTSRequestBuilder: Send + Sync {
 
     /// Get the configuration for this request builder
     fn get_config(&self) -> &TTSConfig;
+
+    /// Get precompiled pronunciation replacer
+    fn get_pronunciation_replacer(&self) -> Option<&PronunciationReplacer> {
+        None
+    }
 }
 
 /// Generic HTTP-based TTS provider implementation using ReqManager
@@ -89,13 +141,12 @@ impl TTSProvider {
             return;
         }
 
-        // Apply pronunciation replacements
-        let config = request_builder.get_config();
-        let mut processed_text = text.clone();
-        for pronunciation in &config.pronunciations {
-            processed_text =
-                processed_text.replace(&pronunciation.word, &pronunciation.pronunciation);
-        }
+        // Apply pronunciation replacements using precompiled regex patterns
+        let processed_text = if let Some(replacer) = request_builder.get_pronunciation_replacer() {
+            replacer.apply(&text)
+        } else {
+            text.clone()
+        };
 
         // Try cache first
         if let Some((cache, key)) = cache_and_key.as_ref() {
@@ -187,7 +238,12 @@ impl TTSProvider {
                 }
 
                 let mut buffer: Vec<u8> = Vec::with_capacity(chunk_target_bytes.max(512));
-                let mut full_audio: Vec<u8> = Vec::new();
+                // Only allocate full_audio buffer if we're caching
+                let mut full_audio: Option<Vec<u8>> = if cache_and_key.is_some() {
+                    Some(Vec::new())
+                } else {
+                    None
+                };
 
                 let mut stream = response.bytes_stream();
                 while let Some(item) = stream.next().await {
@@ -202,7 +258,10 @@ impl TTSProvider {
                             if chunk_target_bytes == 0 {
                                 // Non-PCM/containerized formats: forward chunks as-is
                                 let chunk_vec = incoming.to_vec();
-                                full_audio.extend_from_slice(&chunk_vec);
+                                // Only accumulate if caching
+                                if let Some(ref mut full) = full_audio {
+                                    full.extend_from_slice(&chunk_vec);
+                                }
                                 debug!(
                                     "Sending audio chunk ({} bytes) - will wait for receiver...",
                                     chunk_vec.len()
@@ -223,7 +282,10 @@ impl TTSProvider {
                                     // Take exactly chunk_target_bytes from buffer, leave any excess
                                     let chunk: Vec<u8> =
                                         buffer.drain(..chunk_target_bytes).collect();
-                                    full_audio.extend_from_slice(&chunk);
+                                    // Only accumulate if caching
+                                    if let Some(ref mut full) = full_audio {
+                                        full.extend_from_slice(&chunk);
+                                    }
                                     debug!(
                                         "Sending PCM chunk ({} bytes) - will wait for receiver...",
                                         chunk.len()
@@ -247,7 +309,10 @@ impl TTSProvider {
 
                 // Flush remainder
                 if !buffer.is_empty() && !token.is_cancelled() {
-                    full_audio.extend_from_slice(&buffer);
+                    // Only accumulate if caching
+                    if let Some(ref mut full) = full_audio {
+                        full.extend_from_slice(&buffer);
+                    }
                     debug!(
                         "Sending final buffer ({} bytes) - will wait for receiver...",
                         buffer.len()
@@ -258,8 +323,10 @@ impl TTSProvider {
 
                 // Store the full audio in cache if provided
                 if let Some((cache, key)) = cache_and_key {
-                    if let Err(e) = cache.put(key, full_audio).await {
-                        error!("Failed to cache TTS audio: {:?}", e);
+                    if let Some(full_audio) = full_audio {
+                        if let Err(e) = cache.put(key, full_audio).await {
+                            error!("Failed to cache TTS audio: {:?}", e);
+                        }
                     }
                 }
             }
@@ -309,7 +376,7 @@ impl TTSProvider {
     ///
     /// The dispatcher is responsible for delivering audio to the callback in the
     /// exact order texts were enqueued via `speak`.
-    async fn ensure_dispatcher<R: TTSRequestBuilder + Clone + 'static>(&self, request_builder: R) {
+    async fn ensure_dispatcher(&self) {
         let mut task_guard = self.dispatcher_task.lock().await;
         if task_guard.is_some() {
             return;
@@ -317,7 +384,6 @@ impl TTSProvider {
 
         let pending_queue = self.pending_queue.clone();
         let audio_callback = self.audio_callback.clone();
-        let config = request_builder.get_config().clone();
         let token = self.cancel_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -348,11 +414,9 @@ impl TTSProvider {
 
                         debug!("TTS dispatcher processing request from queue");
 
-                        // Get format and sample rate for duration calculation
-                        let (format, sample_rate) = (
-                            config.audio_format.as_deref().unwrap_or("linear16"),
-                            config.sample_rate.unwrap_or(24000),
-                        );
+                        // Use the format and sample rate from this specific request
+                        let format = entry.format.clone();
+                        let sample_rate = entry.sample_rate;
 
                         // Get callback once for this text
                         let cb_opt = audio_callback.read().await.clone();
@@ -367,10 +431,10 @@ impl TTSProvider {
                                     debug!("TTS dispatcher received chunk #{}: {} bytes", chunk_count, bytes.len());
                                     if let Some(cb) = cb_opt.as_ref() {
                                         let duration_ms = if matches!(
-                                            format,
+                                            format.as_str(),
                                             "linear16" | "pcm" | "mulaw" | "ulaw" | "alaw"
                                         ) {
-                                            let bytes_per_sample = if matches!(format, "linear16" | "pcm") { 2 } else { 1 };
+                                            let bytes_per_sample = if matches!(format.as_str(), "linear16" | "pcm") { 2 } else { 1 };
                                             let samples = (bytes.len() / bytes_per_sample) as u32;
                                             Some((samples * 1000) / sample_rate)
                                         } else {
@@ -412,17 +476,53 @@ impl TTSProvider {
         *task_guard = Some(handle);
     }
 
-    /// Generic connect implementation
-    pub async fn generic_connect(&mut self, default_url: &str) -> TTSResult<()> {
+    /// Generic connect implementation with TTSConfig-based timeouts
+    pub async fn generic_connect(&mut self, _default_url: &str) -> TTSResult<()> {
+        // This method now expects the request manager to be pre-configured
+        // with the correct timeouts and pool size from TTSConfig
+        if self.req_manager.read().await.is_none() {
+            return Err(TTSError::ConnectionFailed(
+                "Request manager not configured. Call generic_connect_with_config instead."
+                    .to_string(),
+            ));
+        }
+
+        self.connected.store(true, Ordering::Relaxed);
+        info!("TTS provider connected and ready");
+
+        Ok(())
+    }
+
+    /// Connect with configuration-based request manager
+    pub async fn generic_connect_with_config(
+        &mut self,
+        default_url: &str,
+        config: &TTSConfig,
+    ) -> TTSResult<()> {
         // Check if we have a request manager
         if self.req_manager.read().await.is_none() {
-            // If no external request manager provided, create a default one
-            match ReqManager::new(4).await {
+            // Create request manager with config-based settings
+            let pool_size = config.request_pool_size.unwrap_or(4);
+            let mut req_config = ReqManagerConfig::default();
+            req_config.max_concurrent_requests = pool_size;
+
+            // Apply timeout configurations
+            if let Some(connect_timeout) = config.connection_timeout {
+                req_config.connect_timeout = Duration::from_secs(connect_timeout);
+            }
+            if let Some(request_timeout) = config.request_timeout {
+                req_config.request_timeout = Duration::from_secs(request_timeout);
+            }
+
+            match ReqManager::with_config(req_config).await {
                 Ok(manager) => {
                     // Warm up connections
                     let _ = manager.warmup(default_url, "OPTIONS").await;
                     *self.req_manager.write().await = Some(Arc::new(manager));
-                    info!("Created default ReqManager for TTS provider");
+                    info!(
+                        "Created ReqManager with pool_size={}, connect_timeout={:?}s, request_timeout={:?}s",
+                        pool_size, config.connection_timeout, config.request_timeout
+                    );
                 }
                 Err(e) => {
                     return Err(TTSError::ConnectionFailed(format!(
@@ -492,10 +592,22 @@ impl TTSProvider {
         // This ensures sender waits for receiver to read each message (like Go's unbuffered channels)
         let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, TTSError>>(1);
 
+        // Get format and sample rate from current config
+        let format = request_builder
+            .get_config()
+            .audio_format
+            .clone()
+            .unwrap_or_else(|| "linear16".to_string());
+        let sample_rate = request_builder.get_config().sample_rate.unwrap_or(24000);
+
         // Add to pending queue FIRST before starting dispatcher
         let _queue_size = {
             let mut queue = self.pending_queue.lock().await;
-            queue.push_back(RequestEntry { receiver });
+            queue.push_back(RequestEntry {
+                receiver,
+                format: format.clone(),
+                sample_rate,
+            });
             let size = queue.len();
             debug!(
                 "Added request to pending queue for text: '{}', queue size now: {}",
@@ -506,7 +618,7 @@ impl TTSProvider {
 
         // IMPORTANT: Ensure dispatcher is running BEFORE spawning request task
         // This is critical for cached audio which returns immediately
-        self.ensure_dispatcher(request_builder.clone()).await;
+        self.ensure_dispatcher().await;
 
         // Prepare cache key if cache is available
         let cache_opt = self.cache.read().await.clone();

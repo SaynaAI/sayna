@@ -15,8 +15,11 @@ use super::state::SpeechFinalState;
 /// Configuration for STT result processing
 #[derive(Clone, Copy)]
 pub struct STTProcessingConfig {
-    /// Maximum time to wait for turn detection before falling back to timer (ms)
-    pub turn_detection_timeout_ms: u64,
+    /// Time to wait for STT provider to send real speech_final (ms)
+    /// This is the primary window - we trust STT provider during this time
+    pub stt_speech_final_wait_ms: u64,
+    /// Maximum time to wait for turn detection inference to complete (ms)
+    pub turn_detection_inference_timeout_ms: u64,
     /// Window to prevent duplicate speech_final events (ms)
     pub duplicate_window_ms: usize,
 }
@@ -24,8 +27,9 @@ pub struct STTProcessingConfig {
 impl Default for STTProcessingConfig {
     fn default() -> Self {
         Self {
-            turn_detection_timeout_ms: 2100, // 2.1 seconds max wait for turn detection
-            duplicate_window_ms: 500,        // 500ms duplicate prevention window
+            stt_speech_final_wait_ms: 3000, // Wait 2s for real speech_final from STT
+            turn_detection_inference_timeout_ms: 100, // 100ms max for model inference
+            duplicate_window_ms: 500,       // 500ms duplicate prevention window
         }
     }
 }
@@ -45,8 +49,8 @@ impl STTResultProcessor {
     ///
     /// This method implements:
     /// - Immediate return of results (no waiting)
-    /// - Turn detection ML model with timer fallback
-    /// - Automatic timer after 5 seconds if turn detection doesn't trigger
+    /// - Turn detection ML model with intelligent timeout selection
+    /// - Fast-path synchronous checks before async operations
     /// - Prevention of duplicate speech_final events
     pub async fn process_result(
         &self,
@@ -54,8 +58,8 @@ impl STTResultProcessor {
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
     ) -> Option<STTResult> {
-        // Skip empty final results that aren't speech_final
-        if result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final {
+        // Fast synchronous checks - no awaits
+        if !self.should_deliver_result(&result) {
             return None;
         }
 
@@ -66,27 +70,59 @@ impl STTResultProcessor {
             return self.handle_real_speech_final(result, speech_final_state, now_ms);
         }
 
-        // Update text buffer for non-empty transcripts
-        if !result.transcript.trim().is_empty() {
+        // Handle is_final (but not speech_final) - spawn turn detection in background
+        if result.is_final {
+            self.handle_turn_detection(result.clone(), speech_final_state, turn_detector);
+        }
+
+        // Always return the original result immediately - no awaits in critical path
+        Some(result)
+    }
+
+    /// Fast synchronous check if result should be delivered
+    /// Returns true if result should be processed and delivered to callback
+    fn should_deliver_result(&self, result: &STTResult) -> bool {
+        // Skip empty final results that aren't speech_final
+        !(result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final)
+    }
+
+    /// Handle turn detection logic asynchronously (non-blocking)
+    /// This method spawns background tasks and doesn't block result delivery
+    fn handle_turn_detection(
+        &self,
+        result: STTResult,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    ) {
+        // Update text buffer and cancel any existing task (person still talking)
+        let buffered_text = {
             let mut state = speech_final_state.write();
 
-            // Cancel existing detection task when we get something from the STT
-            // This means the user probably did not finish their speech or is stopped speaking
-            self.cancel_detection_task(&mut state);
-        }
-
-        // Handle is_final (but not speech_final)
-        if result.is_final {
-            {
-                let mut state = speech_final_state.write();
-                state.text_buffer = format!("{}{}", state.text_buffer, result.transcript);
+            // CRITICAL: Cancel old task when new is_final arrives (person still talking)
+            if let Some(old_handle) = state.turn_detection_handle.take() {
+                debug!(
+                    "New is_final arrived - cancelling previous turn detection (person still talking)"
+                );
+                old_handle.abort();
             }
-            self.handle_is_final(result.clone(), speech_final_state, turn_detector)
-                .await;
-        }
 
-        // Always return the original result immediately
-        Some(result)
+            state.text_buffer = format!("{}{}", state.text_buffer, result.transcript);
+            state.text_buffer.clone()
+        };
+
+        // Create and store NEW detection task handle
+        let detection_handle = self.create_detection_task(
+            result,
+            buffered_text,
+            speech_final_state.clone(),
+            turn_detector,
+        );
+
+        let mut state = speech_final_state.write();
+        state.turn_detection_handle = Some(detection_handle);
+        state
+            .waiting_for_speech_final
+            .store(true, Ordering::Release);
     }
 
     /// Handle a real speech_final result
@@ -116,33 +152,12 @@ impl STTResultProcessor {
         Some(result)
     }
 
-    /// Handle is_final result (non-speech_final)
-    async fn handle_is_final(
-        &self,
-        result: STTResult,
-        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-    ) {
-        let mut state = speech_final_state.write();
-
-        let buffered_text = state.text_buffer.clone();
-
-        // Create detection task with both turn detection and timer fallback
-        let detection_handle = self.create_detection_task(
-            result,
-            buffered_text,
-            speech_final_state.clone(),
-            turn_detector,
-        );
-
-        state.turn_detection_handle = Some(detection_handle);
-        state
-            .waiting_for_speech_final
-            .store(true, Ordering::Release);
-    }
-
-    /// Create a detection task that runs both turn detection and timer simultaneously
-    /// The timer acts as a guaranteed maximum timeout (5 seconds) regardless of turn detection
+    /// Create a detection task that waits for STT provider, then uses turn detection as fallback
+    ///
+    /// Voice AI Best Practice Logic:
+    /// 1. Wait for STT provider to send real speech_final (they see the audio stream)
+    /// 2. If STT is silent and text hasn't changed, run turn detection to confirm
+    /// 3. Only fire artificial speech_final if turn detection confirms turn is complete
     fn create_detection_task(
         &self,
         result: STTResult,
@@ -150,60 +165,94 @@ impl STTResultProcessor {
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
     ) -> JoinHandle<()> {
-        let max_timeout_ms = self.config.turn_detection_timeout_ms;
+        let stt_wait_ms = self.config.stt_speech_final_wait_ms;
+        let inference_timeout_ms = self.config.turn_detection_inference_timeout_ms;
 
         tokio::spawn(async move {
-            let detection_method;
+            // PHASE 1: Wait for STT provider to send real speech_final
+            // This is the primary path - we trust the STT provider first
+            debug!(
+                "Waiting {}ms for real speech_final from STT provider",
+                stt_wait_ms
+            );
+            tokio::time::sleep(Duration::from_millis(stt_wait_ms)).await;
 
-            if let Some(detector) = turn_detector {
-                // Run turn detection
-                let turn_detection_future = async {
-                    let detector_guard = detector.read().await;
-                    match detector_guard.is_turn_complete(&buffered_text).await {
-                        Ok(true) => {
-                            info!("Turn detection triggered speech_final");
-                            Some("turn_detection")
-                        }
-                        Ok(false) => {
-                            debug!("Turn detection returned false");
-                            None
-                        }
-                        Err(e) => {
-                            debug!("Turn detection failed: {:?}", e);
-                            None
-                        }
-                    }
+            // Check if we should still fire (not cancelled by real speech_final or new is_final)
+            let should_continue = {
+                let state = speech_final_state.read();
+                state.waiting_for_speech_final.load(Ordering::Acquire)
+            };
+
+            if !should_continue {
+                debug!("Turn detection cancelled - real speech_final arrived or new is_final");
+                return;
+            }
+
+            // PHASE 2: STT didn't send speech_final - verify with turn detection
+            let detection_method = if let Some(detector) = turn_detector {
+                // Check if text buffer has changed (new transcripts arrived)
+                let current_text = {
+                    let state = speech_final_state.read();
+                    state.text_buffer.clone()
                 };
 
-                // Timer future - always runs for max_timeout_ms
-                let timer_future = async {
-                    tokio::time::sleep(Duration::from_millis(max_timeout_ms)).await;
+                // If text changed, someone is still talking - don't fire
+                if current_text != buffered_text {
                     info!(
-                        "Max timeout after {}ms, forcing speech_final",
-                        max_timeout_ms
+                        "Text buffer changed during wait (old: '{}', new: '{}') - person still talking, not firing",
+                        buffered_text, current_text
                     );
-                    "max_timeout"
-                };
+                    return;
+                }
 
-                // Race both futures - first one to complete wins
-                tokio::select! {
-                    // If turn detection completes first and returns Some (positive result)
-                    Some(method) = turn_detection_future => {
-                        detection_method = method;
+                // Text hasn't changed - run turn detection to confirm turn is complete
+                debug!(
+                    "STT silent for {}ms, running turn detection to confirm",
+                    stt_wait_ms
+                );
+                let turn_result =
+                    tokio::time::timeout(Duration::from_millis(inference_timeout_ms), async {
+                        let detector_guard = detector.read().await;
+                        detector_guard.is_turn_complete(&current_text).await
+                    })
+                    .await;
+
+                match turn_result {
+                    Ok(Ok(true)) => {
+                        info!(
+                            "Turn detection confirms turn complete - firing artificial speech_final"
+                        );
+                        "turn_detection_confirmed"
                     }
-                    // If timer completes first
-                    method = timer_future => {
-                        detection_method = method;
+                    Ok(Ok(false)) => {
+                        info!(
+                            "Turn detection says turn incomplete - not firing (person may still be thinking)"
+                        );
+                        return; // Don't fire - person may continue speaking
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            "Turn detection error: {:?} - firing as fallback ({}ms silence)",
+                            e,
+                            stt_wait_ms
+                        );
+                        "turn_detection_error_fallback"
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Turn detection inference timeout after {}ms - firing as fallback",
+                            inference_timeout_ms
+                        );
+                        "inference_timeout_fallback"
                     }
                 }
             } else {
-                // No turn detector available, use max timeout only
-                tokio::time::sleep(Duration::from_millis(max_timeout_ms)).await;
-                detection_method = "timer_only";
-                info!("No turn detector, using timer only");
-            }
+                // No turn detector - fire based on silence duration alone
+                info!("No turn detector - firing after {}ms silence", stt_wait_ms);
+                "no_detector_timeout"
+            };
 
-            // Always fire the speech_final after one of the conditions above
+            // PHASE 3: Fire artificial speech_final
             Self::fire_speech_final(result, buffered_text, speech_final_state, detection_method)
                 .await;
         })
@@ -271,14 +320,17 @@ impl STTResultProcessor {
     /// Cancel any existing detection task
     fn cancel_detection_task(&self, state: &mut SpeechFinalState) {
         if let Some(handle) = state.turn_detection_handle.take() {
+            debug!("Cancelling pending turn detection task");
             handle.abort();
+            state
+                .waiting_for_speech_final
+                .store(false, Ordering::Release);
         }
     }
 
     /// Reset speech state for next segment
     fn reset_speech_state(&self, state: &mut SpeechFinalState) {
         state.text_buffer.clear();
-        state.last_text.clear();
         state.last_forced_text.clear();
         state
             .waiting_for_speech_final

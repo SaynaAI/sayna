@@ -6,12 +6,10 @@ use tokio::task::JoinHandle;
 use super::callbacks::STTCallback;
 
 /// Internal state for managing speech final timing
-/// Uses parking_lot RwLock for faster synchronization and pre-allocated string buffers
+/// Uses parking_lot RwLock for faster synchronization and optimized field layout
 pub struct SpeechFinalState {
-    /// Combined text buffer from STT results - pre-allocated with capacity
+    /// Combined text buffer from STT results
     pub text_buffer: String,
-    /// Last seen text for comparison - pre-allocated with capacity
-    pub last_text: String,
     /// Turn detection task handle
     pub turn_detection_handle: Option<JoinHandle<()>>,
     /// Whether we're currently waiting for speech_final - atomic for lock-free reads

@@ -233,7 +233,7 @@ pub async fn handle_clear_message(
         // If audio is disabled but LiveKit is configured, still clear LiveKit audio
         if let Some(livekit_manager) = livekit_client {
             // Use write() to wait for the lock - clear operation is important
-            let mut client = livekit_manager.write().await;
+            let client = livekit_manager.write().await;
             match client.clear_audio().await {
                 Ok(()) => {
                     debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");

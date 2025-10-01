@@ -1,39 +1,67 @@
 use anyhow::{Context, Result};
 use ndarray::{Array2, ArrayView2, CowArray};
+use once_cell::sync::Lazy;
 use ort::{Environment, Session, SessionBuilder, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use tokio::fs;
 use tracing::{debug, info, warn};
 
-use crate::core::turn_detect::config::TurnDetectorConfig;
+use crate::core::turn_detect::{assets, config::TurnDetectorConfig};
+
+// Global shared ONNX Environment to avoid expensive bootstrap per detector
+static GLOBAL_ONNX_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
+    Arc::new(
+        Environment::builder()
+            .with_name("turn_detect")
+            .build()
+            .expect("Failed to create ONNX environment"),
+    )
+});
 
 pub struct ModelManager {
     session: Arc<Session>,
     config: TurnDetectorConfig,
+    // Cached input names to avoid repeated allocations
+    input_names: Vec<String>,
+    // Pre-allocated attention mask for common sequence lengths
+    cached_attention_mask: Option<Array2<i64>>,
 }
 
 impl ModelManager {
     pub async fn new(config: TurnDetectorConfig) -> Result<Self> {
-        let model_path = if let Some(path) = &config.model_path {
-            path.clone()
-        } else {
-            Self::ensure_model_downloaded(&config).await?
-        };
+        let model_path = assets::model_path(&config)?;
 
         info!("Loading ONNX model from: {:?}", model_path);
 
-        let session = Self::create_session(&model_path, &config)?;
+        // Move the blocking ONNX model loading to a dedicated blocking thread
+        // to prevent blocking the async runtime
+        let session = tokio::task::spawn_blocking({
+            let model_path = model_path.clone();
+            let config = config.clone();
+            move || Self::create_session(&model_path, &config)
+        })
+        .await
+        .context("Failed to spawn blocking task for ONNX model loading")??;
+
+        // Cache input names to avoid repeated allocations
+        let input_names: Vec<String> = session
+            .inputs
+            .iter()
+            .map(|input| input.name.clone())
+            .collect();
+
+        debug!("Cached model input names: {:?}", input_names);
 
         Ok(Self {
             session: Arc::new(session),
             config,
+            input_names,
+            cached_attention_mask: None,
         })
     }
 
     fn create_session(model_path: &Path, config: &TurnDetectorConfig) -> Result<Session> {
-        let env = Arc::new(Environment::builder().with_name("turn_detect").build()?);
-        let mut builder = SessionBuilder::new(&env)?
+        let mut builder = SessionBuilder::new(&GLOBAL_ONNX_ENV)?
             .with_optimization_level(config.graph_optimization_level.to_ort_level())?;
 
         if let Some(num_threads) = config.num_threads {
@@ -71,7 +99,7 @@ impl ModelManager {
     }
 
     pub async fn predict(
-        &self,
+        &mut self,
         input_ids: ArrayView2<'_, i64>,
         attention_mask: Option<ArrayView2<'_, i64>>,
     ) -> Result<f32> {
@@ -83,19 +111,12 @@ impl ModelManager {
             batch_size, sequence_length
         );
 
-        // Get input names from the session
-        let input_names: Vec<String> = self
-            .session
-            .inputs
-            .iter()
-            .map(|input| input.name.clone())
-            .collect();
-
-        if input_names.is_empty() {
+        // Use cached input names
+        if self.input_names.is_empty() {
             anyhow::bail!("Model has no input names");
         }
 
-        debug!("Model input names: {:?}", input_names);
+        debug!("Using cached input names: {:?}", self.input_names);
 
         // Convert ndarray to ONNX values
         let allocator = self.session.allocator();
@@ -105,8 +126,18 @@ impl ModelManager {
         let mask_array = if let Some(mask) = attention_mask {
             CowArray::from(mask.to_owned()).into_dyn()
         } else {
-            // Create a default attention mask of ones
-            CowArray::from(Array2::<i64>::ones((batch_size, sequence_length))).into_dyn()
+            // Reuse cached attention mask if dimensions match, otherwise create new
+            let needs_new_mask = self
+                .cached_attention_mask
+                .as_ref()
+                .is_none_or(|cached| cached.shape() != [batch_size, sequence_length]);
+
+            if needs_new_mask {
+                self.cached_attention_mask =
+                    Some(Array2::<i64>::ones((batch_size, sequence_length)));
+            }
+
+            CowArray::from(self.cached_attention_mask.as_ref().unwrap().clone()).into_dyn()
         };
 
         // Build input values in the correct order
@@ -129,7 +160,7 @@ impl ModelManager {
         let outputs = self.session.run(input_values)?;
 
         let logits = outputs
-            .get(0)
+            .first()
             .context("No output from model")?
             .try_extract::<f32>()
             .context("Failed to extract tensor")?;
@@ -140,7 +171,7 @@ impl ModelManager {
         debug!("Model output shape: {:?}", shape);
 
         // Log some sample values to understand the output range
-        if shape.len() > 0 && shape[0] > 0 {
+        if !shape.is_empty() && shape[0] > 0 {
             let first_values: Vec<f32> = (0..10.min(logits_view.len()))
                 .map(|i| logits_view.as_slice().unwrap()[i])
                 .collect();
@@ -161,7 +192,7 @@ impl ModelManager {
             let prob = logits_view[[0, 0]];
             // If it's already a probability (0-1), use it directly
             // If it's a logit, apply sigmoid
-            if prob >= 0.0 && prob <= 1.0 {
+            if (0.0..=1.0).contains(&prob) {
                 prob
             } else {
                 // Apply sigmoid to convert logit to probability
@@ -172,7 +203,7 @@ impl ModelManager {
             let prob = logits_view[[0]];
             // If it's already a probability (0-1), use it directly
             // If it's a logit, apply sigmoid
-            if prob >= 0.0 && prob <= 1.0 {
+            if (0.0..=1.0).contains(&prob) {
                 prob
             } else {
                 // Apply sigmoid to convert logit to probability
@@ -202,6 +233,16 @@ impl ModelManager {
             // Token 2 is </s> (standard end-of-sequence)
             // Token 49153 is <|im_end|> (chat format end marker)
             let eos_token_id = 2;
+
+            // Guard against out-of-bounds access if model has fewer classes
+            if num_classes <= eos_token_id {
+                warn!(
+                    "Model has {} classes, but EOS token ID is {}. Using fallback.",
+                    num_classes, eos_token_id
+                );
+                return Ok(0.3); // Conservative fallback
+            }
+
             let eos_logit = slice[last_position_start + eos_token_id];
 
             // Find the maximum logit for numerical stability in softmax
@@ -221,7 +262,7 @@ impl ModelManager {
                 "EOS token (</s>) logit: {:.4}, probability: {:.6}",
                 eos_logit, eos_prob
             );
-            info!("Turn completion probability: {:.4}", eos_prob);
+            debug!("Turn completion probability: {:.4}", eos_prob);
 
             // The model predicts </s> (end-of-sequence) token for complete turns
             eos_prob
@@ -243,74 +284,6 @@ impl ModelManager {
         let exp_end = (end_logit - max_logit).exp();
         let exp_continue = (continue_logit - max_logit).exp();
         exp_end / (exp_end + exp_continue)
-    }
-
-    async fn ensure_model_downloaded(config: &TurnDetectorConfig) -> Result<PathBuf> {
-        let cache_dir = config.get_cache_dir()?;
-        fs::create_dir_all(&cache_dir).await?;
-
-        let model_filename = "model_quantized.onnx";
-
-        let model_path = cache_dir.join(model_filename);
-
-        if model_path.exists() {
-            info!("Using cached model at: {:?}", model_path);
-            return Ok(model_path);
-        }
-
-        let model_url = config
-            .model_url
-            .as_ref()
-            .context("No model URL specified and model not found locally")?;
-
-        info!("Downloading model from: {}", model_url);
-        Self::download_file(model_url, &model_path).await?;
-
-        Ok(model_path)
-    }
-
-    async fn download_file(url: &str, path: &Path) -> Result<()> {
-        let response = reqwest::get(url)
-            .await
-            .context("Failed to download model")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to download model: HTTP {}", response.status());
-        }
-
-        let bytes = response.bytes().await?;
-
-        if let Some(expected_hash) = Self::get_expected_hash(url) {
-            Self::verify_hash(&bytes, &expected_hash)?;
-        }
-
-        fs::write(path, bytes).await?;
-        info!("Model downloaded successfully to: {:?}", path);
-
-        Ok(())
-    }
-
-    fn get_expected_hash(url: &str) -> Option<String> {
-        if url.contains("model_quantized.onnx") {
-            Some("expected_hash_here".to_string())
-        } else {
-            None
-        }
-    }
-
-    fn verify_hash(data: &[u8], expected: &str) -> Result<()> {
-        use sha2::{Digest, Sha256};
-
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let result = hasher.finalize();
-        let actual = format!("{:x}", result);
-
-        if actual != expected {
-            warn!("Hash mismatch - expected: {}, actual: {}", expected, actual);
-        }
-
-        Ok(())
     }
 
     pub fn config(&self) -> &TurnDetectorConfig {

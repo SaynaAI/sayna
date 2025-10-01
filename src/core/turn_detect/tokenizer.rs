@@ -1,11 +1,9 @@
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
 use tokenizers::tokenizer::Tokenizer as HfTokenizer;
 use tokenizers::{Encoding, PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams};
-use tokio::fs;
 use tracing::{debug, info};
 
-use crate::core::turn_detect::config::TurnDetectorConfig;
+use crate::core::turn_detect::{assets, config::TurnDetectorConfig};
 use ndarray::Array2;
 
 pub struct Tokenizer {
@@ -15,16 +13,23 @@ pub struct Tokenizer {
 
 impl Tokenizer {
     pub async fn new(config: &TurnDetectorConfig) -> Result<Self> {
-        let tokenizer_path = if let Some(path) = &config.tokenizer_path {
-            path.clone()
-        } else {
-            Self::ensure_tokenizer_downloaded(config).await?
-        };
+        let tokenizer_path = assets::tokenizer_path(config)?;
 
         info!("Loading tokenizer from: {:?}", tokenizer_path);
 
-        let mut tokenizer = HfTokenizer::from_file(&tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+        // Move the blocking tokenizer loading to a dedicated blocking thread
+        let max_length = config.max_sequence_length;
+        let mut tokenizer = tokio::task::spawn_blocking({
+            let tokenizer_path = tokenizer_path.clone();
+            move || {
+                HfTokenizer::from_file(&tokenizer_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))
+            }
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to spawn blocking task for tokenizer loading: {}", e)
+        })??;
 
         tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
@@ -37,7 +42,7 @@ impl Tokenizer {
 
         tokenizer
             .with_truncation(Some(TruncationParams {
-                max_length: config.max_sequence_length,
+                max_length,
                 strategy: tokenizers::TruncationStrategy::LongestFirst,
                 stride: 0,
                 direction: tokenizers::TruncationDirection::Right,
@@ -46,7 +51,7 @@ impl Tokenizer {
 
         Ok(Self {
             tokenizer,
-            max_length: config.max_sequence_length,
+            max_length,
         })
     }
 
@@ -94,45 +99,6 @@ impl Tokenizer {
         self.tokenizer
             .decode(ids, skip_special_tokens)
             .map_err(|e| anyhow::anyhow!("Failed to decode: {}", e))
-    }
-
-    async fn ensure_tokenizer_downloaded(config: &TurnDetectorConfig) -> Result<PathBuf> {
-        let cache_dir = config.get_cache_dir()?;
-        fs::create_dir_all(&cache_dir).await?;
-
-        let tokenizer_path = cache_dir.join("tokenizer.json");
-
-        if tokenizer_path.exists() {
-            info!("Using cached tokenizer at: {:?}", tokenizer_path);
-            return Ok(tokenizer_path);
-        }
-
-        let tokenizer_url = config
-            .tokenizer_url
-            .as_ref()
-            .context("No tokenizer URL specified and tokenizer not found locally")?;
-
-        info!("Downloading tokenizer from: {}", tokenizer_url);
-        Self::download_file(tokenizer_url, &tokenizer_path).await?;
-
-        Ok(tokenizer_path)
-    }
-
-    async fn download_file(url: &str, path: &Path) -> Result<()> {
-        let response = reqwest::get(url)
-            .await
-            .context("Failed to download tokenizer")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to download tokenizer: HTTP {}", response.status());
-        }
-
-        let bytes = response.bytes().await?;
-        fs::write(path, bytes).await?;
-
-        info!("Tokenizer downloaded successfully to: {:?}", path);
-
-        Ok(())
     }
 
     pub fn max_length(&self) -> usize {

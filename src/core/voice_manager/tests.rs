@@ -130,7 +130,6 @@ async fn test_speech_final_timing_control() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -143,7 +142,6 @@ async fn test_speech_final_timing_control() {
             let mut state = speech_final_state.write();
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
-                last_text: String::with_capacity(1024),
                 turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
@@ -177,7 +175,6 @@ async fn test_speech_final_timing_control() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -190,7 +187,6 @@ async fn test_speech_final_timing_control() {
             let mut state = speech_final_state.write();
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
-                last_text: String::with_capacity(1024),
                 turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
@@ -224,7 +220,6 @@ async fn test_speech_final_timing_control() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -237,7 +232,6 @@ async fn test_speech_final_timing_control() {
             let mut state = speech_final_state.write();
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
-                last_text: String::with_capacity(1024),
                 turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
@@ -280,7 +274,6 @@ async fn test_speech_final_timing_control() {
         let state = speech_final_state.read();
         assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
         assert!(state.text_buffer.is_empty());
-        assert!(state.last_text.is_empty());
         assert!(state.turn_detection_handle.is_none());
     }
 
@@ -288,7 +281,6 @@ async fn test_speech_final_timing_control() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -301,7 +293,6 @@ async fn test_speech_final_timing_control() {
             let mut state = speech_final_state.write();
             *state = SpeechFinalState {
                 text_buffer: String::with_capacity(1024),
-                last_text: String::with_capacity(1024),
                 turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
@@ -338,7 +329,6 @@ async fn test_duplicate_speech_final_prevention() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -395,7 +385,6 @@ async fn test_duplicate_speech_final_prevention() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
@@ -452,7 +441,6 @@ async fn test_duplicate_speech_final_prevention() {
     {
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer: String::with_capacity(1024),
-            last_text: String::with_capacity(1024),
             turn_detection_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,

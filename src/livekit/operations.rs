@@ -57,7 +57,10 @@ pub enum LiveKitOperation {
         response_tx: oneshot::Sender<Result<(), AppError>>,
     },
     /// Shutdown the worker
-    Shutdown,
+    Shutdown {
+        /// Optional acknowledgement channel to signal completion
+        ack_tx: Option<oneshot::Sender<()>>,
+    },
 }
 
 impl LiveKitOperation {
@@ -73,7 +76,7 @@ impl LiveKitOperation {
             LiveKitOperation::SendMessage { .. } | LiveKitOperation::SendDataMessage { .. } => {
                 OperationPriority::Low
             }
-            LiveKitOperation::Reconnect { .. } | LiveKitOperation::Shutdown => {
+            LiveKitOperation::Reconnect { .. } | LiveKitOperation::Shutdown { .. } => {
                 OperationPriority::High
             }
         }

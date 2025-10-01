@@ -46,7 +46,15 @@ pub async fn ws_voice_handler(
     State(state): State<Arc<AppState>>,
 ) -> Response {
     info!("WebSocket voice connection upgrade requested");
-    ws.on_upgrade(move |socket| handle_voice_socket(socket, state))
+    debug!("AppState extracted successfully, preparing upgrade");
+
+    let response = ws.on_upgrade(move |socket| {
+        debug!("WebSocket upgrade callback triggered");
+        handle_voice_socket(socket, state)
+    });
+
+    debug!("WebSocket upgrade response created");
+    response
 }
 
 /// Handle WebSocket voice connection with optimized performance
@@ -70,10 +78,13 @@ pub async fn ws_voice_handler(
 /// - RwLock for connection state (frequent reads, rare writes)
 /// - Timeout handling for stale connection detection
 async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
+    debug!("handle_voice_socket started");
     info!("WebSocket voice connection established");
 
+    debug!("Splitting socket into sender and receiver");
     // Split the socket into sender and receiver
     let (mut sender, mut receiver) = socket.split();
+    debug!("Socket split completed");
 
     // Connection state with RwLock for rare writes, frequent reads
     let state = Arc::new(RwLock::new(ConnectionState::new()));

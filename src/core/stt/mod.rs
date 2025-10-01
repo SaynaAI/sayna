@@ -80,7 +80,7 @@ pub fn create_stt_provider(
     provider: &str,
     config: STTConfig,
 ) -> Result<Box<dyn BaseSTT>, STTError> {
-    let provider_enum: STTProvider = provider.parse().expect("Invalid STT provider type");
+    let provider_enum: STTProvider = provider.parse()?;
 
     match provider_enum {
         STTProvider::Deepgram => {
@@ -103,8 +103,7 @@ pub fn create_stt_provider(
 /// ```rust,no_run
 /// use sayna::core::stt::{create_stt_provider_from_enum, STTProvider, STTConfig};
 ///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let config = STTConfig {
 ///         provider: "deepgram".to_string(),
 ///         api_key: "your-deepgram-api-key".to_string(),
@@ -117,12 +116,12 @@ pub fn create_stt_provider(
 ///     };
 ///
 ///     // Create a Deepgram STT provider using enum
-///     let mut stt = create_stt_provider_from_enum(STTProvider::Deepgram, config).await?;
+///     let mut stt = create_stt_provider_from_enum(STTProvider::Deepgram, config)?;
 ///
 ///     Ok(())
 /// }
 /// ```
-pub async fn create_stt_provider_from_enum(
+pub fn create_stt_provider_from_enum(
     provider: STTProvider,
     config: STTConfig,
 ) -> Result<Box<dyn BaseSTT>, STTError> {
@@ -211,8 +210,8 @@ mod factory_tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_create_stt_provider_from_enum() {
+    #[test]
+    fn test_create_stt_provider_from_enum() {
         let config = STTConfig {
             model: "nova-3".to_string(),
             provider: "deepgram".to_string(),
@@ -224,7 +223,7 @@ mod factory_tests {
             encoding: "linear16".to_string(),
         };
 
-        let result = create_stt_provider_from_enum(STTProvider::Deepgram, config).await;
+        let result = create_stt_provider_from_enum(STTProvider::Deepgram, config);
         assert!(result.is_err());
         // Should fail because of empty API key
     }

@@ -1,9 +1,13 @@
+use std::env;
+
 use tokio::net::TcpListener;
 
-use sayna::{ServerConfig, routes, state::AppState};
+use anyhow::anyhow;
+
+use sayna::{ServerConfig, init, routes, state::AppState};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
@@ -11,10 +15,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This must be done before any TLS connections are attempted
     rustls::crypto::ring::default_provider()
         .install_default()
-        .map_err(|_| "Failed to install default crypto provider")?;
+        .map_err(|_| anyhow!("Failed to install default crypto provider"))?;
+
+    // Handle CLI commands
+    let mut args = env::args();
+    let _ = args.next();
+    if let Some(command) = args.next() {
+        match command.as_str() {
+            "init" => {
+                if let Some(extra) = args.next() {
+                    anyhow::bail!("Unexpected argument '{extra}' after 'init'");
+                }
+                init::run().await?;
+                return Ok(());
+            }
+            other => {
+                anyhow::bail!("Unknown command '{other}'. Supported commands: init");
+            }
+        }
+    }
 
     // Load configuration
-    let config = ServerConfig::from_env()?;
+    let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
     let address = config.address();
     println!("Starting server on {address}");
 

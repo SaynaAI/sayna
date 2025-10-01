@@ -101,7 +101,6 @@ impl VoiceManager {
         // Pre-allocate string buffers with reasonable capacity
         const TEXT_BUFFER_CAPACITY: usize = 1024;
         let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
-        let last_text = String::with_capacity(TEXT_BUFFER_CAPACITY);
 
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
@@ -112,7 +111,6 @@ impl VoiceManager {
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
             speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                 text_buffer,
-                last_text,
                 turn_detection_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
@@ -231,7 +229,6 @@ impl VoiceManager {
             }
             // Reset speech final state - reuse allocated capacity
             state.text_buffer.clear();
-            state.last_text.clear();
             state
                 .waiting_for_speech_final
                 .store(false, Ordering::Release);
@@ -543,13 +540,14 @@ impl VoiceManager {
             state.user_callback = Some(callback.clone());
         }
 
-        // Create wrapper callback that processes timing and interruption control before forwarding to user
+        // Pre-clone Arc references outside the callback to reduce per-invocation overhead
         let speech_final_state_clone = self.speech_final_state.clone();
         let interruption_state_clone = self.interruption_state.clone();
         let turn_detector_clone = self.turn_detector.clone();
         let stt_processor = STTResultProcessor::default();
 
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
+            // Clone Arc references per invocation (lightweight operation)
             let callback = callback.clone();
             let speech_final_state = speech_final_state_clone.clone();
             let interruption_state = interruption_state_clone.clone();
@@ -557,13 +555,13 @@ impl VoiceManager {
             let stt_processor = stt_processor.clone();
 
             Box::pin(async move {
-                // Check if we should ignore STT results due to non-interruptible audio
+                // Fast synchronous check for interruption - execute before any async ops
                 if !interruption_state.can_interrupt() {
                     // Still within non-interruptible period, ignore STT result
                     return;
                 }
 
-                // Process result with timing control using the processor
+                // Process result with timing control - now non-blocking for result delivery
                 let processed_result = stt_processor
                     .process_result(result, speech_final_state, turn_detector)
                     .await;
@@ -572,7 +570,7 @@ impl VoiceManager {
                     // Call user callback with processed result
                     callback(processed_result).await;
                 }
-                // If None returned, result was suppressed (interim result while waiting)
+                // If None returned, result was suppressed (empty interim result)
             })
         });
 
