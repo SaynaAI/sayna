@@ -18,6 +18,11 @@ async fn test_websocket_voice_config() {
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
     };
@@ -165,6 +170,11 @@ async fn test_websocket_invalid_message() {
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
     };

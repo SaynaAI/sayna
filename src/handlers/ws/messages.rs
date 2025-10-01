@@ -97,7 +97,11 @@ pub struct ParticipantDisconnectedInfo {
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     #[serde(rename = "ready")]
-    Ready,
+    Ready {
+        /// Optional LiveKit token for user to join the room
+        #[serde(skip_serializing_if = "Option::is_none")]
+        livekit_token: Option<String>,
+    },
     #[serde(rename = "stt_result")]
     STTResult {
         transcript: String,
@@ -124,4 +128,5 @@ pub enum OutgoingMessage {
 pub enum MessageRoute {
     Outgoing(OutgoingMessage),
     Binary(Bytes),
+    Close,
 }

@@ -27,6 +27,10 @@ pub struct ConnectionState {
     pub livekit_operation_queue: Option<OperationQueue>,
     /// Whether audio processing (STT/TTS) is enabled for this connection
     pub audio_enabled: AtomicBool,
+    /// LiveKit room name for cleanup operations
+    pub livekit_room_name: Option<String>,
+    /// Recording egress ID for cleanup operations
+    pub recording_egress_id: Option<String>,
 }
 
 impl Default for ConnectionState {
@@ -42,6 +46,8 @@ impl ConnectionState {
             livekit_client: None,
             livekit_operation_queue: None,
             audio_enabled: AtomicBool::new(false),
+            livekit_room_name: None,
+            recording_egress_id: None,
         }
     }
 
