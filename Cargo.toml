@@ -59,6 +59,7 @@ once_cell = "1.19"
 # LiveKit
 livekit = "=0.7.18"
 livekit-api = "=0.4.6"
+livekit-protocol = "=0.4.0"
 
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model-ll"] }
 tract-core = "=0.21.5"
