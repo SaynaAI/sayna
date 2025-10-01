@@ -14,6 +14,8 @@ async fn test_health_check() {
         host: "0.0.0.0".to_string(),
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         deepgram_api_key: None,
         elevenlabs_api_key: None,
         cache_path: None,
@@ -49,6 +51,8 @@ async fn test_speak_endpoint_missing_api_key() {
     // Create test configuration without API keys
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: None,
@@ -97,6 +101,8 @@ async fn test_speak_endpoint_empty_text() {
     // Create test configuration
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
@@ -153,6 +159,8 @@ async fn test_speak_endpoint_with_pronunciations() {
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
         port: 3001,
+        livekit_api_key: None,
+        livekit_api_secret: None,
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: None,
@@ -210,6 +218,8 @@ async fn test_speak_endpoint_invalid_provider() {
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
         port: 3001,
+        livekit_api_key: None,
+        livekit_api_secret: None,
         livekit_url: "ws://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: None,
