@@ -6,6 +6,8 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub livekit_url: String,
+    pub livekit_api_key: Option<String>,
+    pub livekit_api_secret: Option<String>,
 
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
@@ -28,6 +30,8 @@ impl ServerConfig {
 
         let livekit_url =
             env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".to_string());
+        let livekit_api_key = env::var("LIVEKIT_API_KEY").ok();
+        let livekit_api_secret = env::var("LIVEKIT_API_SECRET").ok();
 
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
@@ -43,6 +47,8 @@ impl ServerConfig {
             host,
             port,
             livekit_url,
+            livekit_api_key,
+            livekit_api_secret,
             deepgram_api_key,
             elevenlabs_api_key,
             cache_path,
@@ -82,8 +88,33 @@ impl ServerConfig {
             "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
                 "ElevenLabs API key not configured in server environment".to_string()
             }),
+            "livekit" => self.livekit_api_key.as_ref().cloned().ok_or_else(|| {
+                "LiveKit API key not configured in server environment".to_string()
+            }),
             _ => Err(format!("Unsupported provider: {provider}")),
         }
+    }
+
+    /// Get LiveKit API credentials
+    ///
+    /// # Returns
+    /// * `Result<(String, String), String>` - Tuple of (api_key, api_secret) on success, or error message
+    pub fn get_livekit_credentials(&self) -> Result<(String, String), String> {
+        let api_key = self
+            .livekit_api_key
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "LiveKit API key not configured in server environment".to_string())?;
+
+        let api_secret = self
+            .livekit_api_secret
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                "LiveKit API secret not configured in server environment".to_string()
+            })?;
+
+        Ok((api_key, api_secret))
     }
 }
 
@@ -97,6 +128,8 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
             cache_path: None,
@@ -114,6 +147,8 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
             cache_path: None,
@@ -131,6 +166,8 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             cache_path: None,
@@ -151,6 +188,8 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
             cache_path: None,
@@ -171,6 +210,8 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
             cache_path: None,
