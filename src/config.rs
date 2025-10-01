@@ -88,33 +88,8 @@ impl ServerConfig {
             "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
                 "ElevenLabs API key not configured in server environment".to_string()
             }),
-            "livekit" => self.livekit_api_key.as_ref().cloned().ok_or_else(|| {
-                "LiveKit API key not configured in server environment".to_string()
-            }),
             _ => Err(format!("Unsupported provider: {provider}")),
         }
-    }
-
-    /// Get LiveKit API credentials
-    ///
-    /// # Returns
-    /// * `Result<(String, String), String>` - Tuple of (api_key, api_secret) on success, or error message
-    pub fn get_livekit_credentials(&self) -> Result<(String, String), String> {
-        let api_key = self
-            .livekit_api_key
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "LiveKit API key not configured in server environment".to_string())?;
-
-        let api_secret = self
-            .livekit_api_secret
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| {
-                "LiveKit API secret not configured in server environment".to_string()
-            })?;
-
-        Ok((api_key, api_secret))
     }
 }
 

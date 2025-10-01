@@ -21,6 +21,7 @@
 //!         "http://localhost:7880".to_string(),
 //!         "api_key".to_string(),
 //!         "api_secret".to_string(),
+//!         None,
 //!     )?;
 //!
 //!     // Create a room
@@ -37,9 +38,26 @@
 //! ```
 
 use livekit_api::access_token::{AccessToken, VideoGrants};
+use livekit_api::services::egress::{EgressClient, EgressOutput, RoomCompositeOptions};
 use livekit_api::services::room::{CreateRoomOptions, RoomClient};
+use livekit_protocol as proto;
 
 use super::types::LiveKitError;
+
+/// Configuration for S3 recording uploads
+#[derive(Debug, Clone)]
+pub struct RecordingConfig {
+    /// S3 bucket for audio recordings
+    pub bucket: String,
+    /// AWS S3 region
+    pub region: String,
+    /// AWS S3 endpoint
+    pub endpoint: String,
+    /// AWS S3 access key
+    pub access_key: String,
+    /// AWS S3 secret key
+    pub secret_key: String,
+}
 
 /// Handler for LiveKit room management and token generation
 ///
@@ -54,6 +72,10 @@ pub struct LiveKitRoomHandler {
     api_secret: String,
     /// RoomClient for room operations
     room_client: RoomClient,
+    /// EgressClient for recording operations
+    egress_client: EgressClient,
+    /// Optional recording configuration
+    recording_config: Option<RecordingConfig>,
 }
 
 impl LiveKitRoomHandler {
@@ -63,6 +85,7 @@ impl LiveKitRoomHandler {
     /// * `url` - LiveKit server URL
     /// * `api_key` - LiveKit API key
     /// * `api_secret` - LiveKit API secret
+    /// * `recording_config` - Optional recording configuration for S3 uploads
     ///
     /// # Returns
     /// * `Result<Self, LiveKitError>` - New handler instance or error
@@ -75,17 +98,26 @@ impl LiveKitRoomHandler {
     ///     "http://localhost:7880".to_string(),
     ///     "api_key".to_string(),
     ///     "api_secret".to_string(),
+    ///     None,
     /// )?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn new(url: String, api_key: String, api_secret: String) -> Result<Self, LiveKitError> {
+    pub fn new(
+        url: String,
+        api_key: String,
+        api_secret: String,
+        recording_config: Option<RecordingConfig>,
+    ) -> Result<Self, LiveKitError> {
         let room_client = RoomClient::with_api_key(&url, &api_key, &api_secret);
+        let egress_client = EgressClient::with_api_key(&url, &api_key, &api_secret);
 
         Ok(Self {
             url,
             api_key,
             api_secret,
             room_client,
+            egress_client,
+            recording_config,
         })
     }
 
@@ -141,6 +173,7 @@ impl LiveKitRoomHandler {
     ///     "http://localhost:7880".to_string(),
     ///     "api_key".to_string(),
     ///     "api_secret".to_string(),
+    ///     None,
     /// )?;
     ///
     /// let token = handler.user_token("my-room")?;
@@ -177,6 +210,7 @@ impl LiveKitRoomHandler {
     ///     "http://localhost:7880".to_string(),
     ///     "api_key".to_string(),
     ///     "api_secret".to_string(),
+    ///     None,
     /// )?;
     ///
     /// let token = handler.agent_token("my-room")?;
@@ -213,6 +247,7 @@ impl LiveKitRoomHandler {
     ///     "http://localhost:7880".to_string(),
     ///     "api_key".to_string(),
     ///     "api_secret".to_string(),
+    ///     None,
     /// )?;
     ///
     /// handler.create_room("my-room").await?;
@@ -220,8 +255,10 @@ impl LiveKitRoomHandler {
     /// # }
     /// ```
     pub async fn create_room(&self, room_name: &str) -> Result<(), LiveKitError> {
-        let mut options = CreateRoomOptions::default();
-        options.max_participants = 3;
+        let options = CreateRoomOptions {
+            max_participants: 3,
+            ..Default::default()
+        };
 
         self.room_client
             .create_room(room_name, options)
@@ -240,6 +277,120 @@ impl LiveKitRoomHandler {
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
+
+    /// Setup room recording with S3 upload
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room to record
+    /// * `stream_id` - Unique identifier for the recording stream
+    ///
+    /// # Returns
+    /// * `Result<String, LiveKitError>` - Egress ID for the started recording or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sayna::livekit::room_handler::RecordingConfig;
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     Some(RecordingConfig {
+    ///         bucket: "my-bucket".to_string(),
+    ///         region: "us-east-1".to_string(),
+    ///         endpoint: "https://s3.amazonaws.com".to_string(),
+    ///         access_key: "access_key".to_string(),
+    ///         secret_key: "secret_key".to_string(),
+    ///     }),
+    /// )?;
+    ///
+    /// let egress_id = handler.setup_room_recording("my-room", "stream-123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn setup_room_recording(
+        &self,
+        room_name: &str,
+        stream_id: &str,
+    ) -> Result<String, LiveKitError> {
+        // Validate that recording configuration is present
+        let config = self.recording_config.as_ref().ok_or_else(|| {
+            LiveKitError::ConnectionFailed("Recording configuration not provided".to_string())
+        })?;
+
+        // Create S3 upload configuration
+        let s3_upload = proto::S3Upload {
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            endpoint: config.endpoint.clone(),
+            access_key: config.access_key.clone(),
+            secret: config.secret_key.clone(),
+            force_path_style: true,
+            ..Default::default()
+        };
+
+        // Create encoded file output with S3 upload
+        let file_output = proto::EncodedFileOutput {
+            file_type: proto::EncodedFileType::Ogg as i32,
+            filepath: format!("{}/audio.ogg", stream_id),
+            disable_manifest: false,
+            output: Some(proto::encoded_file_output::Output::S3(s3_upload)),
+        };
+
+        // Configure room composite options for audio-only recording
+        let options = RoomCompositeOptions {
+            audio_only: true,
+            ..Default::default()
+        };
+
+        // Start the room composite egress
+        let egress_info = self
+            .egress_client
+            .start_room_composite_egress(room_name, vec![EgressOutput::File(file_output)], options)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to start room recording: {}", e))
+            })?;
+
+        Ok(egress_info.egress_id)
+    }
+
+    /// Stop room recording
+    ///
+    /// # Arguments
+    /// * `egress_id` - The egress ID returned from setup_room_recording
+    ///
+    /// # Returns
+    /// * `Result<(), LiveKitError>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// handler.stop_room_recording("egress-id-123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_room_recording(&self, egress_id: &str) -> Result<(), LiveKitError> {
+        self.egress_client
+            .stop_egress(egress_id)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to stop room recording: {}", e))
+            })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +403,7 @@ mod tests {
             "http://localhost:7880".to_string(),
             "test_key".to_string(),
             "test_secret".to_string(),
+            None,
         );
 
         assert!(handler.is_ok());
@@ -266,6 +418,7 @@ mod tests {
             "http://localhost:7880".to_string(),
             "test_key".to_string(),
             "test_secret".to_string(),
+            None,
         )
         .unwrap();
 
@@ -283,6 +436,7 @@ mod tests {
             "http://localhost:7880".to_string(),
             "test_key".to_string(),
             "test_secret".to_string(),
+            None,
         )
         .unwrap();
 
@@ -300,6 +454,7 @@ mod tests {
             "http://localhost:7880".to_string(),
             "test_key".to_string(),
             "test_secret".to_string(),
+            None,
         )
         .unwrap();
 
@@ -315,6 +470,7 @@ mod tests {
             "http://localhost:7880".to_string(),
             "test_key".to_string(),
             "test_secret".to_string(),
+            None,
         )
         .unwrap();
 
@@ -322,5 +478,99 @@ mod tests {
         assert!(result.is_ok());
         let token = result.unwrap();
         assert!(!token.is_empty());
+    }
+
+    #[test]
+    fn test_recording_configuration_validation() {
+        // Handler without recording configuration
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        // Handler with complete recording configuration
+        let recording_config = RecordingConfig {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: "https://s3.amazonaws.com".to_string(),
+            access_key: "access_key".to_string(),
+            secret_key: "secret_key".to_string(),
+        };
+
+        let handler_with_recording = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            Some(recording_config),
+        )
+        .unwrap();
+
+        assert!(handler.recording_config.is_none());
+        assert!(handler_with_recording.recording_config.is_some());
+        assert_eq!(
+            handler_with_recording
+                .recording_config
+                .as_ref()
+                .unwrap()
+                .bucket,
+            "test-bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_setup_room_recording_without_config() {
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler
+            .setup_room_recording("test-room", "stream-123")
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Recording configuration not provided")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_setup_room_recording_with_config() {
+        // This test validates that setup_room_recording accepts a properly configured handler
+        // It will fail during actual API call since we don't have a real LiveKit server
+        let recording_config = RecordingConfig {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: "https://s3.amazonaws.com".to_string(),
+            access_key: "access_key".to_string(),
+            secret_key: "secret_key".to_string(),
+        };
+
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            Some(recording_config),
+        )
+        .unwrap();
+
+        // This will fail at the API call stage, but that's expected since we don't have a real server
+        // We're just validating that the configuration is accepted
+        let result = handler
+            .setup_room_recording("test-room", "stream-123")
+            .await;
+
+        // We expect an error because there's no real LiveKit server, but it shouldn't be a config error
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(!err_msg.contains("Recording configuration not provided"));
     }
 }
