@@ -653,6 +653,7 @@ impl ReqManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
     use tokio::time::sleep;
@@ -743,7 +744,16 @@ mod tests {
     #[tokio::test]
     async fn test_client_guard_methods() {
         // Start a local test server
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                if err.kind() == ErrorKind::PermissionDenied {
+                    eprintln!("Skipping test_client_guard_methods: {err}");
+                    return;
+                }
+                panic!("Failed to bind test server listener: {err}");
+            }
+        };
         let addr = listener.local_addr().unwrap();
 
         // Spawn a simple HTTP server
@@ -776,7 +786,16 @@ mod tests {
     #[tokio::test]
     async fn test_warmup() {
         // Start a local test server for warmup
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                if err.kind() == ErrorKind::PermissionDenied {
+                    eprintln!("Skipping test_warmup: {err}");
+                    return;
+                }
+                panic!("Failed to bind test warmup server: {err}");
+            }
+        };
         let addr = listener.local_addr().unwrap();
 
         // Use a channel to control server shutdown
@@ -828,7 +847,16 @@ mod tests {
     #[tokio::test]
     async fn test_aggressive_warmup() {
         // Start a local test server for aggressive warmup
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                if err.kind() == ErrorKind::PermissionDenied {
+                    eprintln!("Skipping test_aggressive_warmup: {err}");
+                    return;
+                }
+                panic!("Failed to bind test aggressive warmup server: {err}");
+            }
+        };
         let addr = listener.local_addr().unwrap();
 
         // Use a channel to control server shutdown

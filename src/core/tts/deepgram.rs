@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::base::{AudioCallback, BaseTTS, ConnectionState, TTSConfig, TTSResult};
-use super::provider::{TTSProvider, TTSRequestBuilder};
+use super::provider::{PronunciationReplacer, TTSProvider, TTSRequestBuilder};
 use crate::utils::req_manager::ReqManager;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -15,6 +15,7 @@ pub const DEEPGRAM_TTS_URL: &str = "https://api.deepgram.com/v1/speak";
 #[derive(Clone)]
 struct DeepgramRequestBuilder {
     config: TTSConfig,
+    pronunciation_replacer: Option<PronunciationReplacer>,
 }
 
 impl TTSRequestBuilder for DeepgramRequestBuilder {
@@ -24,7 +25,10 @@ impl TTSRequestBuilder for DeepgramRequestBuilder {
         let mut url = String::from(DEEPGRAM_TTS_URL);
         let mut params = Vec::new();
 
-        if let Some(voice_id) = &self.config.voice_id {
+        // Use model field if provided, otherwise fall back to voice_id
+        if !self.config.model.is_empty() {
+            params.push(format!("model={}", self.config.model));
+        } else if let Some(voice_id) = &self.config.voice_id {
             params.push(format!("model={voice_id}"));
         }
 
@@ -67,6 +71,11 @@ impl TTSRequestBuilder for DeepgramRequestBuilder {
     fn get_config(&self) -> &TTSConfig {
         &self.config
     }
+
+    /// Get precompiled pronunciation replacer
+    fn get_pronunciation_replacer(&self) -> Option<&PronunciationReplacer> {
+        self.pronunciation_replacer.as_ref()
+    }
 }
 
 fn compute_tts_config_hash(config: &TTSConfig) -> String {
@@ -104,9 +113,16 @@ pub struct DeepgramTTS {
 impl DeepgramTTS {
     /// Create a new Deepgram TTS instance
     pub fn new(config: TTSConfig) -> TTSResult<Self> {
-        let request_builder = DeepgramRequestBuilder { config };
-        let cfg = request_builder.config.clone();
-        let hash = compute_tts_config_hash(&cfg);
+        let pronunciation_replacer = if !config.pronunciations.is_empty() {
+            Some(PronunciationReplacer::new(&config.pronunciations))
+        } else {
+            None
+        };
+        let request_builder = DeepgramRequestBuilder {
+            config: config.clone(),
+            pronunciation_replacer,
+        };
+        let hash = compute_tts_config_hash(&config);
         Ok(Self {
             provider: TTSProvider::new()?,
             request_builder,
@@ -137,7 +153,9 @@ impl BaseTTS for DeepgramTTS {
     }
 
     async fn connect(&mut self) -> TTSResult<()> {
-        self.provider.generic_connect(DEEPGRAM_TTS_URL).await
+        self.provider
+            .generic_connect_with_config(DEEPGRAM_TTS_URL, &self.request_builder.config)
+            .await
     }
 
     async fn disconnect(&mut self) -> TTSResult<()> {
@@ -233,7 +251,10 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = DeepgramRequestBuilder { config };
+        let builder = DeepgramRequestBuilder {
+            config,
+            pronunciation_replacer: None,
+        };
         let client = reqwest::Client::new();
         let request = builder.build_http_request(&client, "Test text");
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -95,18 +95,31 @@ impl CoreState {
         let mut config = TurnDetectorConfig::default();
         config.cache_path = cache_path.cloned();
 
-        match TurnDetector::with_config(config).await {
-            Ok(detector) => {
+        // Add a timeout to prevent hanging forever during initialization
+        let init_timeout = Duration::from_secs(30);
+
+        match tokio::time::timeout(init_timeout, TurnDetector::with_config(config)).await {
+            Ok(Ok(detector)) => {
                 let init_elapsed = start.elapsed();
                 info!("Turn Detector initialized in {:?}", init_elapsed);
 
                 // Warmup the model with sample inputs to ensure it's fully loaded
                 let warmup_start = Instant::now();
-                if let Err(e) = Self::warmup_turn_detector(&detector).await {
-                    warn!("Turn Detector warmup failed: {:?}", e);
-                } else {
-                    let warmup_elapsed = warmup_start.elapsed();
-                    info!("Turn Detector warmup completed in {:?}", warmup_elapsed);
+                let warmup_timeout = Duration::from_secs(10);
+
+                match tokio::time::timeout(warmup_timeout, Self::warmup_turn_detector(&detector))
+                    .await
+                {
+                    Ok(Ok(())) => {
+                        let warmup_elapsed = warmup_start.elapsed();
+                        info!("Turn Detector warmup completed in {:?}", warmup_elapsed);
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Turn Detector warmup failed: {:?}", e);
+                    }
+                    Err(_) => {
+                        warn!("Turn Detector warmup timed out after {:?}", warmup_timeout);
+                    }
                 }
 
                 let total_elapsed = start.elapsed();
@@ -114,11 +127,19 @@ impl CoreState {
 
                 Some(Arc::new(RwLock::new(detector)))
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     "Failed to initialize Turn Detector: {:?}. \
                     Falling back to timer-based detection.",
                     e
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "Turn Detector initialization timed out after {:?}. \
+                    Falling back to timer-based detection.",
+                    init_timeout
                 );
                 None
             }

@@ -181,6 +181,8 @@ pub struct TTSConfig {
     pub request_timeout: Option<u64>,
     /// Pronunciation replacements to apply before TTS
     pub pronunciations: Vec<Pronunciation>,
+    /// Request pool size for concurrent HTTP requests
+    pub request_pool_size: Option<usize>,
 }
 
 impl Default for TTSConfig {
@@ -196,6 +198,7 @@ impl Default for TTSConfig {
             connection_timeout: Some(30),
             request_timeout: Some(60),
             pronunciations: Vec::new(),
+            request_pool_size: Some(4),
         }
     }
 }
@@ -232,13 +235,10 @@ pub trait BaseTTS: Send + Sync {
     /// # Returns
     /// * `TTSResult<()>` - Success or failure of the connection attempt
     async fn connect(&mut self) -> TTSResult<()> {
-        if let Some(provider) = self.get_provider() {
-            provider.generic_connect("https://api.default.com").await
-        } else {
-            Err(TTSError::InternalError(
-                "Provider not available for connection".to_string(),
-            ))
-        }
+        // Default implementation - derived implementations should override to use config
+        Err(TTSError::InternalError(
+            "Connect method should be overridden by provider implementation".to_string(),
+        ))
     }
 
     /// Disconnect from the TTS provider

@@ -16,7 +16,7 @@ static PUNCT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\s'-]").unwrap()
 static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 pub struct TurnDetector {
-    model: Arc<ModelManager>,
+    model: Arc<tokio::sync::Mutex<ModelManager>>,
     tokenizer: Arc<Tokenizer>,
     config: TurnDetectorConfig,
 }
@@ -35,11 +35,11 @@ impl TurnDetector {
     pub async fn with_config(config: TurnDetectorConfig) -> Result<Self> {
         info!("Initializing TurnDetector with config: {:?}", config);
 
-        let model = Arc::new(
+        let model = Arc::new(tokio::sync::Mutex::new(
             ModelManager::new(config.clone())
                 .await
                 .context("Failed to initialize model manager")?,
-        );
+        ));
 
         let tokenizer = Arc::new(
             Tokenizer::new(&config)
@@ -105,6 +105,8 @@ impl TurnDetector {
 
         let probability = self
             .model
+            .lock()
+            .await
             .predict(input_ids.view(), Some(attention_mask.view()))
             .await
             .context("Model prediction failed")?;
@@ -125,7 +127,7 @@ impl TurnDetector {
     /// Check if the given user input represents a complete turn
     pub async fn is_turn_complete(&self, user_input: &str) -> Result<bool> {
         let probability = self.predict_end_of_turn(user_input).await?;
-        info!(
+        debug!(
             "User input: '{}', Turn completion probability: {:.4}",
             user_input, probability
         );

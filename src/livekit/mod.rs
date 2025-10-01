@@ -26,6 +26,7 @@
 //!     let config = LiveKitConfig {
 //!         url: "wss://your-livekit-server.com".to_string(),
 //!         token: "your-jwt-token".to_string(),
+//!         room_name: "your-room".to_string(),
 //!         sample_rate: 24000,
 //!         channels: 1,
 //!         enable_noise_filter: true,
@@ -100,6 +101,7 @@ mod tests {
         let config = LiveKitConfig {
             url: "wss://test.example.com".to_string(),
             token: "test-token".to_string(),
+            room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: true,

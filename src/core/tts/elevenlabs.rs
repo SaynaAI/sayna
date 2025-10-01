@@ -31,9 +31,9 @@ pub struct VoiceSettings {
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
-            stability: Some(0.4),
+            stability: Some(0.5),
             similarity_boost: Some(0.8),
-            style: Some(0.2),
+            style: Some(0.0),
             use_speaker_boost: Some(false),
             speed: Some(1.0),
         }
@@ -101,9 +101,6 @@ impl TTSRequestBuilder for ElevenLabsRequestBuilder {
 
         query_params.push(format!("output_format={output_format}"));
 
-        // Add optimize streaming latency
-        query_params.push("optimize_streaming_latency=3".to_string());
-
         // Build the final URL with query parameters
         let final_url = if !query_params.is_empty() {
             format!("{}?{}", url, query_params.join("&"))
@@ -121,7 +118,7 @@ impl TTSRequestBuilder for ElevenLabsRequestBuilder {
         if !self.config.model.is_empty() {
             body["model_id"] = json!(self.config.model);
         } else {
-            body["model_id"] = json!("eleven_turbo_v2_5");
+            body["model_id"] = json!("eleven_v3");
         }
 
         // Build the request with ElevenLabs-specific headers
@@ -208,9 +205,9 @@ impl BaseTTS for ElevenLabsTTS {
     }
 
     async fn connect(&mut self) -> TTSResult<()> {
-        // Use the base URL for ElevenLabs API
+        // Use the base URL for ElevenLabs API with config-based request manager
         self.provider
-            .generic_connect("https://api.elevenlabs.io")
+            .generic_connect_with_config("https://api.elevenlabs.io", &self.request_builder.config)
             .await
     }
 
@@ -355,7 +352,6 @@ mod tests {
 
         assert!(url.contains("test_voice_id"));
         assert!(url.contains("output_format=pcm_24000"));
-        assert!(url.contains("optimize_streaming_latency=3"));
         assert!(url.starts_with("https://api.elevenlabs.io/v1/text-to-speech/"));
 
         // Check headers

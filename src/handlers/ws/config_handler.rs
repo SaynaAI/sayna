@@ -467,9 +467,9 @@ async fn register_final_tts_callback(
                         tokio::time::Duration::from_millis(LIVEKIT_LOCK_TIMEOUT_MS),
                         livekit_client_arc.write()
                     ).await {
-                        Ok(mut client) => {
+                        Ok(client) => {
                             // Check if LiveKit is connected before attempting to send
-                            if client.is_connected().await {
+                            if client.is_connected() {
                                 match client.send_tts_audio(audio_data.data.clone()).await {
                                     Ok(()) => {
                                         debug!(
@@ -711,7 +711,7 @@ async fn wait_for_livekit_audio(livekit_client: &LiveKitClient) {
 
     while wait_count * LIVEKIT_POLL_INTERVAL_MS < LIVEKIT_AUDIO_WAIT_MS {
         // Check if connected and audio source is available
-        if livekit_client.is_connected().await && livekit_client.has_audio_source().await {
+        if livekit_client.is_connected() && livekit_client.has_audio_source() {
             info!(
                 "LiveKit audio source is ready after {}ms",
                 wait_count * LIVEKIT_POLL_INTERVAL_MS
@@ -724,7 +724,7 @@ async fn wait_for_livekit_audio(livekit_client: &LiveKitClient) {
     }
 
     // Final check
-    if !livekit_client.is_connected().await || !livekit_client.has_audio_source().await {
+    if !livekit_client.is_connected() || !livekit_client.has_audio_source() {
         warn!(
             "LiveKit connected but audio source not available after {}ms wait",
             LIVEKIT_AUDIO_WAIT_MS
@@ -784,7 +784,7 @@ async fn register_audio_clear_callback(
                     // Use try_write to avoid blocking in callback
                     // If we can't get the lock, it's okay - audio will be cleared eventually
                     match livekit.try_write() {
-                        Ok(mut client) => {
+                        Ok(client) => {
                             if let Err(e) = client.clear_audio().await {
                                 warn!("Failed to clear LiveKit audio buffer: {:?}", e);
                             } else {

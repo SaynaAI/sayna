@@ -108,7 +108,7 @@ impl LiveKitManager {
 
         // Slow path: verify with actual client (only if atomic says connected)
         if let Some(client) = self.client.lock().await.as_ref() {
-            client.is_connected().await
+            client.is_connected()
         } else {
             false
         }
@@ -175,6 +175,7 @@ impl LiveKitManager {
     /// let config = LiveKitConfig {
     ///     url: "wss://your-server.com".to_string(),
     ///     token: "your-token".to_string(),
+    ///     room_name: "your-room".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
     ///     enable_noise_filter: true,
@@ -262,6 +263,7 @@ mod tests {
         let config = LiveKitConfig {
             url: "wss://test-server.com".to_string(),
             token: "mock-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: true,
@@ -304,6 +306,7 @@ mod tests {
         let config = LiveKitConfig {
             url: "wss://test-server.com".to_string(),
             token: "mock-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: true,

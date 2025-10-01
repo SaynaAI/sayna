@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct LiveKitConfig {
     pub url: String,
     pub token: String,
+    /// Room name (extracted from token or provided separately)
+    pub room_name: String,
     /// Sample rate for audio publishing (from TTS config)
     pub sample_rate: u32,
     /// Number of audio channels for publishing (typically 1 for mono)
