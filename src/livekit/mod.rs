@@ -69,6 +69,7 @@ mod client;
 mod manager;
 pub mod operations;
 pub mod room_handler;
+pub mod sip_handler;
 mod types;
 
 // Re-export public types and traits
@@ -76,6 +77,7 @@ pub use client::{AudioCallback, DataCallback, DataMessage, LiveKitClient};
 pub use manager::LiveKitManager;
 pub use operations::{LiveKitOperation, OperationQueue};
 pub use room_handler::LiveKitRoomHandler;
+pub use sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
 pub use types::{
     AudioFrameInfo, ConnectionStatus, LiveKitConfig, LiveKitError, ParticipantInfo, RoomInfo,
 };
