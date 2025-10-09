@@ -1,0 +1,210 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+    middleware,
+    routing::get,
+    Router,
+};
+use base64::Engine;
+use tower::ServiceExt;
+
+use sayna::{
+    config::ServerConfig,
+    middlewares::auth::auth_middleware,
+    state::AppState,
+};
+
+/// Helper handler for testing
+async fn protected_handler() -> &'static str {
+    "Protected content"
+}
+
+/// Create a test app with auth middleware
+async fn create_test_app(auth_key: &str) -> Router {
+    let config = ServerConfig {
+        host: "localhost".to_string(),
+        port: 3001,
+        livekit_url: "ws://localhost:7880".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
+        deepgram_api_key: None,
+        elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
+        auth_decryption_key: auth_key.to_string(),
+    };
+
+    let app_state = AppState::new(config).await;
+
+    Router::new()
+        .route("/protected", get(protected_handler))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            auth_middleware,
+        ))
+        .with_state(app_state)
+}
+
+#[tokio::test]
+async fn test_auth_disabled_allows_all_requests() {
+    // When auth_decryption_key is empty, all requests should be allowed
+    let app = create_test_app("").await;
+
+    let request = Request::builder()
+        .uri("/protected")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_missing_auth_header_returns_401() {
+    let app = create_test_app("test_secret_key").await;
+
+    let request = Request::builder()
+        .uri("/protected")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_invalid_auth_format_no_bearer() {
+    let app = create_test_app("test_secret_key").await;
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", "sayna_sometoken")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_invalid_auth_format_no_sayna_prefix() {
+    let app = create_test_app("test_secret_key").await;
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", "Bearer sometoken")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_invalid_base64_token() {
+    let app = create_test_app("test_secret_key").await;
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", "Bearer sayna_not-valid-base64!!!")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_token_too_short() {
+    let app = create_test_app("test_secret_key").await;
+
+    // Create a base64 token that's too short
+    let short_token = base64::engine::general_purpose::STANDARD.encode(b"short");
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", format!("Bearer sayna_{short_token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_invalid_token_version() {
+    let app = create_test_app("test_secret_key").await;
+
+    // Create a token with wrong version (version 2 instead of 1)
+    let mut token = vec![2u8]; // wrong version
+    token.extend_from_slice(&[0u8; 16 + 12 + 16]); // salt + iv + tag
+    let token_base64 = base64::engine::general_purpose::STANDARD.encode(&token);
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", format!("Bearer sayna_{token_base64}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_decryption_fails_with_wrong_secret() {
+    let app = create_test_app("wrong_secret").await;
+
+    // This is a token encrypted with the Node.js code using a different secret
+    // For a complete test, you would need to generate this token using the Node.js script
+    // with a known secret and project_id
+
+    // Example token (this would be generated by the Node.js createApiKey function)
+    // For now, we'll test with a properly formatted but incorrectly encrypted token
+    let token = base64::engine::general_purpose::STANDARD.encode(
+        &[
+            vec![1u8], // version
+            vec![0u8; 16], // salt
+            vec![0u8; 12], // iv
+            vec![0u8; 10], // ciphertext (arbitrary length)
+            vec![0u8; 16], // tag
+        ]
+        .concat(),
+    );
+
+    let request = Request::builder()
+        .uri("/protected")
+        .header("authorization", format!("Bearer sayna_{token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    // Should fail because the ciphertext/tag don't match the key
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// Note: To test successful decryption, you would need to:
+// 1. Use the Node.js createApiKey function to generate a valid token
+// 2. Use the same secret in both the Node.js code and this test
+// 3. Verify that the middleware allows the request through
+//
+// Example Node.js code to generate test token:
+// ```javascript
+// const { createApiKey } = require('./encryptApiKey');
+// const secret = 'test_secret_key';
+// const projectId = 'project_12345';
+// const token = createApiKey(projectId, secret);
+// console.log('Test token:', token);
+// ```
