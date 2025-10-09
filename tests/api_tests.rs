@@ -25,13 +25,17 @@ async fn test_health_check() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_decryption_key: String::new(),
     };
 
     // Create app state
     let app_state = AppState::new(config).await;
 
-    // Create router with state
-    let app = routes::api::create_api_router().with_state(app_state);
+    // Create router with health check endpoint (public, no auth)
+    use axum::{Router, routing::get};
+    let app = Router::new()
+        .route("/", get(sayna::handlers::api::health_check))
+        .with_state(app_state);
 
     // Create request
     let request = Request::builder().uri("/").body(Body::empty()).unwrap();
@@ -69,6 +73,7 @@ async fn test_speak_endpoint_missing_api_key() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_decryption_key: String::new(),
     };
 
     // Create app state
@@ -124,6 +129,7 @@ async fn test_speak_endpoint_empty_text() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_decryption_key: String::new(),
     };
 
     // Create app state
@@ -186,6 +192,7 @@ async fn test_speak_endpoint_with_pronunciations() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_decryption_key: String::new(),
     };
 
     // Create app state
@@ -250,6 +257,7 @@ async fn test_speak_endpoint_invalid_provider() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_decryption_key: String::new(),
     };
 
     // Create app state

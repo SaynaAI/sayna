@@ -4,6 +4,7 @@ pub mod errors;
 pub mod handlers;
 pub mod init;
 pub mod livekit;
+pub mod middlewares;
 pub mod routes;
 pub mod state;
 pub mod utils;

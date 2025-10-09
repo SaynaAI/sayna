@@ -76,6 +76,10 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 sha2 = "0.10"
 anyhow = "1.0"
 
+# Cryptography for auth middleware
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 tempfile = "3.8"
