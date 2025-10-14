@@ -164,6 +164,7 @@ pub async fn handle_config_message(
     let _ = message_tx
         .send(MessageRoute::Outgoing(OutgoingMessage::Ready {
             livekit_token,
+            livekit_url: Some(app_state.config.livekit_url.clone()),
         }))
         .await;
     info!("Voice manager ready and configured");
@@ -570,7 +571,10 @@ async fn initialize_livekit_client(
         return None;
     }
 
-    info!("LiveKit room '{}' created successfully", livekit_ws_config.room_name);
+    info!(
+        "LiveKit room '{}' created successfully",
+        livekit_ws_config.room_name
+    );
 
     // Generate agent token for AI participant
     let agent_token = match room_handler.agent_token(&livekit_ws_config.room_name) {
