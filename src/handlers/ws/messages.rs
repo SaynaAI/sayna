@@ -101,6 +101,9 @@ pub enum OutgoingMessage {
         /// Optional LiveKit token for user to join the room
         #[serde(skip_serializing_if = "Option::is_none")]
         livekit_token: Option<String>,
+        /// Optional Livekit URL to join the room
+        #[serde(skip_serializing_if = "Option::is_none")]
+        livekit_url: Option<String>,
     },
     #[serde(rename = "stt_result")]
     STTResult {

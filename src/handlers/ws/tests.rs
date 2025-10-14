@@ -271,6 +271,7 @@ fn test_outgoing_message_serialization() {
     // Test ready message without token
     let ready_msg = OutgoingMessage::Ready {
         livekit_token: None,
+        livekit_url: None,
     };
     let json = serde_json::to_string(&ready_msg).unwrap();
     assert!(json.contains("\"type\":\"ready\""));
@@ -278,10 +279,12 @@ fn test_outgoing_message_serialization() {
     // Test ready message with token
     let ready_msg_with_token = OutgoingMessage::Ready {
         livekit_token: Some("test_token".to_string()),
+        livekit_url: Some("test_url".to_string()),
     };
     let json_with_token = serde_json::to_string(&ready_msg_with_token).unwrap();
     assert!(json_with_token.contains("\"type\":\"ready\""));
     assert!(json_with_token.contains("\"livekit_token\":\"test_token\""));
+    assert!(json_with_token.contains("\"livekit_url\":\"test_url\""));
 
     // Test STT result message
     let stt_msg = OutgoingMessage::STTResult {
@@ -434,7 +437,8 @@ fn test_livekit_ws_config_conversion() {
 
     let livekit_url = "wss://test-livekit.com".to_string();
     let test_token = "test-jwt-token".to_string();
-    let livekit_config = livekit_ws_config.to_livekit_config(test_token.clone(), &tts_ws_config, &livekit_url);
+    let livekit_config =
+        livekit_ws_config.to_livekit_config(test_token.clone(), &tts_ws_config, &livekit_url);
     assert_eq!(livekit_config.url, "wss://test-livekit.com");
     assert_eq!(livekit_config.token, test_token);
     assert_eq!(livekit_config.room_name, "test-room");
@@ -558,7 +562,10 @@ fn test_parse_config_message_with_livekit() {
         let livekit_config = livekit.unwrap();
         assert_eq!(livekit_config.room_name, "test-room");
         assert!(livekit_config.enable_recording);
-        assert_eq!(livekit_config.recording_file_key, Some("test-file-key".to_string()));
+        assert_eq!(
+            livekit_config.recording_file_key,
+            Some("test-file-key".to_string())
+        );
     } else {
         panic!("Expected Config message");
     }
