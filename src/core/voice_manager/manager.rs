@@ -19,7 +19,7 @@ use crate::core::{
 
 use super::{
     callbacks::{
-        AudioClearCallback, STTCallback, TTSAudioCallback, TTSErrorCallback,
+        AudioClearCallback, STTCallback, TTSAudioCallback, TTSCompleteCallback, TTSErrorCallback,
         VoiceManagerTTSCallback,
     },
     config::VoiceManagerConfig,
@@ -39,6 +39,7 @@ pub struct VoiceManager {
     tts_audio_callback: Arc<SyncRwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<SyncRwLock<Option<TTSErrorCallback>>>,
     audio_clear_callback: Arc<SyncRwLock<Option<AudioClearCallback>>>,
+    tts_complete_callback: Arc<SyncRwLock<Option<TTSCompleteCallback>>>,
 
     // Speech final timing control - using parking_lot for faster access
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
@@ -109,6 +110,7 @@ impl VoiceManager {
             tts_audio_callback: Arc::new(SyncRwLock::new(None)),
             tts_error_callback: Arc::new(SyncRwLock::new(None)),
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+            tts_complete_callback: Arc::new(SyncRwLock::new(None)),
             speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                 text_buffer,
                 turn_detection_handle: None,
@@ -190,6 +192,7 @@ impl VoiceManager {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback: self.tts_error_callback.read().clone(),
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -684,6 +687,7 @@ impl VoiceManager {
                 audio_callback,
                 error_callback: self.tts_error_callback.read().clone(),
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -718,6 +722,7 @@ impl VoiceManager {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback,
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -765,6 +770,71 @@ impl VoiceManager {
     {
         let mut audio_clear_callback = self.audio_clear_callback.write();
         *audio_clear_callback = Some(Arc::new(callback));
+        Ok(())
+    }
+
+    /// Register a callback to be invoked when TTS playback completes
+    ///
+    /// The completion callback is triggered after the TTS provider finishes generating
+    /// all audio chunks for a given `speak()` command. This is useful for:
+    /// - Updating UI state (hiding loading indicators)
+    /// - Coordinating sequential actions
+    /// - Analytics and monitoring
+    /// - Knowing when it's safe to perform operations
+    ///
+    /// # Important Notes
+    /// - Callback fires once per `speak()` call
+    /// - Callback fires after all audio chunks are generated
+    /// - Callback timing indicates server-side generation completion, not client playback
+    /// - Multiple `speak()` calls will trigger multiple callbacks in FIFO order
+    ///
+    /// # Arguments
+    /// * `callback` - Async function to call when TTS playback completes
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<()>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sayna::core::voice_manager::VoiceManager;
+    ///
+    /// let voice_manager = VoiceManager::new(config, None)?;
+    /// voice_manager.start().await?;
+    ///
+    /// // Register completion callback
+    /// voice_manager.on_tts_complete(|| {
+    ///     Box::pin(async move {
+    ///         println!("TTS playback completed!");
+    ///         // Update UI state, trigger next action, etc.
+    ///     })
+    /// }).await?;
+    ///
+    /// voice_manager.speak("Hello world", true, true).await?;
+    /// // Callback will fire after "Hello world" is fully generated
+    /// ```
+    pub async fn on_tts_complete<F>(&self, callback: F) -> VoiceManagerResult<()>
+    where
+        F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+    {
+        // Store the callback
+        *self.tts_complete_callback.write() = Some(Arc::new(callback));
+
+        // Update the TTS provider's callback to include completion callback
+        let mut tts = self.tts.write().await;
+        let audio_callback = self.tts_audio_callback.read().clone();
+        let error_callback = self.tts_error_callback.read().clone();
+        let complete_callback = self.tts_complete_callback.read().clone();
+
+        let callback = Arc::new(VoiceManagerTTSCallback {
+            audio_callback,
+            error_callback,
+            interruption_state: Some(self.interruption_state.clone()),
+            complete_callback,
+        });
+
+        tts.on_audio(callback)
+            .map_err(VoiceManagerError::TTSError)?;
+
         Ok(())
     }
 

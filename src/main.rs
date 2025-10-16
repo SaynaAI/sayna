@@ -1,7 +1,7 @@
 use std::env;
 
-use axum::middleware;
 use axum::Router;
+use axum::middleware;
 use tokio::net::TcpListener;
 
 use anyhow::anyhow;
@@ -49,16 +49,15 @@ async fn main() -> anyhow::Result<()> {
     let base_router = routes::api::create_api_router().merge(routes::ws::create_ws_router());
 
     // Create public health check route (no auth)
-    let public_routes = Router::new()
-        .route("/", axum::routing::get(sayna::handlers::api::health_check));
+    let public_routes =
+        Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
     // Create protected routes with auth middleware
     // All routes except "/" require authentication
-    let protected_router = base_router
-        .layer(middleware::from_fn_with_state(
-            app_state.clone(),
-            auth_middleware,
-        ));
+    let protected_router = base_router.layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
 
     // Combine public and protected routes
     let app = public_routes.merge(protected_router).with_state(app_state);

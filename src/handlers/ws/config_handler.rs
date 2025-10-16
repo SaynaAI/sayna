@@ -298,6 +298,11 @@ async fn initialize_voice_manager(
         return None;
     }
 
+    // Set up TTS completion callback
+    if !register_tts_complete_callback(&voice_manager, message_tx).await {
+        return None;
+    }
+
     // Wait for providers to be ready
     if !wait_for_providers_ready(&voice_manager, message_tx).await {
         return None;
@@ -364,6 +369,59 @@ async fn register_tts_error_callback(
             .await;
         return false;
     }
+    true
+}
+
+/// Register TTS completion callback to send WebSocket notifications
+///
+/// This callback is invoked by the TTS provider's dispatcher after all audio
+/// chunks for a given `speak()` command have been generated and sent.
+///
+/// # Arguments
+/// * `voice_manager` - VoiceManager instance to register callback with
+/// * `message_tx` - Channel for sending WebSocket messages
+///
+/// # Returns
+/// * `bool` - true on success, false on error (triggers connection termination)
+async fn register_tts_complete_callback(
+    voice_manager: &Arc<VoiceManager>,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) -> bool {
+    let message_tx_clone = message_tx.clone();
+
+    if let Err(e) = voice_manager
+        .on_tts_complete(move || {
+            let message_tx = message_tx_clone.clone();
+            Box::pin(async move {
+                // Calculate timestamp when completion occurred
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                // Send completion message to WebSocket client
+                let msg = OutgoingMessage::TTSPlaybackComplete { timestamp };
+
+                // Ignore send errors - client may have disconnected
+                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
+
+                debug!(
+                    "TTS playback completion event sent at timestamp {}",
+                    timestamp
+                );
+            })
+        })
+        .await
+    {
+        error!("Failed to set up TTS completion callback: {}", e);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up TTS completion callback: {e}"),
+            }))
+            .await;
+        return false;
+    }
+
     true
 }
 

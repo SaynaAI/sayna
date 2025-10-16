@@ -26,6 +26,7 @@
 //! - `{"type": "stt_result", "transcript": "...", "is_final": true, "confidence": 0.95}` - STT result
 //! - `{"type": "message", "message": {...}}` - Unified message from various sources (LiveKit, etc.)
 //! - `{"type": "participant_disconnected", "participant": {...}}` - LiveKit participant disconnected from room
+//! - `{"type": "tts_playback_complete", "timestamp": 1234567890}` - TTS audio generation completed
 //! - `{"type": "error", "message": "error description"}` - Error occurred
 //! - **Binary messages** - Raw TTS audio data (optimized for performance)
 //!
@@ -135,7 +136,17 @@
 //!         console.log(`Room: ${participant.room}, Time: ${new Date(participant.timestamp)}`);
 //!         // Update UI to remove participant or show notification
 //!         break;
-//!         
+//!
+//!       case 'tts_playback_complete':
+//!         // Handle TTS playback completion
+//!         const completionTime = new Date(message.timestamp);
+//!         console.log('TTS playback completed at:', completionTime);
+//!         // Calculate server-side latency
+//!         const latency = Date.now() - message.timestamp;
+//!         console.log('Completion latency:', latency, 'ms');
+//!         // Update UI (hide loading spinner, enable next action, etc.)
+//!         break;
+//!
 //!       case 'error':
 //!         console.error('Error:', message.message);
 //!         break;
@@ -315,6 +326,17 @@
 //!                         println!("Room: {}, Timestamp: {}",
 //!                                  participant["room"],
 //!                                  participant["timestamp"]);
+//!                     }
+//!                     Some("tts_playback_complete") => {
+//!                         let timestamp = parsed["timestamp"].as_u64().unwrap_or(0);
+//!                         println!("TTS playback completed at timestamp: {}", timestamp);
+//!                         // Calculate latency if needed
+//!                         let now = std::time::SystemTime::now()
+//!                             .duration_since(std::time::UNIX_EPOCH)
+//!                             .unwrap()
+//!                             .as_millis() as u64;
+//!                         let latency = now.saturating_sub(timestamp);
+//!                         println!("Completion latency: {} ms", latency);
 //!                     }
 //!                     Some("error") => {
 //!                         eprintln!("Error: {}", parsed["message"]);

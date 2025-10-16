@@ -27,11 +27,16 @@ pub type TTSErrorCallback =
 pub type AudioClearCallback =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// Callback type for TTS playback completion notifications
+pub type TTSCompleteCallback =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Internal TTS callback implementation for the VoiceManager
 pub struct VoiceManagerTTSCallback {
     pub audio_callback: Option<TTSAudioCallback>,
     pub error_callback: Option<TTSErrorCallback>,
     pub interruption_state: Option<Arc<InterruptionState>>,
+    pub complete_callback: Option<TTSCompleteCallback>,
 }
 
 impl AudioCallback for VoiceManagerTTSCallback {
@@ -58,12 +63,19 @@ impl AudioCallback for VoiceManagerTTSCallback {
 
     fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let interruption_state = self.interruption_state.clone();
+        let complete_callback = self.complete_callback.clone();
+
         Box::pin(async move {
-            // Simply mark as completed when TTS finishes
+            // Mark as completed when TTS finishes
             if let Some(state) = interruption_state {
                 state
                     .is_completed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            // Notify user callback
+            if let Some(callback) = complete_callback {
+                callback().await;
             }
         })
     }

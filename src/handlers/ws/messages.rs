@@ -122,6 +122,12 @@ pub enum OutgoingMessage {
         /// Information about the participant who disconnected
         participant: ParticipantDisconnectedInfo,
     },
+    /// TTS playback completion notification
+    #[serde(rename = "tts_playback_complete")]
+    TTSPlaybackComplete {
+        /// Timestamp when completion occurred (milliseconds since epoch)
+        timestamp: u64,
+    },
     #[serde(rename = "error")]
     Error { message: String },
 }
