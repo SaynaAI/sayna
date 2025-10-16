@@ -188,7 +188,7 @@ fn decrypt_api_key(token_base64: &str, secret: &str) -> Result<String, AuthError
 /// ```
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
     let decryption_key = &state.config.auth_decryption_key;
@@ -205,9 +205,9 @@ pub async fn auth_middleware(
     // Decrypt token to get project_id
     let _project_id = decrypt_api_key(&encrypted_token, decryption_key)?;
 
-    // TODO: You can store the project_id in request extensions if needed
+    // Store the project_id in request extensions if needed
     // for downstream handlers to use:
-    // request.extensions_mut().insert(project_id);
+    request.extensions_mut().insert(_project_id.clone());
 
     Ok(next.run(request).await)
 }

@@ -463,10 +463,21 @@ impl TTSProvider {
                         }
                         debug!("TTS dispatcher finished processing request with {} chunks", chunk_count);
 
-                        // Notify completion for this entry
-                        if let Some(cb) = cb_opt.as_ref() {
-                            debug!("TTS dispatcher notifying completion");
-                            cb.on_complete().await;
+                        // Only notify completion if this is the last request in the queue
+                        // This ensures that multiple consecutive speak() calls only trigger
+                        // one completion event after all audio has been generated
+                        let is_last_request = {
+                            let queue = pending_queue.lock().await;
+                            queue.is_empty()
+                        };
+
+                        if is_last_request {
+                            if let Some(cb) = cb_opt.as_ref() {
+                                debug!("TTS dispatcher notifying completion (last request in queue)");
+                                cb.on_complete().await;
+                            }
+                        } else {
+                            debug!("TTS dispatcher skipping completion (more requests in queue)");
                         }
                     } => {}
                 }

@@ -1,18 +1,14 @@
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     middleware,
     routing::get,
-    Router,
 };
 use base64::Engine;
 use tower::ServiceExt;
 
-use sayna::{
-    config::ServerConfig,
-    middlewares::auth::auth_middleware,
-    state::AppState,
-};
+use sayna::{config::ServerConfig, middlewares::auth::auth_middleware, state::AppState};
 
 /// Helper handler for testing
 async fn protected_handler() -> &'static str {
@@ -174,7 +170,7 @@ async fn test_decryption_fails_with_wrong_secret() {
     // For now, we'll test with a properly formatted but incorrectly encrypted token
     let token = base64::engine::general_purpose::STANDARD.encode(
         &[
-            vec![1u8], // version
+            vec![1u8],     // version
             vec![0u8; 16], // salt
             vec![0u8; 12], // iv
             vec![0u8; 10], // ciphertext (arbitrary length)

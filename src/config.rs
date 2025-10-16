@@ -61,8 +61,7 @@ impl ServerConfig {
             .or(Some(30 * 24 * 60 * 60)); // 1 month (30 days) default
 
         // Authentication configuration from env
-        let auth_decryption_key =
-            env::var("AUTH_DECRYPTION_KEY").unwrap_or_else(|_| String::new());
+        let auth_decryption_key = env::var("AUTH_DECRYPTION_KEY").unwrap_or_else(|_| String::new());
 
         Ok(ServerConfig {
             host,
