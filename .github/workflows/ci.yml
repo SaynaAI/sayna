@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: turn-detect
+            args: " --features turn-detect"
+          - name: noise-filter
+            args: " --features noise-filter"
+          - name: noise-filter+turn-detect
+            args: " --features noise-filter,turn-detect"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Build ${{ matrix.name }}
+        run: cargo build --locked${{ matrix.args }}
+      - name: Test ${{ matrix.name }}
+        run: cargo test --locked${{ matrix.args }}
