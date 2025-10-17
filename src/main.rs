@@ -1,12 +1,11 @@
 use std::env;
 
 use axum::Router;
-use axum::middleware;
 use tokio::net::TcpListener;
 
 use anyhow::anyhow;
 
-use sayna::{ServerConfig, init, middlewares::auth::auth_middleware, routes, state::AppState};
+use sayna::{ServerConfig, init, routes, state::AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,15 +51,8 @@ async fn main() -> anyhow::Result<()> {
     let public_routes =
         Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
-    // Create protected routes with auth middleware
-    // All routes except "/" require authentication
-    let protected_router = base_router.layer(middleware::from_fn_with_state(
-        app_state.clone(),
-        auth_middleware,
-    ));
-
-    // Combine public and protected routes
-    let app = public_routes.merge(protected_router).with_state(app_state);
+    // Combine public and application routes
+    let app = public_routes.merge(base_router).with_state(app_state);
 
     // Create listener
     let listener = TcpListener::bind(&address).await?;

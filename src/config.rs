@@ -22,9 +22,6 @@ pub struct ServerConfig {
     // Cache configuration (filesystem or memory)
     pub cache_path: Option<PathBuf>, // if None, use in-memory cache
     pub cache_ttl_seconds: Option<u64>,
-
-    // Authentication configuration
-    pub auth_decryption_key: String, // if empty, auth is disabled
 }
 
 impl ServerConfig {
@@ -60,9 +57,6 @@ impl ServerConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .or(Some(30 * 24 * 60 * 60)); // 1 month (30 days) default
 
-        // Authentication configuration from env
-        let auth_decryption_key = env::var("AUTH_DECRYPTION_KEY").unwrap_or_else(|_| String::new());
-
         Ok(ServerConfig {
             host,
             port,
@@ -78,7 +72,6 @@ impl ServerConfig {
             recording_s3_secret_key,
             cache_path,
             cache_ttl_seconds,
-            auth_decryption_key,
         })
     }
 
@@ -140,7 +133,6 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_decryption_key: String::new(),
         };
 
         let result = config.get_api_key("deepgram");
@@ -165,7 +157,6 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_decryption_key: String::new(),
         };
 
         let result = config.get_api_key("elevenlabs");
@@ -190,7 +181,6 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_decryption_key: String::new(),
         };
 
         let result = config.get_api_key("deepgram");
@@ -218,7 +208,6 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_decryption_key: String::new(),
         };
 
         let result = config.get_api_key("unsupported_provider");
@@ -246,7 +235,6 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_decryption_key: String::new(),
         };
 
         // Test uppercase

@@ -25,7 +25,6 @@ async fn test_websocket_voice_config() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
-        auth_decryption_key: String::new(),
     };
 
     // Create application state
@@ -178,7 +177,6 @@ async fn test_websocket_invalid_message() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
-        auth_decryption_key: String::new(),
     };
 
     // Create application state
