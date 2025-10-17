@@ -247,10 +247,6 @@ docker run -p 3001:3001 --env-file .env sayna
 3. Add tests for new features
 4. Ensure `cargo fmt` and `cargo clippy` pass
 
-## License
-
-[Your License Here]
-
 ## Support
 
-For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/yourusername/sayna).
+For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/SaynaAI/sayna).
