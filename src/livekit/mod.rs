@@ -29,7 +29,7 @@
 //!         room_name: "your-room".to_string(),
 //!         sample_rate: 24000,
 //!         channels: 1,
-//!         enable_noise_filter: true,
+//!         enable_noise_filter: cfg!(feature = "noise-filter"),
 //!     };
 //!
 //!     // Create and initialize manager
@@ -108,12 +108,12 @@ mod tests {
             room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
-            enable_noise_filter: true,
+            enable_noise_filter: cfg!(feature = "noise-filter"),
         };
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
-        assert!(config.enable_noise_filter);
+        assert_eq!(config.enable_noise_filter, cfg!(feature = "noise-filter"));
     }
 
     #[test]

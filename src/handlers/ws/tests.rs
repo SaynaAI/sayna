@@ -444,7 +444,10 @@ fn test_livekit_ws_config_conversion() {
     assert_eq!(livekit_config.room_name, "test-room");
     assert_eq!(livekit_config.sample_rate, 22050);
     assert_eq!(livekit_config.channels, 1);
-    assert!(livekit_config.enable_noise_filter); // Should be true by default
+    assert_eq!(
+        livekit_config.enable_noise_filter,
+        cfg!(feature = "noise-filter")
+    );
 }
 
 #[test]
