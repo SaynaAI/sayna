@@ -3,6 +3,19 @@ name = "sayna"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+turn-detect = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+noise-filter = [
+    "dep:deep_filter",
+    "dep:tract-core",
+    "dep:tract-onnx",
+    "dep:tract-pulse",
+    "dep:tract-hir",
+    "dep:ndarray",
+    "dep:num_cpus",
+]
+
 [dependencies]
 async-trait = "0.1.88"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -61,18 +74,18 @@ livekit = "=0.7.18"
 livekit-api = "=0.4.6"
 livekit-protocol = "=0.4.0"
 
-deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model-ll"] }
-tract-core = "=0.21.5"
-tract-onnx = "=0.21.5"
-tract-pulse = "=0.21.5"
-tract-hir = "=0.21.5"
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model-ll"], optional = true }
+tract-core = { version = "=0.21.5", optional = true }
+tract-onnx = { version = "=0.21.5", optional = true }
+tract-pulse = { version = "=0.21.5", optional = true }
+tract-hir = { version = "=0.21.5", optional = true }
 time = ">=0.3.35"
-ndarray = "0.15.6"
-num_cpus = "1.17.0"
+ndarray = { version = "0.15.6", optional = true }
+num_cpus = { version = "1.17.0", optional = true }
 
 # Turn detection dependencies
-ort = { version = "1.16", features = ["load-dynamic", "download-binaries"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+ort = { version = "1.16", features = ["load-dynamic", "download-binaries"], optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 sha2 = "0.10"
 anyhow = "1.0"
 

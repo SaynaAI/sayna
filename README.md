@@ -7,7 +7,7 @@ A high-performance real-time voice processing server built in Rust that provides
 - **Unified Voice API**: Single interface for multiple STT/TTS providers
 - **Real-time Processing**: WebSocket-based bidirectional audio streaming
 - **LiveKit Integration**: WebRTC audio streaming with room-based communication
-- **Advanced Noise Filtering**: DeepFilterNet integration for superior audio quality
+- **Advanced Noise Filtering**: Optional DeepFilterNet integration (`noise-filter` feature)
 - **Provider Flexibility**: Pluggable architecture supporting multiple providers
   - Deepgram (STT/TTS)
   - ElevenLabs (TTS)
@@ -55,6 +55,33 @@ cargo run
 ```
 
 The server will start on `http://localhost:3001`
+
+## Feature Toggles
+
+Sayna exposes two Cargo features that gate heavyweight subsystems. Both are enabled by default and can be combined.
+
+- `turn-detect`: ONNX-based speech turn detection and asset preparation
+- `noise-filter`: DeepFilterNet noise suppression pipeline
+
+Example commands:
+
+```bash
+# Run with default features
+cargo run
+
+# Run with turn detection
+cargo run --features turn-detect
+
+# Run with noise filter
+cargo run --features noise-filter
+
+# Run with both features
+cargo run --features turn-detect,noise-filter
+```
+
+Features are compile-time only. Disable them when you need smaller builds or want to avoid optional dependencies.
+
+`sayna init` downloads turn-detection assets when the `turn-detect` feature is enabled. Without that feature the command exits early with an explanatory error, and runtime logs mention the timer-based fallback.
 
 ### Running Without API Keys (Audio-Disabled Mode)
 
@@ -131,8 +158,8 @@ This mode is useful for:
 1. Client establishes WebSocket connection to `/ws`
 2. Client sends configuration with provider selection
 3. Audio processing pipeline:
-   - **STT**: Audio ’ Noise Filter (optional) ’ STT Provider ’ Text
-   - **TTS**: Text ’ TTS Provider ’ Audio ’ Client
+   - **STT**: Audio ï¿½ Noise Filter (optional) ï¿½ STT Provider ï¿½ Text
+   - **TTS**: Text ï¿½ TTS Provider ï¿½ Audio ï¿½ Client
 4. LiveKit mode enables room-based audio streaming
 
 ## Development

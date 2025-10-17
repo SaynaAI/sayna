@@ -102,9 +102,9 @@ impl LiveKitWebSocketConfig {
             sample_rate: tts_config.sample_rate.unwrap_or(24000),
             // Assume mono audio for TTS (1 channel)
             channels: 1,
-            // Enable noise filter by default for better audio quality
+            // Enable noise filter by default when compiled with the optional feature
             // Can be disabled via config if lower latency is needed
-            enable_noise_filter: true,
+            enable_noise_filter: cfg!(feature = "noise-filter"),
         }
     }
 }

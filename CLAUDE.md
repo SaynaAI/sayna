@@ -37,6 +37,12 @@ docker build -t sayna .
 cargo run
 ```
 
+### Feature Flags
+- `turn-detect` (default): ONNX-based turn detection. Required for `sayna init`.
+- `noise-filter` (default): DeepFilterNet noise suppression. Disable to reduce dependencies.
+
+Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect`.
+
 ## High-Level Architecture
 
 ### Project-Specific Rules and Guidelines

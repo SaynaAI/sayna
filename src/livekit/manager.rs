@@ -178,7 +178,7 @@ impl LiveKitManager {
     ///     room_name: "your-room".to_string(),
     ///     sample_rate: 24000,
     ///     channels: 1,
-    ///     enable_noise_filter: true,
+    ///     enable_noise_filter: cfg!(feature = "noise-filter"),
     /// };
     ///
     /// let mut manager = LiveKitManager::new();
@@ -266,7 +266,7 @@ mod tests {
             room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
-            enable_noise_filter: true,
+            enable_noise_filter: cfg!(feature = "noise-filter"),
         };
 
         // Try to initialize (this will fail with mock config, but we can still test the clear_audio logic)
@@ -309,7 +309,7 @@ mod tests {
             room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
-            enable_noise_filter: true,
+            enable_noise_filter: cfg!(feature = "noise-filter"),
         };
 
         // Try initialization (will fail with mock config)
