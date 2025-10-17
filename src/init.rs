@@ -43,8 +43,10 @@ pub async fn run() -> Result<()> {
         .context("CACHE_PATH environment variable must be set to run `sayna init`")?
         .clone();
 
-    let mut turn_config = TurnDetectorConfig::default();
-    turn_config.cache_path = Some(cache_path.clone());
+    let turn_config = TurnDetectorConfig {
+        cache_path: Some(cache_path.clone()),
+        ..Default::default()
+    };
 
     tracing::info!(
         "Preparing turn detector assets using cache path: {:?}",

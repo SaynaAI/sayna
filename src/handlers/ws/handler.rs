@@ -174,8 +174,9 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     {
         let state_guard = state.read().await;
         if let Some(voice_manager) = &state_guard.voice_manager {
-            if let Err(e) = voice_manager.stop().await {
-                error!("Failed to stop voice manager: {}", e);
+            match voice_manager.stop().await {
+                Ok(_) => {}
+                Err(e) => error!("Failed to stop voice manager: {}", e),
             }
         }
 

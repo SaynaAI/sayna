@@ -168,10 +168,9 @@ pub async fn speak_handler(
     };
 
     // Set the request manager from state if available
-    if let Some(provider) = tts_provider.get_provider() {
-        if let Some(req_manager) = state.get_tts_req_manager(&tts_config.provider).await {
-            provider.set_req_manager(req_manager).await;
-        }
+    let req_manager = state.get_tts_req_manager(&tts_config.provider).await;
+    if let (Some(provider), Some(req_manager)) = (tts_provider.get_provider(), req_manager) {
+        provider.set_req_manager(req_manager).await;
     }
 
     // Connect to provider

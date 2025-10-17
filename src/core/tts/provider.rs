@@ -322,11 +322,10 @@ impl TTSProvider {
                 }
 
                 // Store the full audio in cache if provided
-                if let Some((cache, key)) = cache_and_key {
-                    if let Some(full_audio) = full_audio {
-                        if let Err(e) = cache.put(key, full_audio).await {
-                            error!("Failed to cache TTS audio: {:?}", e);
-                        }
+                if let Some(((cache, key), full_audio)) = cache_and_key.zip(full_audio) {
+                    match cache.put(key, full_audio).await {
+                        Ok(_) => {}
+                        Err(e) => error!("Failed to cache TTS audio: {:?}", e),
                     }
                 }
             }
@@ -514,8 +513,10 @@ impl TTSProvider {
         if self.req_manager.read().await.is_none() {
             // Create request manager with config-based settings
             let pool_size = config.request_pool_size.unwrap_or(4);
-            let mut req_config = ReqManagerConfig::default();
-            req_config.max_concurrent_requests = pool_size;
+            let mut req_config = ReqManagerConfig {
+                max_concurrent_requests: pool_size,
+                ..Default::default()
+            };
 
             // Apply timeout configurations
             if let Some(connect_timeout) = config.connection_timeout {
@@ -750,10 +751,13 @@ impl TTSProvider {
 impl Drop for TTSProvider {
     fn drop(&mut self) {
         // Best-effort cancel dispatcher and tasks without awaiting
-        if let Ok(mut disp) = self.dispatcher_task.try_lock() {
-            if let Some(handle) = disp.take() {
-                handle.abort();
-            }
+        if let Some(handle) = self
+            .dispatcher_task
+            .try_lock()
+            .ok()
+            .and_then(|mut disp| disp.take())
+        {
+            handle.abort();
         }
         if let Ok(mut tasks) = self.request_tasks.try_lock() {
             tasks.abort_all();

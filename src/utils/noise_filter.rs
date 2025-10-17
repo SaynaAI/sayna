@@ -173,12 +173,13 @@ pub mod implementation {
         skip_counter: &mut usize,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         // Early validation to avoid unnecessary processing
-        if pcm.len() < 2 || pcm.len() % 2 != 0 {
+        let pcm_len = pcm.len();
+        if pcm_len < 2 || !pcm_len.is_multiple_of(2) {
             return Ok(pcm.to_owned());
         }
 
         // Pre-allocate with exact capacity for better memory efficiency
-        let sample_count = pcm.len() / 2;
+        let sample_count = pcm_len / 2;
         let mut wav = Vec::with_capacity(sample_count);
 
         // Convert PCM bytes to float samples

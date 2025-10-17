@@ -23,11 +23,10 @@ pub struct TurnDetector {
 
 impl TurnDetector {
     pub async fn new(model_path: Option<&Path>) -> Result<Self> {
-        let mut config = TurnDetectorConfig::default();
-
-        if let Some(path) = model_path {
-            config.model_path = Some(path.to_path_buf());
-        }
+        let config = TurnDetectorConfig {
+            model_path: model_path.map(Path::to_path_buf),
+            ..Default::default()
+        };
 
         Self::with_config(config).await
     }
@@ -166,6 +165,12 @@ pub struct TurnDetectorBuilder {
     config: TurnDetectorConfig,
 }
 
+impl Default for TurnDetectorBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TurnDetectorBuilder {
     pub fn new() -> Self {
         Self {
@@ -237,18 +242,25 @@ mod tests {
     #[test]
     fn test_threshold_clamping() {
         // Test threshold clamping with a simple config
-        let mut config = TurnDetectorConfig::default();
-
         // Test clamping above 1.0
-        config.threshold = 1.5f32.clamp(0.0, 1.0);
+        let config = TurnDetectorConfig {
+            threshold: 1.5f32.clamp(0.0, 1.0),
+            ..Default::default()
+        };
         assert_eq!(config.threshold, 1.0);
 
         // Test clamping below 0.0
-        config.threshold = (-0.5f32).clamp(0.0, 1.0);
+        let config = TurnDetectorConfig {
+            threshold: (-0.5f32).clamp(0.0, 1.0),
+            ..Default::default()
+        };
         assert_eq!(config.threshold, 0.0);
 
         // Test normal value
-        config.threshold = 0.75f32.clamp(0.0, 1.0);
+        let config = TurnDetectorConfig {
+            threshold: 0.75f32.clamp(0.0, 1.0),
+            ..Default::default()
+        };
         assert_eq!(config.threshold, 0.75);
     }
 }

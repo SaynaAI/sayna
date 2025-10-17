@@ -18,17 +18,17 @@ use super::{
 use crate::AppError;
 
 /// Context struct for process_operation to avoid too many arguments
-struct OperationContext {
-    room: Arc<Mutex<Option<Room>>>,
-    audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
-    is_connected: Arc<Mutex<bool>>,
-    config: LiveKitConfig,
-    local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
-    active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    audio_callback: Option<AudioCallback>,
-    data_callback: Option<DataCallback>,
-    participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
+pub(super) struct OperationContext {
+    pub(super) room: Arc<Mutex<Option<Room>>>,
+    pub(super) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    pub(super) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+    pub(super) is_connected: Arc<Mutex<bool>>,
+    pub(super) config: LiveKitConfig,
+    pub(super) local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    pub(super) active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    pub(super) audio_callback: Option<AudioCallback>,
+    pub(super) data_callback: Option<DataCallback>,
+    pub(super) participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
 }
 
 impl LiveKitClient {
@@ -100,7 +100,7 @@ impl LiveKitClient {
                     }
 
                     operation_count += 1;
-                    if operation_count % 100 == 0 {
+                    if operation_count.is_multiple_of(100) {
                         stats_guard.log_stats();
                     }
                 }
@@ -190,19 +190,7 @@ impl LiveKitClient {
             }
             LiveKitOperation::Reconnect { response_tx } => {
                 warn!("Manual reconnect requested (should be rare with keep-alive)");
-                let result = LiveKitClient::process_reconnect(
-                    &ctx.room,
-                    &ctx.audio_source,
-                    &ctx.local_track_publication,
-                    &ctx.is_connected,
-                    &ctx.config,
-                    &ctx.audio_queue,
-                    &ctx.active_streams,
-                    &ctx.audio_callback,
-                    &ctx.data_callback,
-                    &ctx.participant_disconnect_callback,
-                )
-                .await;
+                let result = LiveKitClient::process_reconnect(ctx).await;
 
                 // Handle event handler restart if reconnect succeeded
                 let final_result = match result {

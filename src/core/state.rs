@@ -100,8 +100,10 @@ impl CoreState {
         let start = Instant::now();
 
         // Create config with cache path
-        let mut config = TurnDetectorConfig::default();
-        config.cache_path = cache_path.cloned();
+        let config = TurnDetectorConfig {
+            cache_path: cache_path.cloned(),
+            ..Default::default()
+        };
 
         // Add a timeout to prevent hanging forever during initialization
         let init_timeout = Duration::from_secs(30);
@@ -169,7 +171,7 @@ impl CoreState {
         debug!("Starting Turn Detector warmup with sample inputs");
 
         // Sample inputs that cover common speech patterns
-        let warmup_samples = vec![
+        let warmup_samples = [
             "Hello",
             "How are you?",
             "What is the weather like today?",
