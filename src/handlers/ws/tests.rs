@@ -268,23 +268,29 @@ fn test_incoming_message_serialization() {
 
 #[test]
 fn test_outgoing_message_serialization() {
-    // Test ready message without token
+    // Test ready message without LiveKit
     let ready_msg = OutgoingMessage::Ready {
-        livekit_token: None,
+        livekit_room_name: None,
         livekit_url: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
     };
     let json = serde_json::to_string(&ready_msg).unwrap();
     assert!(json.contains("\"type\":\"ready\""));
 
-    // Test ready message with token
-    let ready_msg_with_token = OutgoingMessage::Ready {
-        livekit_token: Some("test_token".to_string()),
-        livekit_url: Some("test_url".to_string()),
+    // Test ready message with LiveKit room info
+    let ready_msg_with_livekit = OutgoingMessage::Ready {
+        livekit_room_name: Some("test-room".to_string()),
+        livekit_url: Some("ws://localhost:7880".to_string()),
+        sayna_participant_identity: Some("sayna-ai".to_string()),
+        sayna_participant_name: Some("Sayna AI".to_string()),
     };
-    let json_with_token = serde_json::to_string(&ready_msg_with_token).unwrap();
-    assert!(json_with_token.contains("\"type\":\"ready\""));
-    assert!(json_with_token.contains("\"livekit_token\":\"test_token\""));
-    assert!(json_with_token.contains("\"livekit_url\":\"test_url\""));
+    let json_with_livekit = serde_json::to_string(&ready_msg_with_livekit).unwrap();
+    assert!(json_with_livekit.contains("\"type\":\"ready\""));
+    assert!(json_with_livekit.contains("\"livekit_room_name\":\"test-room\""));
+    assert!(json_with_livekit.contains("\"livekit_url\":\"ws://localhost:7880\""));
+    assert!(json_with_livekit.contains("\"sayna_participant_identity\":\"sayna-ai\""));
+    assert!(json_with_livekit.contains("\"sayna_participant_name\":\"Sayna AI\""));
 
     // Test STT result message
     let stt_msg = OutgoingMessage::STTResult {
@@ -407,6 +413,9 @@ fn test_livekit_ws_config_serialization() {
         room_name: "test-room".to_string(),
         enable_recording: true,
         recording_file_key: Some("test-file-key".to_string()),
+        sayna_participant_identity: Some("sayna-ai".to_string()),
+        sayna_participant_name: Some("Sayna AI".to_string()),
+        listen_participants: vec![],
     };
 
     let json = serde_json::to_string(&livekit_config).unwrap();
@@ -421,6 +430,9 @@ fn test_livekit_ws_config_conversion() {
         room_name: "test-room".to_string(),
         enable_recording: false,
         recording_file_key: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec![],
     };
 
     let tts_ws_config = TTSWebSocketConfig {
@@ -451,6 +463,144 @@ fn test_livekit_ws_config_conversion() {
 }
 
 #[test]
+fn test_livekit_config_with_empty_listen_participants() {
+    let livekit_ws_config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        recording_file_key: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec![],
+    };
+
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "deepgram".to_string(),
+        voice_id: Some("aura-luna-en".to_string()),
+        speaking_rate: Some(1.0),
+        audio_format: Some("pcm".to_string()),
+        sample_rate: Some(22050),
+        connection_timeout: Some(30),
+        request_timeout: Some(60),
+        model: "".to_string(),
+        pronunciations: Vec::new(),
+    };
+
+    let livekit_config = livekit_ws_config.to_livekit_config(
+        "test-token".to_string(),
+        &tts_ws_config,
+        "wss://test.com",
+    );
+
+    assert!(
+        livekit_config.listen_participants.is_empty(),
+        "Empty listen_participants should be preserved"
+    );
+}
+
+#[test]
+fn test_livekit_config_with_listen_participants() {
+    let livekit_ws_config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        recording_file_key: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec!["user-123".to_string(), "user-456".to_string()],
+    };
+
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "deepgram".to_string(),
+        voice_id: Some("aura-luna-en".to_string()),
+        speaking_rate: Some(1.0),
+        audio_format: Some("pcm".to_string()),
+        sample_rate: Some(22050),
+        connection_timeout: Some(30),
+        request_timeout: Some(60),
+        model: "".to_string(),
+        pronunciations: Vec::new(),
+    };
+
+    let livekit_config = livekit_ws_config.to_livekit_config(
+        "test-token".to_string(),
+        &tts_ws_config,
+        "wss://test.com",
+    );
+
+    assert_eq!(
+        livekit_config.listen_participants.len(),
+        2,
+        "listen_participants should be preserved"
+    );
+    assert!(
+        livekit_config
+            .listen_participants
+            .contains(&"user-123".to_string())
+    );
+    assert!(
+        livekit_config
+            .listen_participants
+            .contains(&"user-456".to_string())
+    );
+}
+
+#[test]
+fn test_livekit_ws_config_serialization_with_listen_participants() {
+    let config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        recording_file_key: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec!["user-1".to_string(), "user-2".to_string()],
+    };
+
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(json.contains("\"listen_participants\":[\"user-1\",\"user-2\"]"));
+}
+
+#[test]
+fn test_livekit_ws_config_serialization_omits_empty_listen_participants() {
+    let config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        recording_file_key: None,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec![],
+    };
+
+    let json = serde_json::to_string(&config).unwrap();
+    // Should not include listen_participants when empty (skip_serializing_if)
+    assert!(!json.contains("listen_participants"));
+}
+
+#[test]
+fn test_livekit_ws_config_deserialization_with_listen_participants() {
+    let json = r#"{
+        "room_name": "test-room",
+        "enable_recording": false,
+        "listen_participants": ["user-1", "user-2"]
+    }"#;
+
+    let config: LiveKitWebSocketConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(config.listen_participants.len(), 2);
+    assert!(config.listen_participants.contains(&"user-1".to_string()));
+    assert!(config.listen_participants.contains(&"user-2".to_string()));
+}
+
+#[test]
+fn test_livekit_ws_config_deserialization_without_listen_participants() {
+    let json = r#"{
+        "room_name": "test-room",
+        "enable_recording": false
+    }"#;
+
+    let config: LiveKitWebSocketConfig = serde_json::from_str(json).unwrap();
+    // Should default to empty vec
+    assert!(config.listen_participants.is_empty());
+}
+
+#[test]
 fn test_incoming_message_config_with_livekit() {
     let config_msg = IncomingMessage::Config {
         audio: Some(true),
@@ -478,6 +628,9 @@ fn test_incoming_message_config_with_livekit() {
             room_name: "test-room".to_string(),
             enable_recording: true,
             recording_file_key: Some("test-file-key".to_string()),
+            sayna_participant_identity: None,
+            sayna_participant_name: None,
+            listen_participants: vec![],
         }),
     };
 
@@ -768,6 +921,9 @@ fn test_config_message_with_livekit_routing() {
             room_name: "test-room".to_string(),
             enable_recording: false,
             recording_file_key: None,
+            sayna_participant_identity: None,
+            sayna_participant_name: None,
+            listen_participants: vec![],
         }),
     };
 
@@ -952,6 +1108,9 @@ fn test_config_message_audio_disabled() {
             room_name: "test-room".to_string(),
             enable_recording: false,
             recording_file_key: None,
+            sayna_participant_identity: None,
+            sayna_participant_name: None,
+            listen_participants: vec![],
         }),
     };
 

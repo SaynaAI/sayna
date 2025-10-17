@@ -12,6 +12,7 @@ fn create_test_config() -> LiveKitConfig {
         sample_rate: 24000,
         channels: 1,
         enable_noise_filter: cfg!(feature = "noise-filter"),
+        listen_participants: vec![],
     }
 }
 

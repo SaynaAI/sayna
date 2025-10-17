@@ -28,6 +28,7 @@ impl LiveKitClient {
     /// #     sample_rate: 24000,
     /// #     channels: 1,
     /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
+    /// #     listen_participants: vec![],
     /// # });
     /// client.set_audio_callback(|audio_data: Vec<u8>| {
     ///     println!("Received {} bytes of audio", audio_data.len());
@@ -59,6 +60,7 @@ impl LiveKitClient {
     /// #     sample_rate: 24000,
     /// #     channels: 1,
     /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
+    /// #     listen_participants: vec![],
     /// # });
     /// client.set_data_callback(|data_message: DataMessage| {
     ///     println!("Received data from {}: {} bytes",

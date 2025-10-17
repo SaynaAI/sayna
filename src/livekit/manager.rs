@@ -179,6 +179,7 @@ impl LiveKitManager {
     ///     sample_rate: 24000,
     ///     channels: 1,
     ///     enable_noise_filter: cfg!(feature = "noise-filter"),
+    ///     listen_participants: vec![],
     /// };
     ///
     /// let mut manager = LiveKitManager::new();
@@ -267,6 +268,7 @@ mod tests {
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: cfg!(feature = "noise-filter"),
+            listen_participants: vec![],
         };
 
         // Try to initialize (this will fail with mock config, but we can still test the clear_audio logic)
@@ -310,6 +312,7 @@ mod tests {
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: cfg!(feature = "noise-filter"),
+            listen_participants: vec![],
         };
 
         // Try initialization (will fail with mock config)

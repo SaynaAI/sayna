@@ -28,10 +28,10 @@
 //!     handler.create_room("my-room").await?;
 //!
 //!     // Generate user token
-//!     let user_token = handler.user_token("my-room")?;
+//!     let user_token = handler.user_token("my-room", "user-123", "Alice")?;
 //!
 //!     // Generate agent token with admin privileges
-//!     let agent_token = handler.agent_token("my-room")?;
+//!     let agent_token = handler.agent_token("my-room", "sayna-ai", "Sayna AI")?;
 //!
 //!     Ok(())
 //! }
@@ -160,6 +160,8 @@ impl LiveKitRoomHandler {
     ///
     /// # Arguments
     /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Unique identifier for the user participant
+    /// * `name` - Display name for the user participant
     ///
     /// # Returns
     /// * `Result<String, LiveKitError>` - JWT token string for user authorization
@@ -176,14 +178,19 @@ impl LiveKitRoomHandler {
     ///     None,
     /// )?;
     ///
-    /// let token = handler.user_token("my-room")?;
+    /// let token = handler.user_token("my-room", "user-123", "Alice")?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn user_token(&self, room_name: &str) -> Result<String, LiveKitError> {
+    pub fn user_token(
+        &self,
+        room_name: &str,
+        identity: &str,
+        name: &str,
+    ) -> Result<String, LiveKitError> {
         let token = AccessToken::with_api_key(&self.api_key, &self.api_secret)
-            .with_identity("user")
-            .with_name("user")
+            .with_identity(identity)
+            .with_name(name)
             .with_grants(self.token_permissions(room_name, false))
             .to_jwt()
             .map_err(|e| {
@@ -197,6 +204,8 @@ impl LiveKitRoomHandler {
     ///
     /// # Arguments
     /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Unique identifier for the agent participant
+    /// * `name` - Display name for the agent participant
     ///
     /// # Returns
     /// * `Result<String, LiveKitError>` - JWT token string for agent authorization
@@ -213,14 +222,19 @@ impl LiveKitRoomHandler {
     ///     None,
     /// )?;
     ///
-    /// let token = handler.agent_token("my-room")?;
+    /// let token = handler.agent_token("my-room", "sayna-ai", "Sayna AI")?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn agent_token(&self, room_name: &str) -> Result<String, LiveKitError> {
+    pub fn agent_token(
+        &self,
+        room_name: &str,
+        identity: &str,
+        name: &str,
+    ) -> Result<String, LiveKitError> {
         let token = AccessToken::with_api_key(&self.api_key, &self.api_secret)
-            .with_identity("ai")
-            .with_name("ai")
+            .with_identity(identity)
+            .with_name(name)
             .with_grants(self.token_permissions(room_name, true))
             .to_jwt()
             .map_err(|e| {
@@ -491,7 +505,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handler.user_token("test-room");
+        let result = handler.user_token("test-room", "test-user", "Test User");
         assert!(result.is_ok());
         let token = result.unwrap();
         assert!(!token.is_empty());
@@ -507,7 +521,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handler.agent_token("test-room");
+        let result = handler.agent_token("test-room", "test-agent", "Test Agent");
         assert!(result.is_ok());
         let token = result.unwrap();
         assert!(!token.is_empty());

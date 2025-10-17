@@ -110,6 +110,19 @@ impl LiveKitClient {
                     participant.identity()
                 );
 
+                // Check if we should process this participant's audio
+                if !config.listen_participants.is_empty()
+                    && !config
+                        .listen_participants
+                        .contains(&participant.identity().to_string())
+                {
+                    debug!(
+                        "Ignoring audio track from participant {} (not in listen_participants list)",
+                        participant.identity()
+                    );
+                    return Ok(());
+                }
+
                 match track {
                     RemoteTrack::Audio(audio_track) => {
                         debug!(
@@ -253,21 +266,32 @@ impl LiveKitClient {
                 participant,
                 ..
             } => {
+                let participant_identity = participant
+                    .as_ref()
+                    .map(|p| p.identity().to_string())
+                    .unwrap_or_else(|| "server".to_string());
+
                 debug!(
                     "Data received from participant: {}, {} bytes",
-                    participant
-                        .as_ref()
-                        .map(|p| p.identity().to_string())
-                        .unwrap_or_else(|| "server".to_string()),
+                    participant_identity,
                     payload.len()
                 );
 
+                // Check if we should process this participant's data messages
+                if !config.listen_participants.is_empty()
+                    && participant.is_some()
+                    && !config.listen_participants.contains(&participant_identity)
+                {
+                    debug!(
+                        "Ignoring data message from participant {} (not in listen_participants list)",
+                        participant_identity
+                    );
+                    return Ok(());
+                }
+
                 if let Some(callback) = data_callback {
                     let data_message = DataMessage {
-                        participant_identity: participant
-                            .as_ref()
-                            .map(|p| p.identity().to_string())
-                            .unwrap_or_else(|| "server".to_string()),
+                        participant_identity,
                         data: payload.to_vec(),
                         topic,
                         timestamp: std::time::SystemTime::now()

@@ -1,0 +1,162 @@
+//! LiveKit token generation handler
+//!
+//! This module provides REST API endpoints for LiveKit token generation,
+//! allowing multiple participants to join the same LiveKit room.
+
+use axum::{
+    extract::{Json, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{error, info};
+
+use crate::state::AppState;
+
+/// Request body for generating a LiveKit token
+///
+/// # Example
+/// ```json
+/// {
+///   "room_name": "conversation-room-123",
+///   "participant_name": "Alice Smith",
+///   "participant_identity": "user-alice-456"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct TokenRequest {
+    /// The LiveKit room name to generate a token for
+    pub room_name: String,
+    /// Display name for the participant (e.g., "John Doe")
+    pub participant_name: String,
+    /// Unique identifier for the participant (e.g., "user-123")
+    pub participant_identity: String,
+}
+
+/// Response containing the generated LiveKit token
+///
+/// # Example
+/// ```json
+/// {
+///   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+///   "room_name": "conversation-room-123",
+///   "participant_identity": "user-alice-456",
+///   "livekit_url": "ws://localhost:7880"
+/// }
+/// ```
+#[derive(Debug, Serialize)]
+pub struct TokenResponse {
+    /// The generated JWT token for LiveKit
+    pub token: String,
+    /// Echo back the room name for client confirmation
+    pub room_name: String,
+    /// Echo back the participant identity for client confirmation
+    pub participant_identity: String,
+    /// The LiveKit server URL to connect to
+    pub livekit_url: String,
+}
+
+/// Handler for POST /livekit/token endpoint
+///
+/// Generates a LiveKit JWT token for a participant to join a specific room.
+///
+/// # Arguments
+/// * `state` - Shared application state containing LiveKit configuration
+/// * `request` - Token request with room name and participant details
+///
+/// # Returns
+/// * `Response` - JSON response with token or error status
+///
+/// # Errors
+/// * 400 Bad Request - Invalid request data (empty fields)
+/// * 500 Internal Server Error - LiveKit service not configured or token generation failed
+pub async fn generate_token(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TokenRequest>,
+) -> Response {
+    info!(
+        "Token generation request - room: {}, participant: {} ({})",
+        request.room_name, request.participant_name, request.participant_identity
+    );
+
+    // Validate that LiveKit handler is configured
+    let room_handler = match &state.livekit_room_handler {
+        Some(handler) => handler,
+        None => {
+            error!("LiveKit service not configured");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "LiveKit service not configured"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate request data
+    if request.room_name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid request: room_name cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    if request.participant_name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid request: participant_name cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    if request.participant_identity.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid request: participant_identity cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    // Generate token using custom participant identity and name
+    let token = match room_handler.user_token(
+        &request.room_name,
+        &request.participant_identity,
+        &request.participant_name,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to generate LiveKit token: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to generate LiveKit token: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    info!(
+        "Successfully generated token for room: {}",
+        request.room_name
+    );
+
+    // Build response
+    let response = TokenResponse {
+        token,
+        room_name: request.room_name,
+        participant_identity: request.participant_identity,
+        livekit_url: room_handler.url().to_string(),
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}

@@ -117,31 +117,32 @@ pub async fn handle_config_message(
     }
 
     // Initialize LiveKit client if configured
-    let (livekit_client, livekit_token) = if let Some(livekit_ws_config) = livekit_ws_config {
-        match initialize_livekit_client(
-            livekit_ws_config,
-            tts_ws_config.as_ref(),
-            &app_state.config.livekit_url,
-            voice_manager.as_ref(),
-            message_tx,
-            app_state.livekit_room_handler.as_ref(),
-        )
-        .await
-        {
-            Some((client, operation_queue, user_token, room_name, egress_id)) => {
-                // Store in connection state
-                let mut state_guard = state.write().await;
-                state_guard.livekit_client = Some(client.clone());
-                state_guard.livekit_operation_queue = operation_queue;
-                state_guard.livekit_room_name = Some(room_name);
-                state_guard.recording_egress_id = egress_id;
-                (Some(client), user_token)
+    let (livekit_client, livekit_room_name, sayna_identity, sayna_name) =
+        if let Some(livekit_ws_config) = livekit_ws_config {
+            match initialize_livekit_client(
+                livekit_ws_config,
+                tts_ws_config.as_ref(),
+                &app_state.config.livekit_url,
+                voice_manager.as_ref(),
+                message_tx,
+                app_state.livekit_room_handler.as_ref(),
+            )
+            .await
+            {
+                Some((client, operation_queue, room_name, egress_id, identity, name)) => {
+                    // Store in connection state
+                    let mut state_guard = state.write().await;
+                    state_guard.livekit_client = Some(client.clone());
+                    state_guard.livekit_operation_queue = operation_queue;
+                    state_guard.livekit_room_name = Some(room_name.clone());
+                    state_guard.recording_egress_id = egress_id;
+                    (Some(client), Some(room_name), Some(identity), Some(name))
+                }
+                None => return true,
             }
-            None => return true,
-        }
-    } else {
-        (None, None)
-    };
+        } else {
+            (None, None, None, None)
+        };
 
     // Register final TTS callback with LiveKit routing
     if let Some(ref vm) = voice_manager {
@@ -160,11 +161,13 @@ pub async fn handle_config_message(
         .await;
     }
 
-    // Send ready message with optional LiveKit token
+    // Send ready message with optional LiveKit room information
     let _ = message_tx
         .send(MessageRoute::Outgoing(OutgoingMessage::Ready {
-            livekit_token,
+            livekit_room_name: livekit_room_name.clone(),
             livekit_url: Some(app_state.config.livekit_url.clone()),
+            sayna_participant_identity: sayna_identity,
+            sayna_participant_name: sayna_name,
         }))
         .await;
     info!("Voice manager ready and configured");
@@ -594,9 +597,10 @@ async fn initialize_livekit_client(
 ) -> Option<(
     Arc<RwLock<LiveKitClient>>,
     Option<crate::livekit::OperationQueue>,
-    Option<String>, // User token to send back to client
-    String,         // Room name for cleanup
+    String,         // Room name for client info
     Option<String>, // Egress ID for recording cleanup
+    String,         // Sayna participant identity
+    String,         // Sayna participant name
 )> {
     info!(
         "Setting up LiveKit client with URL: {}, room: {}",
@@ -634,35 +638,32 @@ async fn initialize_livekit_client(
         livekit_ws_config.room_name
     );
 
-    // Generate agent token for AI participant
-    let agent_token = match room_handler.agent_token(&livekit_ws_config.room_name) {
-        Ok(token) => token,
-        Err(e) => {
-            error!("Failed to generate agent token: {:?}", e);
-            let _ = message_tx
-                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: format!("Failed to generate agent token: {e:?}"),
-                }))
-                .await;
-            return None;
-        }
-    };
+    // Get participant identity and name with defaults
+    let sayna_identity = livekit_ws_config
+        .sayna_participant_identity
+        .as_deref()
+        .unwrap_or("sayna-ai");
+    let sayna_name = livekit_ws_config
+        .sayna_participant_name
+        .as_deref()
+        .unwrap_or("Sayna AI");
 
-    // Generate user token for user participant
-    let user_token = match room_handler.user_token(&livekit_ws_config.room_name) {
-        Ok(token) => token,
-        Err(e) => {
-            error!("Failed to generate user token: {:?}", e);
-            let _ = message_tx
-                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                    message: format!("Failed to generate user token: {e:?}"),
-                }))
-                .await;
-            return None;
-        }
-    };
+    // Generate agent token for AI participant with custom identity and name
+    let agent_token =
+        match room_handler.agent_token(&livekit_ws_config.room_name, sayna_identity, sayna_name) {
+            Ok(token) => token,
+            Err(e) => {
+                error!("Failed to generate agent token: {:?}", e);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to generate agent token: {e:?}"),
+                    }))
+                    .await;
+                return None;
+            }
+        };
 
-    info!("LiveKit tokens generated successfully");
+    info!("LiveKit agent token generated successfully");
 
     // Start recording if requested
     let egress_id = if livekit_ws_config.enable_recording {
@@ -745,9 +746,10 @@ async fn initialize_livekit_client(
     Some((
         livekit_client_arc,
         operation_queue,
-        Some(user_token),
         livekit_ws_config.room_name.clone(),
         egress_id,
+        sayna_identity.to_string(),
+        sayna_name.to_string(),
     ))
 }
 

@@ -30,6 +30,7 @@
 //!         sample_rate: 24000,
 //!         channels: 1,
 //!         enable_noise_filter: cfg!(feature = "noise-filter"),
+//!         listen_participants: vec![],
 //!     };
 //!
 //!     // Create and initialize manager
@@ -109,6 +110,7 @@ mod tests {
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: cfg!(feature = "noise-filter"),
+            listen_participants: vec![],
         };
 
         assert_eq!(config.url, "wss://test.example.com");
