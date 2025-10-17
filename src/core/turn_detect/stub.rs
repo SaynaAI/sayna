@@ -12,11 +12,10 @@ pub struct TurnDetector {
 impl TurnDetector {
     /// Construct a disabled turn detector. Returns immediately without loading models.
     pub async fn new(model_path: Option<&Path>) -> Result<Self> {
-        let mut config = TurnDetectorConfig::default();
-
-        if let Some(path) = model_path {
-            config.model_path = Some(path.to_path_buf());
-        }
+        let config = TurnDetectorConfig {
+            model_path: model_path.map(Path::to_path_buf),
+            ..Default::default()
+        };
 
         Self::with_config(config).await
     }
@@ -61,6 +60,12 @@ impl TurnDetector {
 /// Builder that mirrors the real implementation but produces an inert detector.
 pub struct TurnDetectorBuilder {
     config: TurnDetectorConfig,
+}
+
+impl Default for TurnDetectorBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TurnDetectorBuilder {

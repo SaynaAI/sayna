@@ -234,8 +234,10 @@ impl ReqManager {
     pub async fn new(
         max_concurrent_requests: usize,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut config = ReqManagerConfig::default();
-        config.max_concurrent_requests = max_concurrent_requests;
+        let config = ReqManagerConfig {
+            max_concurrent_requests,
+            ..Default::default()
+        };
         Self::with_config(config).await
     }
 
