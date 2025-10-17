@@ -76,6 +76,20 @@ pub struct LiveKitWebSocketConfig {
     /// File key for recording (required if enable_recording is true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recording_file_key: Option<String>,
+    /// Sayna AI participant identity (defaults to "sayna-ai")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sayna_participant_identity: Option<String>,
+    /// Sayna AI participant display name (defaults to "Sayna AI")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sayna_participant_name: Option<String>,
+    /// List of participant identities to listen to for audio tracks and data messages. (All participants by default)
+    ///
+    /// **Behavior**:
+    /// - If **empty** (default): Audio tracks and data messages from **all participants** will be processed
+    /// - If **populated**: Only audio tracks and data messages from participants whose identities
+    ///   are in this list will be processed; others will be ignored
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listen_participants: Vec<String>,
 }
 
 impl LiveKitWebSocketConfig {
@@ -105,6 +119,8 @@ impl LiveKitWebSocketConfig {
             // Enable noise filter by default when compiled with the optional feature
             // Can be disabled via config if lower latency is needed
             enable_noise_filter: cfg!(feature = "noise-filter"),
+            // Pass through the participant filter list
+            listen_participants: self.listen_participants.clone(),
         }
     }
 }

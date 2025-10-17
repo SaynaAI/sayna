@@ -92,10 +92,11 @@ Always consult these rule files when implementing new features or modifying exis
 
 1. **WebSocket Connection**: Client connects to `/ws` endpoint
 2. **Configuration**: Client sends config with provider selection and parameters
-3. **Audio Processing**: 
+3. **LiveKit Token Generation** (if using LiveKit): After receiving Ready message with room info, call `POST /livekit/token` to get participant token
+4. **Audio Processing**:
    - Incoming audio → DeepFilterNet (optional) → STT Provider → Text results
    - Text input → TTS Provider → Audio output → Client
-4. **LiveKit Mode**: Audio streams from LiveKit rooms processed in real-time
+5. **LiveKit Mode**: Audio streams from LiveKit rooms processed in real-time
 
 ### Key Design Patterns
 
@@ -131,7 +132,9 @@ When adding new features:
 
 - `src/core/voice_manager.rs`: Central orchestration of voice processing
 - `src/handlers/ws.rs`: WebSocket message handling and routing
+- `src/handlers/livekit.rs`: LiveKit token generation REST endpoint
 - `src/livekit/livekit_manager.rs`: LiveKit room and participant management
+- `src/livekit/room_handler.rs`: LiveKit room creation and JWT token generation
 - `src/utils/noise_filter.rs`: DeepFilterNet integration and audio processing
 - `src/config.rs`: Server configuration and environment variable loading
 - `src/errors/mod.rs`: Centralized error types using thiserror
@@ -143,6 +146,51 @@ When adding new features:
 3. Update `VoiceManager` to support the new provider in configuration
 4. Add provider-specific configuration to `WebSocketMessage::Config`
 5. Update tests to cover new provider functionality
+
+## API Endpoints
+
+### REST API
+
+- `GET /health` - Health check endpoint
+- `GET /voices` - List available TTS voices
+- `POST /speak` - Generate speech from text
+- `POST /livekit/token` - Generate LiveKit participant token
+  - Request: `{"room_name": "room-123", "participant_name": "User", "participant_identity": "user-id"}`
+  - Response: `{"token": "JWT...", "room_name": "room-123", "participant_identity": "user-id", "livekit_url": "ws://..."}`
+
+### WebSocket API
+
+- `/ws` - Main WebSocket endpoint for real-time voice processing
+  - Receives: Config, audio data, speak commands, control messages
+  - Sends: Ready (with LiveKit room info), STT results, TTS audio, unified messages
+
+**Breaking Change (2025-10-17)**: The WebSocket Ready message no longer includes `livekit_token`. Instead, it provides `livekit_room_name`, `sayna_participant_identity`, and `sayna_participant_name`. Clients must call the `/livekit/token` endpoint to obtain participant tokens.
+
+**Configuration Note**: The `sayna_participant_identity` and `sayna_participant_name` fields can be customized in the LiveKit config during WebSocket initialization. Defaults are "sayna-ai" and "Sayna AI" respectively.
+
+#### LiveKit Configuration Options
+
+The LiveKit configuration in the WebSocket config message supports the following fields:
+
+```json
+{
+  "livekit": {
+    "room_name": "my-room",
+    "enable_recording": false,
+    "recording_file_key": "optional-file-key",
+    "sayna_participant_identity": "sayna-ai",
+    "sayna_participant_name": "Sayna AI",
+    "listen_participants": ["user-123", "user-456"]
+  }
+}
+```
+
+**Participant Filtering** (`listen_participants`):
+- **Empty array (default)**: Processes audio tracks and data messages from **all participants** in the room
+- **Populated array**: Only processes audio/data from participants whose identities are in the list
+- Useful for selective audio processing in multi-participant rooms where you only want to handle specific users
+- Filtering applies to both audio tracks (STT) and data messages
+- Server-side messages (participant = None) are always processed regardless of the filter
 
 ## Performance Considerations
 

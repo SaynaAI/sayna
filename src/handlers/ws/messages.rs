@@ -98,12 +98,18 @@ pub struct ParticipantDisconnectedInfo {
 pub enum OutgoingMessage {
     #[serde(rename = "ready")]
     Ready {
-        /// Optional LiveKit token for user to join the room
+        /// Optional LiveKit room name that was created
         #[serde(skip_serializing_if = "Option::is_none")]
-        livekit_token: Option<String>,
-        /// Optional Livekit URL to join the room
+        livekit_room_name: Option<String>,
+        /// Optional LiveKit URL to connect to
         #[serde(skip_serializing_if = "Option::is_none")]
         livekit_url: Option<String>,
+        /// Optional identity of the AI agent participant in the room
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sayna_participant_identity: Option<String>,
+        /// Optional display name of the AI agent participant
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sayna_participant_name: Option<String>,
     },
     #[serde(rename = "stt_result")]
     STTResult {

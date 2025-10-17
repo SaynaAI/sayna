@@ -15,6 +15,11 @@ pub struct LiveKitConfig {
     /// feature is compiled in). Set to `false` to reduce latency when filtering is
     /// available.
     pub enable_noise_filter: bool,
+    /// List of participant identities to listen to for audio tracks and data messages.
+    ///
+    /// If empty, all participants' audio and data will be processed.
+    /// If populated, only participants in this list will be processed.
+    pub listen_participants: Vec<String>,
 }
 
 /// LiveKit connection status
