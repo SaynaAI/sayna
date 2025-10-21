@@ -16,6 +16,7 @@ async fn test_websocket_voice_config() {
         livekit_api_secret: Some("test_key".to_string()),
         port: 0, // Let the OS assign a port
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
         recording_s3_bucket: None,
@@ -168,6 +169,7 @@ async fn test_websocket_invalid_message() {
         livekit_api_secret: None,
         port: 0,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
         recording_s3_bucket: None,

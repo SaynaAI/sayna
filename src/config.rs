@@ -6,6 +6,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub livekit_url: String,
+    pub livekit_public_url: String,
     pub livekit_api_key: Option<String>,
     pub livekit_api_secret: Option<String>,
 
@@ -37,6 +38,8 @@ impl ServerConfig {
 
         let livekit_url =
             env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".to_string());
+        let livekit_public_url =
+            env::var("LIVEKIT_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:7880".to_string());
         let livekit_api_key = env::var("LIVEKIT_API_KEY").ok();
         let livekit_api_secret = env::var("LIVEKIT_API_SECRET").ok();
 
@@ -61,6 +64,7 @@ impl ServerConfig {
             host,
             port,
             livekit_url,
+            livekit_public_url,
             livekit_api_key,
             livekit_api_secret,
             deepgram_api_key,
@@ -122,6 +126,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
             livekit_api_key: None,
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
@@ -146,6 +151,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
             livekit_api_key: None,
             livekit_api_secret: None,
             deepgram_api_key: None,
@@ -170,6 +176,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
             livekit_api_key: None,
             livekit_api_secret: None,
             deepgram_api_key: None,
@@ -197,6 +204,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
             livekit_api_key: None,
             livekit_api_secret: None,
             deepgram_api_key: Some("test-key".to_string()),
@@ -224,6 +232,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
             livekit_api_key: None,
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
