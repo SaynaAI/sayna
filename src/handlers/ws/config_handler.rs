@@ -165,7 +165,7 @@ pub async fn handle_config_message(
     let _ = message_tx
         .send(MessageRoute::Outgoing(OutgoingMessage::Ready {
             livekit_room_name: livekit_room_name.clone(),
-            livekit_url: Some(app_state.config.livekit_url.clone()),
+            livekit_url: Some(app_state.config.livekit_public_url.clone()),
             sayna_participant_identity: sayna_identity,
             sayna_participant_name: sayna_name,
         }))
