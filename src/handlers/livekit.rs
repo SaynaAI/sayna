@@ -155,7 +155,7 @@ pub async fn generate_token(
         token,
         room_name: request.room_name,
         participant_identity: request.participant_identity,
-        livekit_url: room_handler.url().to_string(),
+        livekit_url: state.config.livekit_public_url.clone(),
     };
 
     (StatusCode::OK, Json(response)).into_response()
