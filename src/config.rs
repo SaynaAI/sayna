@@ -1,6 +1,17 @@
 use std::env;
 use std::path::PathBuf;
 
+/// Parse a boolean value from a string, supporting multiple formats
+///
+/// Accepts: "true", "false", "1", "0", "yes", "no" (case insensitive)
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub host: String,
@@ -23,6 +34,12 @@ pub struct ServerConfig {
     // Cache configuration (filesystem or memory)
     pub cache_path: Option<PathBuf>, // if None, use in-memory cache
     pub cache_ttl_seconds: Option<u64>,
+
+    // Authentication configuration
+    pub auth_service_url: Option<String>,
+    pub auth_signing_key_path: Option<PathBuf>,
+    pub auth_timeout_seconds: u64,
+    pub auth_required: bool,
 }
 
 impl ServerConfig {
@@ -60,6 +77,37 @@ impl ServerConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .or(Some(30 * 24 * 60 * 60)); // 1 month (30 days) default
 
+        // Authentication configuration from env
+        let auth_service_url = env::var("AUTH_SERVICE_URL").ok();
+        let auth_signing_key_path = env::var("AUTH_SIGNING_KEY_PATH").ok().map(PathBuf::from);
+        let auth_timeout_seconds = env::var("AUTH_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        let auth_required = env::var("AUTH_REQUIRED")
+            .ok()
+            .and_then(|v| parse_bool(&v))
+            .unwrap_or(false);
+
+        // Validate auth configuration if auth is required
+        if auth_required {
+            if auth_service_url.is_none() {
+                return Err("AUTH_SERVICE_URL is required when AUTH_REQUIRED=true".into());
+            }
+            if let Some(ref key_path) = auth_signing_key_path {
+                // Check if the signing key file exists
+                if !key_path.exists() {
+                    return Err(format!(
+                        "AUTH_SIGNING_KEY_PATH file does not exist: {}",
+                        key_path.display()
+                    )
+                    .into());
+                }
+            } else {
+                return Err("AUTH_SIGNING_KEY_PATH is required when AUTH_REQUIRED=true".into());
+            }
+        }
+
         Ok(ServerConfig {
             host,
             port,
@@ -76,6 +124,10 @@ impl ServerConfig {
             recording_s3_secret_key,
             cache_path,
             cache_ttl_seconds,
+            auth_service_url,
+            auth_signing_key_path,
+            auth_timeout_seconds,
+            auth_required,
         })
     }
 
@@ -119,6 +171,9 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_get_api_key_deepgram_success() {
@@ -138,6 +193,10 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
         };
 
         let result = config.get_api_key("deepgram");
@@ -163,6 +222,10 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
         };
 
         let result = config.get_api_key("elevenlabs");
@@ -188,6 +251,10 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
         };
 
         let result = config.get_api_key("deepgram");
@@ -216,6 +283,10 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
         };
 
         let result = config.get_api_key("unsupported_provider");
@@ -244,6 +315,10 @@ mod tests {
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
         };
 
         // Test uppercase
@@ -255,5 +330,287 @@ mod tests {
         let result2 = config.get_api_key("ElevenLabs");
         assert!(result2.is_ok());
         assert_eq!(result2.unwrap(), "test-elevenlabs-key");
+    }
+
+    #[test]
+    fn test_parse_bool_true_variants() {
+        assert_eq!(parse_bool("true"), Some(true));
+        assert_eq!(parse_bool("TRUE"), Some(true));
+        assert_eq!(parse_bool("1"), Some(true));
+        assert_eq!(parse_bool("yes"), Some(true));
+        assert_eq!(parse_bool("YES"), Some(true));
+        assert_eq!(parse_bool("Yes"), Some(true));
+    }
+
+    #[test]
+    fn test_parse_bool_false_variants() {
+        assert_eq!(parse_bool("false"), Some(false));
+        assert_eq!(parse_bool("FALSE"), Some(false));
+        assert_eq!(parse_bool("0"), Some(false));
+        assert_eq!(parse_bool("no"), Some(false));
+        assert_eq!(parse_bool("NO"), Some(false));
+        assert_eq!(parse_bool("No"), Some(false));
+    }
+
+    #[test]
+    fn test_parse_bool_invalid() {
+        assert_eq!(parse_bool("invalid"), None);
+        assert_eq!(parse_bool("2"), None);
+        assert_eq!(parse_bool(""), None);
+        assert_eq!(parse_bool("maybe"), None);
+    }
+
+    // Helper to clean up environment variables after tests
+    fn cleanup_env_vars() {
+        unsafe {
+            env::remove_var("AUTH_REQUIRED");
+            env::remove_var("AUTH_SERVICE_URL");
+            env::remove_var("AUTH_SIGNING_KEY_PATH");
+            env::remove_var("AUTH_TIMEOUT_SECONDS");
+            env::remove_var("HOST");
+            env::remove_var("PORT");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_disabled_defaults() {
+        cleanup_env_vars();
+
+        // Auth disabled by default
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(!config.auth_required);
+        assert_eq!(config.auth_timeout_seconds, 5);
+        assert!(config.auth_service_url.is_none());
+        assert!(config.auth_signing_key_path.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_required_true_variants() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            // Test "true"
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(config.auth_required);
+
+        unsafe {
+            // Test "1"
+            env::set_var("AUTH_REQUIRED", "1");
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(config.auth_required);
+
+        unsafe {
+            // Test "yes"
+            env::set_var("AUTH_REQUIRED", "yes");
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(config.auth_required);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_required_false_variants() {
+        cleanup_env_vars();
+
+        unsafe {
+            // Test "false"
+            env::set_var("AUTH_REQUIRED", "false");
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(!config.auth_required);
+
+        unsafe {
+            // Test "0"
+            env::set_var("AUTH_REQUIRED", "0");
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(!config.auth_required);
+
+        unsafe {
+            // Test "no"
+            env::set_var("AUTH_REQUIRED", "no");
+        }
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(!config.auth_required);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_service_url() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "https://auth.service.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(
+            config.auth_service_url,
+            Some("https://auth.service.example.com".to_string())
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_signing_key_path() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("signing_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.auth_signing_key_path, Some(key_path));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_timeout_default() {
+        cleanup_env_vars();
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.auth_timeout_seconds, 5);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_timeout_custom() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+            env::set_var("AUTH_TIMEOUT_SECONDS", "10");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.auth_timeout_seconds, 10);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_required_missing_url() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+        }
+        // Missing AUTH_SERVICE_URL
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AUTH_SERVICE_URL is required")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_required_missing_key_path() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+        }
+        // Missing AUTH_SIGNING_KEY_PATH
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AUTH_SIGNING_KEY_PATH is required")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_auth_required_key_file_not_exists() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", "/nonexistent/key.pem");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("file does not exist")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_host_and_port() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("HOST", "127.0.0.1");
+            env::set_var("PORT", "8080");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
+
+        cleanup_env_vars();
     }
 }

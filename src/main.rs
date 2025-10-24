@@ -1,11 +1,11 @@
 use std::env;
 
-use axum::Router;
+use axum::{Router, middleware};
 use tokio::net::TcpListener;
 
 use anyhow::anyhow;
 
-use sayna::{ServerConfig, init, routes, state::AppState};
+use sayna::{ServerConfig, init, middleware::auth::auth_middleware, routes, state::AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,15 +44,24 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let app_state = AppState::new(config).await;
 
-    // Create base router with both API and WebSocket routes
-    let base_router = routes::api::create_api_router().merge(routes::ws::create_ws_router());
+    // Create protected API routes with authentication middleware
+    let protected_routes = routes::api::create_api_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
+
+    // Create WebSocket routes (no auth for now, see action plan task 8)
+    let ws_routes = routes::ws::create_ws_router();
 
     // Create public health check route (no auth)
     let public_routes =
         Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
-    // Combine public and application routes
-    let app = public_routes.merge(base_router).with_state(app_state);
+    // Combine all routes: public + protected + websocket
+    let app = public_routes
+        .merge(protected_routes)
+        .merge(ws_routes)
+        .with_state(app_state);
 
     // Create listener
     let listener = TcpListener::bind(&address).await?;

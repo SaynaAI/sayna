@@ -26,6 +26,10 @@ async fn test_websocket_voice_config() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create application state
@@ -179,6 +183,10 @@ async fn test_websocket_invalid_message() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create application state

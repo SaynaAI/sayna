@@ -104,6 +104,40 @@ This mode is useful for:
 - Testing WebSocket message flows
 - Debugging non-audio features
 
+## Authentication (Optional)
+
+Sayna supports customer-based authentication that delegates token validation to an external authentication service. When enabled, protected API endpoints require a valid bearer token.
+
+### Enabling Authentication
+
+Add to your `.env` file:
+```env
+AUTH_REQUIRED=true
+AUTH_SERVICE_URL=https://your-auth-service.com/auth
+AUTH_SIGNING_KEY_PATH=/path/to/auth_private_key.pem
+AUTH_TIMEOUT_SECONDS=5
+```
+
+Generate signing keys:
+```bash
+# Generate RSA private key
+openssl genrsa -out auth_private_key.pem 2048
+
+# Extract public key (share with auth service)
+openssl rsa -in auth_private_key.pem -pubout -out auth_public_key.pem
+```
+
+### Making Authenticated Requests
+
+```bash
+curl -X POST http://localhost:3001/speak \
+  -H "Authorization: Bearer your-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world"}'
+```
+
+For complete authentication setup and architecture details, see [docs/authentication.md](docs/authentication.md).
+
 ## API Endpoints
 
 ### WebSocket
@@ -224,8 +258,13 @@ docker run -p 3001:3001 --env-file .env sayna
 | `LIVEKIT_URL` | LiveKit server WebSocket URL | `ws://localhost:7880` | No |
 | `HOST` | Server bind address | `0.0.0.0` | No |
 | `PORT` | Server port | `3001` | No |
+| `AUTH_REQUIRED` | Enable authentication | `false` | No |
+| `AUTH_SERVICE_URL` | External auth service endpoint | - | Yes** |
+| `AUTH_SIGNING_KEY_PATH` | Path to JWT signing private key | - | Yes** |
+| `AUTH_TIMEOUT_SECONDS` | Auth request timeout | `5` | No |
 
 *Not required when using audio-disabled mode
+**Required when `AUTH_REQUIRED=true`
 
 ## Performance Considerations
 
