@@ -88,6 +88,13 @@ Always consult these rule files when implementing new features or modifying exis
    - Conservative blending to preserve speech quality
    - Lazy static initialization for model loading
 
+6. **Authentication System** (`src/auth/` and `src/middleware/auth.rs`):
+   - Optional JWT-based authentication with external validation service
+   - AuthClient for communicating with auth service
+   - JWT signing for request integrity and tamper prevention
+   - Middleware for protecting API endpoints
+   - Configurable via environment variables
+
 ### Request Flow
 
 1. **WebSocket Connection**: Client connects to `/ws` endpoint
@@ -114,6 +121,12 @@ Required for production:
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
 - `PORT`: Server port (default: 3001)
+
+Optional authentication:
+- `AUTH_REQUIRED`: Enable authentication (default: false)
+- `AUTH_SERVICE_URL`: External auth service endpoint (required if auth enabled)
+- `AUTH_SIGNING_KEY_PATH`: Path to JWT signing private key (required if auth enabled)
+- `AUTH_TIMEOUT_SECONDS`: Auth request timeout in seconds (default: 5)
 
 ## Testing Strategy
 
@@ -151,12 +164,14 @@ When adding new features:
 
 ### REST API
 
-- `GET /health` - Health check endpoint
-- `GET /voices` - List available TTS voices
-- `POST /speak` - Generate speech from text
-- `POST /livekit/token` - Generate LiveKit participant token
+- `GET /` - Health check endpoint (public, no auth required)
+- `GET /voices` - List available TTS voices (requires auth if AUTH_REQUIRED=true)
+- `POST /speak` - Generate speech from text (requires auth if AUTH_REQUIRED=true)
+- `POST /livekit/token` - Generate LiveKit participant token (requires auth if AUTH_REQUIRED=true)
   - Request: `{"room_name": "room-123", "participant_name": "User", "participant_identity": "user-id"}`
   - Response: `{"token": "JWT...", "room_name": "room-123", "participant_identity": "user-id", "livekit_url": "ws://..."}`
+
+**Authentication**: When `AUTH_REQUIRED=true`, protected endpoints require a valid `Authorization: Bearer {token}` header. See [docs/authentication.md](docs/authentication.md) for setup details.
 
 ### WebSocket API
 

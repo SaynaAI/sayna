@@ -2,14 +2,51 @@
 
 Sayna exposes a concise REST surface for voice and LiveKit utilities together with a high-level WebSocket interface for real-time speech workflows. This document enumerates every public entry point, the payload shapes they expect, and the messages they emit.
 
+## Authentication
+
+When `AUTH_REQUIRED=true` is set in the server configuration, all REST API endpoints (except the health check) require authentication using bearer token authorization. WebSocket connections can optionally be authenticated during the upgrade handshake.
+
+### Request Headers
+
+Protected endpoints require the following header:
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+### Error Responses
+
+Authentication failures return JSON responses with the following structure:
+
+```json
+{
+  "error": "error_code",
+  "message": "Human-readable error message"
+}
+```
+
+**Common Authentication Error Codes**:
+
+| HTTP Status | Error Code | Description |
+| --- | --- | --- |
+| `401 Unauthorized` | `missing_auth_header` | Authorization header is missing from the request |
+| `401 Unauthorized` | `invalid_auth_header` | Authorization header format is invalid (must be "Bearer {token}") |
+| `401 Unauthorized` | `unauthorized` | Token validation failed |
+| `502 Bad Gateway` | `auth_service_error` | External auth service returned an error |
+| `503 Service Unavailable` | `auth_service_unavailable` | Auth service is unreachable or timed out |
+
+For complete authentication setup and architecture details, see [Authentication Guide](authentication.md).
+
 ## REST API
 
 ### GET /
 - **Purpose**: Health probe to confirm the service is running.
+- **Authentication**: Not required (public endpoint)
 - **Success**: `200 OK` with JSON object containing `status` (string equal to `OK`).
 
 ### GET /voices
 - **Purpose**: Retrieve the catalogue of text-to-speech voices grouped by provider.
+- **Authentication**: Required when `AUTH_REQUIRED=true`
 - **Success**: `200 OK` with a JSON object where each key is a provider identifier and the value is an array of voice descriptors.
 - **Voice descriptor fields**:
   | Field | Type | Description |
@@ -25,6 +62,7 @@ Sayna exposes a concise REST surface for voice and LiveKit utilities together wi
 
 ### POST /speak
 - **Purpose**: Synthesize a text snippet into audio using a configured provider.
+- **Authentication**: Required when `AUTH_REQUIRED=true`
 - **Request body (application/json)**:
   | Field | Type | Required | Description |
   | --- | --- | --- | --- |
@@ -53,6 +91,7 @@ Sayna exposes a concise REST surface for voice and LiveKit utilities together wi
 
 ### POST /livekit/token
 - **Purpose**: Issue a LiveKit access token tailored for a participant.
+- **Authentication**: Required when `AUTH_REQUIRED=true`
 - **Request body (application/json)**:
   | Field | Type | Required | Description |
   | --- | --- | --- | --- |

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::auth::AuthClient;
 use crate::config::ServerConfig;
 use crate::core::CoreState;
 use crate::core::cache::store::CacheStore;
@@ -14,6 +15,8 @@ pub struct AppState {
     pub core_state: Arc<CoreState>,
     /// LiveKit room handler for room and token management
     pub livekit_room_handler: Option<Arc<LiveKitRoomHandler>>,
+    /// Authentication client for validating bearer tokens (if auth is enabled)
+    pub auth_client: Option<Arc<AuthClient>>,
 }
 
 impl AppState {
@@ -65,10 +68,39 @@ impl AppState {
             None
         };
 
+        // Initialize auth client if auth is required and configured
+        let auth_client = if config.auth_required {
+            match AuthClient::from_config(&config).await {
+                Ok(client) => {
+                    tracing::info!(
+                        "Authentication enabled with service: {}",
+                        config
+                            .auth_service_url
+                            .as_ref()
+                            .unwrap_or(&"unknown".to_string())
+                    );
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    // Fail fast when auth is required but client initialization fails
+                    tracing::error!("Failed to initialize auth client: {:?}", e);
+                    panic!(
+                        "AUTH_REQUIRED=true but auth client initialization failed: {:?}. \
+                        Cannot start server without authentication. \
+                        Please check AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH configuration.",
+                        e
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         Arc::new(Self {
             config,
             core_state,
             livekit_room_handler,
+            auth_client,
         })
     }
 

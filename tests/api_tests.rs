@@ -26,6 +26,10 @@ async fn test_health_check() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -74,6 +78,10 @@ async fn test_speak_endpoint_missing_api_key() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -130,6 +138,10 @@ async fn test_speak_endpoint_empty_text() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -193,6 +205,10 @@ async fn test_speak_endpoint_with_pronunciations() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -258,6 +274,10 @@ async fn test_speak_endpoint_invalid_provider() {
         recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
