@@ -18,6 +18,10 @@ pub struct RequestMetrics {
     pub active_requests: AtomicUsize,
     /// Peak concurrent requests observed
     pub peak_concurrent: AtomicUsize,
+    /// Total number of retries attempted
+    pub total_retries: AtomicU64,
+    /// Number of requests that succeeded after retry
+    pub retry_successes: AtomicU64,
 }
 
 impl RequestMetrics {
@@ -28,10 +32,12 @@ impl RequestMetrics {
         let failed = self.failed_requests.load(Ordering::Relaxed);
         let active = self.active_requests.load(Ordering::Relaxed);
         let peak = self.peak_concurrent.load(Ordering::Relaxed);
+        let retries = self.total_retries.load(Ordering::Relaxed);
+        let retry_success = self.retry_successes.load(Ordering::Relaxed);
 
         format!(
-            "Requests - Total: {}, Success: {}, Failed: {}, Active: {}, Peak: {}",
-            total, success, failed, active, peak
+            "Requests - Total: {}, Success: {}, Failed: {}, Active: {}, Peak: {}, Retries: {}, Retry Success: {}",
+            total, success, failed, active, peak, retries, retry_success
         )
     }
 }
@@ -85,6 +91,9 @@ pub struct ReqManager {
 
     /// Performance metrics
     metrics: Arc<RequestMetrics>,
+
+    /// Configuration for retry and timeout behavior
+    config: ReqManagerConfig,
 }
 
 /// A guard that holds a client from the pool and returns it when dropped.
@@ -102,26 +111,107 @@ impl<'a> ClientGuard<'a> {
         &self.client
     }
 
-    /// Make a GET request with automatic metrics tracking
+    /// Make a GET request with automatic metrics tracking and retry logic
     pub async fn get(&self, url: &str) -> Result<Response, reqwest::Error> {
         self.manager
             .metrics
             .total_requests
             .fetch_add(1, Ordering::Relaxed);
-        let result = self.client.get(url).send().await;
+
+        let result = self.execute_with_retry(|| async {
+            let request = self.client
+                .get(url)
+                .timeout(self.manager.config.per_request_timeout);
+            request.send().await
+        }).await;
+
         self.update_metrics(&result);
         result
     }
 
-    /// Make a POST request with automatic metrics tracking
+    /// Make a POST request with automatic metrics tracking and retry logic
     pub async fn post(&self, url: &str) -> Result<Response, reqwest::Error> {
         self.manager
             .metrics
             .total_requests
             .fetch_add(1, Ordering::Relaxed);
-        let result = self.client.post(url).send().await;
+
+        let result = self.execute_with_retry(|| async {
+            let request = self.client
+                .post(url)
+                .timeout(self.manager.config.per_request_timeout);
+            request.send().await
+        }).await;
+
         self.update_metrics(&result);
         result
+    }
+
+    /// Execute a request with automatic retry logic and exponential backoff
+    async fn execute_with_retry<F, Fut>(&self, request_fn: F) -> Result<Response, reqwest::Error>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Response, reqwest::Error>>,
+    {
+        let mut attempt = 0;
+        let max_attempts = self.manager.config.max_retries + 1;
+        let mut last_error = None;
+
+        while attempt < max_attempts {
+            match request_fn().await {
+                Ok(response) => {
+                    // Track retry success if this wasn't the first attempt
+                    if attempt > 0 {
+                        self.manager
+                            .metrics
+                            .retry_successes
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    attempt += 1;
+
+                    // If we haven't exhausted retries, wait and try again
+                    if attempt < max_attempts {
+                        self.manager
+                            .metrics
+                            .total_retries
+                            .fetch_add(1, Ordering::Relaxed);
+
+                        // Calculate exponential backoff delay
+                        let delay = self.calculate_retry_delay(attempt);
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted, return the last error
+        Err(last_error.unwrap())
+    }
+
+    /// Calculate retry delay using exponential backoff with jitter
+    fn calculate_retry_delay(&self, attempt: u32) -> Duration {
+        let base_delay = self.manager.config.retry_initial_delay.as_millis() as u64;
+        let max_delay = self.manager.config.retry_max_delay.as_millis() as u64;
+
+        // Exponential backoff: base_delay * 2^(attempt-1)
+        let exponential_delay = base_delay.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+
+        // Cap at max_delay
+        let delay_ms = exponential_delay.min(max_delay);
+
+        // Add jitter (±25%)
+        let jitter_range = delay_ms / 4;
+        let jitter = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64 % jitter_range) as i64 - (jitter_range as i64 / 2);
+
+        let final_delay = (delay_ms as i64 + jitter).max(0) as u64;
+        Duration::from_millis(final_delay)
     }
 
     /// Update metrics based on request result
@@ -173,6 +263,14 @@ pub struct ReqManagerConfig {
     pub connect_timeout: Duration,
     /// Request timeout
     pub request_timeout: Duration,
+    /// Maximum number of retry attempts for failed requests
+    pub max_retries: u32,
+    /// Initial delay between retries
+    pub retry_initial_delay: Duration,
+    /// Maximum delay between retries
+    pub retry_max_delay: Duration,
+    /// Per-request timeout (independent of global timeout)
+    pub per_request_timeout: Duration,
 }
 
 impl Default for ReqManagerConfig {
@@ -187,6 +285,10 @@ impl Default for ReqManagerConfig {
             tcp_keepalive: Duration::from_secs(5),
             connect_timeout: Duration::from_millis(500),
             request_timeout: Duration::from_secs(30),
+            max_retries: 3,
+            retry_initial_delay: Duration::from_millis(100),
+            retry_max_delay: Duration::from_millis(500),
+            per_request_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -204,6 +306,10 @@ impl ReqManagerConfig {
             tcp_keepalive: Duration::from_secs(3),
             connect_timeout: Duration::from_millis(250),
             request_timeout: Duration::from_secs(15),
+            max_retries: 3,
+            retry_initial_delay: Duration::from_millis(50),
+            retry_max_delay: Duration::from_millis(300),
+            per_request_timeout: Duration::from_secs(2),
         }
     }
 
@@ -219,6 +325,10 @@ impl ReqManagerConfig {
             tcp_keepalive: Duration::from_secs(10),
             connect_timeout: Duration::from_millis(1000),
             request_timeout: Duration::from_secs(60),
+            max_retries: 3,
+            retry_initial_delay: Duration::from_millis(200),
+            retry_max_delay: Duration::from_secs(1),
+            per_request_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -275,6 +385,7 @@ impl ReqManager {
             client,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_requests)),
             metrics: Arc::new(RequestMetrics::default()),
+            config,
         })
     }
 
@@ -647,6 +758,8 @@ impl ReqManager {
         self.metrics.failed_requests.store(0, Ordering::Relaxed);
         self.metrics.active_requests.store(0, Ordering::Relaxed);
         self.metrics.peak_concurrent.store(0, Ordering::Relaxed);
+        self.metrics.total_retries.store(0, Ordering::Relaxed);
+        self.metrics.retry_successes.store(0, Ordering::Relaxed);
     }
 }
 
