@@ -100,8 +100,8 @@ mod with_auth_service {
     use std::fs;
     use tempfile::TempDir;
     use wiremock::{
-        matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
     };
 
     // Test RSA private key (for signing auth requests)
@@ -243,7 +243,8 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .mount(&mock_server)
             .await;
 
-        let (state, _temp_dir) = create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
 
         let app = Router::new()
             .route("/test", get(test_handler))
@@ -277,7 +278,8 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .mount(&mock_server)
             .await;
 
-        let (state, _temp_dir) = create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
 
         let app = Router::new()
             .route("/test", get(test_handler))
@@ -318,7 +320,8 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .mount(&mock_server)
             .await;
 
-        let (state, _temp_dir) = create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
 
         let app = Router::new()
             .route("/test", get(test_handler))
@@ -357,14 +360,14 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
         Mock::given(method("POST"))
             .and(path("/auth"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_secs(10)) // Longer than timeout
+                ResponseTemplate::new(200).set_delay(Duration::from_secs(10)), // Longer than timeout
             )
             .expect(1)
             .mount(&mock_server)
             .await;
 
-        let (state, _temp_dir) = create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
 
         let app = Router::new()
             .route("/test", get(test_handler))
