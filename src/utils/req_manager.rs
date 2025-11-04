@@ -118,12 +118,15 @@ impl<'a> ClientGuard<'a> {
             .total_requests
             .fetch_add(1, Ordering::Relaxed);
 
-        let result = self.execute_with_retry(|| async {
-            let request = self.client
-                .get(url)
-                .timeout(self.manager.config.per_request_timeout);
-            request.send().await
-        }).await;
+        let result = self
+            .execute_with_retry(|| async {
+                let request = self
+                    .client
+                    .get(url)
+                    .timeout(self.manager.config.per_request_timeout);
+                request.send().await
+            })
+            .await;
 
         self.update_metrics(&result);
         result
@@ -136,12 +139,15 @@ impl<'a> ClientGuard<'a> {
             .total_requests
             .fetch_add(1, Ordering::Relaxed);
 
-        let result = self.execute_with_retry(|| async {
-            let request = self.client
-                .post(url)
-                .timeout(self.manager.config.per_request_timeout);
-            request.send().await
-        }).await;
+        let result = self
+            .execute_with_retry(|| async {
+                let request = self
+                    .client
+                    .post(url)
+                    .timeout(self.manager.config.per_request_timeout);
+                request.send().await
+            })
+            .await;
 
         self.update_metrics(&result);
         result
@@ -198,7 +204,8 @@ impl<'a> ClientGuard<'a> {
         let max_delay = self.manager.config.retry_max_delay.as_millis() as u64;
 
         // Exponential backoff: base_delay * 2^(attempt-1)
-        let exponential_delay = base_delay.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+        let exponential_delay =
+            base_delay.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
 
         // Cap at max_delay
         let delay_ms = exponential_delay.min(max_delay);
@@ -208,7 +215,9 @@ impl<'a> ClientGuard<'a> {
         let jitter = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos() as u64 % jitter_range) as i64 - (jitter_range as i64 / 2);
+            .as_nanos() as u64
+            % jitter_range) as i64
+            - (jitter_range as i64 / 2);
 
         let final_delay = (delay_ms as i64 + jitter).max(0) as u64;
         Duration::from_millis(final_delay)

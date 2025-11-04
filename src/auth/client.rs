@@ -1,6 +1,4 @@
-use crate::auth::jwt::{
-    AuthPayload, load_private_key, sign_auth_request_with_key,
-};
+use crate::auth::jwt::{AuthPayload, load_private_key, sign_auth_request_with_key};
 use crate::config::ServerConfig;
 use crate::errors::auth_error::{AuthError, AuthResult};
 use jsonwebtoken::{Algorithm, EncodingKey};
