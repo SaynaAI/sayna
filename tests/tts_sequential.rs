@@ -205,14 +205,12 @@ impl RecordingCallback {
 
         for chunk in chunks.iter() {
             // Extract text from preview: "TEXT:{text}:CHUNK:{i}:DATA:..."
-            if let Ok(preview_str) = String::from_utf8(chunk.data_preview.clone()) {
-                if let Some(text_part) = preview_str.split("TEXT:").nth(1) {
-                    if let Some(text) = text_part.split(":CHUNK:").next() {
-                        if !texts.contains(&text.to_string()) {
-                            texts.push(text.to_string());
-                        }
-                    }
-                }
+            if let Ok(preview_str) = String::from_utf8(chunk.data_preview.clone())
+                && let Some(text_part) = preview_str.split("TEXT:").nth(1)
+                && let Some(text) = text_part.split(":CHUNK:").next()
+                && !texts.contains(&text.to_string())
+            {
+                texts.push(text.to_string());
             }
         }
 
