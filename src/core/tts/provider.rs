@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::StreamExt;
-use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
@@ -22,6 +22,44 @@ struct RequestEntry {
     format: String,
     /// Sample rate for this specific request
     sample_rate: u32,
+}
+
+/// A queued speak job containing all data needed to execute a TTS request
+struct SpeakJob {
+    /// The trimmed text to synthesize
+    text: String,
+    /// The HTTP request builder (boxed trait object)
+    request_builder: Box<dyn TTSRequestBuilderDyn>,
+    /// The channel sender for streaming audio chunks
+    sender: mpsc::Sender<Result<Vec<u8>, TTSError>>,
+    /// The cancellation token for this request
+    cancel_token: CancellationToken,
+    /// The request manager for HTTP client pooling
+    req_manager: Arc<ReqManager>,
+    /// Optional cache store and full cache key (config_hash:text_hash)
+    cache_and_key: Option<(Arc<CacheStore>, String)>,
+}
+
+/// Trait object-safe version of TTSRequestBuilder for dynamic dispatch
+trait TTSRequestBuilderDyn: Send + Sync {
+    fn build_http_request(&self, client: &reqwest::Client, text: &str) -> reqwest::RequestBuilder;
+    fn get_config(&self) -> &TTSConfig;
+    fn get_pronunciation_replacer(&self) -> Option<&PronunciationReplacer>;
+}
+
+/// Blanket implementation to convert any TTSRequestBuilder to the trait object version
+impl<T: TTSRequestBuilder> TTSRequestBuilderDyn for T {
+    fn build_http_request(&self, client: &reqwest::Client, text: &str) -> reqwest::RequestBuilder {
+        TTSRequestBuilder::build_http_request(self, client, text)
+    }
+
+    fn get_config(&self) -> &TTSConfig {
+        TTSRequestBuilder::get_config(self)
+    }
+
+    fn get_pronunciation_replacer(&self) -> Option<&PronunciationReplacer> {
+        TTSRequestBuilder::get_pronunciation_replacer(self)
+    }
 }
 
 /// Compiled pronunciation replacement patterns
@@ -97,8 +135,12 @@ pub struct TTSProvider {
     pending_queue: Arc<Mutex<VecDeque<RequestEntry>>>,
     /// Request manager for HTTP connections
     req_manager: Arc<RwLock<Option<Arc<ReqManager>>>>,
-    /// Per-text request tasks (managed as a join set)
-    request_tasks: Arc<Mutex<JoinSet<()>>>,
+    /// Sequential queue of speak jobs to be processed one at a time
+    speak_queue: Arc<Mutex<VecDeque<SpeakJob>>>,
+    /// Notification to wake the queue worker when new jobs are added
+    speak_queue_notify: Arc<Notify>,
+    /// Queue worker task that processes speak jobs sequentially
+    queue_worker_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Dispatcher task that delivers audio in-order to the callback
     dispatcher_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Cancellation token that controls current generation lifecycle
@@ -117,7 +159,9 @@ impl TTSProvider {
             audio_callback: Arc::new(RwLock::new(None)),
             pending_queue: Arc::new(Mutex::new(VecDeque::new())),
             req_manager: Arc::new(RwLock::new(None)),
-            request_tasks: Arc::new(Mutex::new(JoinSet::new())),
+            speak_queue: Arc::new(Mutex::new(VecDeque::new())),
+            speak_queue_notify: Arc::new(Notify::new()),
+            queue_worker_task: Arc::new(Mutex::new(None)),
             dispatcher_task: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
             cache: Arc::new(RwLock::new(None)),
@@ -126,8 +170,9 @@ impl TTSProvider {
     }
 
     /// Generic send_request implementation that handles all the common logic
-    async fn send_request<R: TTSRequestBuilder>(
-        request_builder: &R,
+    /// Now accepts trait object for dynamic dispatch in the queue worker
+    async fn send_request_dyn(
+        request_builder: &dyn TTSRequestBuilderDyn,
         req_manager: Arc<ReqManager>,
         text: String,
         sender: mpsc::Sender<Result<Vec<u8>, TTSError>>,
@@ -476,6 +521,81 @@ impl TTSProvider {
         *task_guard = Some(handle);
     }
 
+    /// Spawn the queue worker if not already running.
+    ///
+    /// The queue worker processes speak jobs sequentially - it pulls jobs from the
+    /// speak_queue one at a time and only starts the next job after the previous
+    /// one has finished streaming all its audio.
+    async fn ensure_queue_worker(&self) {
+        let mut task_guard = self.queue_worker_task.lock().await;
+        if task_guard.is_some() {
+            return;
+        }
+
+        let speak_queue = self.speak_queue.clone();
+        let speak_queue_notify = self.speak_queue_notify.clone();
+        let token = self.cancel_token.clone();
+
+        let handle = tokio::spawn(async move {
+            debug!("TTS queue worker task started");
+
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        debug!("TTS queue worker cancelled");
+                        break;
+                    }
+                    _ = async {
+                        // Get next job from the queue
+                        let job = {
+                            let mut queue = speak_queue.lock().await;
+                            let size = queue.len();
+                            if size > 0 {
+                                debug!("TTS queue worker: {} jobs in queue", size);
+                            }
+                            queue.pop_front()
+                        };
+
+                        let Some(job) = job else {
+                            // No pending jobs, wait for notification
+                            speak_queue_notify.notified().await;
+                            return;
+                        };
+
+                        debug!("TTS queue worker processing job for text: '{}'", job.text);
+
+                        // Check if cancelled before starting
+                        if job.cancel_token.is_cancelled() {
+                            debug!("TTS queue worker: job cancelled before start, sending error");
+                            let _ = job.sender
+                                .send(Err(TTSError::InternalError("Cancelled".to_string())))
+                                .await;
+                            return;
+                        }
+
+                        // Process the job by calling send_request_dyn
+                        // This will block until all audio chunks are streamed through the sender
+                        Self::send_request_dyn(
+                            job.request_builder.as_ref(),
+                            job.req_manager,
+                            job.text.clone(),
+                            job.sender,
+                            job.cancel_token,
+                            job.cache_and_key,
+                        )
+                        .await;
+
+                        debug!("TTS queue worker finished processing job for text: '{}'", job.text);
+                    } => {}
+                }
+            }
+
+            debug!("TTS queue worker task exited");
+        });
+
+        *task_guard = Some(handle);
+    }
+
     /// Generic connect implementation with TTSConfig-based timeouts
     pub async fn generic_connect(&mut self, _default_url: &str) -> TTSResult<()> {
         // This method now expects the request manager to be pre-configured
@@ -540,7 +660,21 @@ impl TTSProvider {
 
     /// Generic disconnect implementation
     pub async fn generic_disconnect(&mut self) -> TTSResult<()> {
-        // Cancel dispatcher
+        // Cancel token to stop both dispatcher and queue worker
+        self.cancel_token.cancel();
+
+        // Stop queue worker
+        {
+            let mut worker = self.queue_worker_task.lock().await;
+            if let Some(handle) = worker.take() {
+                // Notify to wake the worker so it can exit
+                self.speak_queue_notify.notify_one();
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+
+        // Stop dispatcher
         {
             let mut disp = self.dispatcher_task.lock().await;
             if let Some(handle) = disp.take() {
@@ -549,18 +683,25 @@ impl TTSProvider {
             }
         }
 
-        // Cancel all request tasks
+        // Clear speak queue and send cancellation errors to any pending jobs
         {
-            let mut tasks = self.request_tasks.lock().await;
-            tasks.abort_all();
+            let mut queue = self.speak_queue.lock().await;
+            while let Some(job) = queue.pop_front() {
+                let _ = job.sender
+                    .send(Err(TTSError::InternalError("Disconnected".to_string())))
+                    .await;
+            }
         }
 
-        // Clear queues
+        // Clear pending queue
         self.pending_queue.lock().await.clear();
 
         // Clear state
         self.connected.store(false, Ordering::Relaxed);
         *self.audio_callback.write().await = None;
+
+        // Reset token for next connection
+        self.cancel_token = CancellationToken::new();
 
         info!("TTS provider disconnected");
         Ok(())
@@ -628,7 +769,7 @@ impl TTSProvider {
             _ => None,
         };
 
-        // Spawn request task
+        // Get request manager
         let req_mgr_opt = self.req_manager.read().await.clone();
         let Some(req_mgr) = req_mgr_opt else {
             return Err(TTSError::InternalError(
@@ -637,26 +778,60 @@ impl TTSProvider {
         };
 
         let token = self.cancel_token.clone();
-        let request_builder_clone = request_builder;
 
-        self.request_tasks.lock().await.spawn(async move {
-            Self::send_request(
-                &request_builder_clone,
-                req_mgr,
-                text_trimmed,
-                sender,
-                token,
-                cache_and_key,
-            )
-            .await;
-        });
+        // Create SpeakJob and enqueue it
+        let job = SpeakJob {
+            text: text_trimmed.clone(),
+            request_builder: Box::new(request_builder),
+            sender,
+            cancel_token: token,
+            req_manager: req_mgr,
+            cache_and_key,
+        };
+
+        // Add job to speak queue
+        let queue_len = {
+            let mut queue = self.speak_queue.lock().await;
+            queue.push_back(job);
+            let len = queue.len();
+            debug!(
+                "Enqueued speak job for text: '{}', speak queue size now: {}",
+                text_trimmed, len
+            );
+            len
+        };
+
+        // Ensure queue worker is running BEFORE notifying
+        self.ensure_queue_worker().await;
+
+        // Notify the queue worker that new work is available
+        self.speak_queue_notify.notify_one();
+
+        debug!(
+            "Speak job enqueued successfully for text: '{}' (queue size: {})",
+            text_trimmed, queue_len
+        );
 
         Ok(())
     }
 
     /// Generic clear implementation
     pub async fn generic_clear(&mut self) -> TTSResult<()> {
-        // Stop dispatcher first
+        // Cancel current generation
+        self.cancel_token.cancel();
+
+        // Stop queue worker
+        {
+            let mut worker = self.queue_worker_task.lock().await;
+            if let Some(handle) = worker.take() {
+                // Notify to wake the worker so it can exit
+                self.speak_queue_notify.notify_one();
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+
+        // Stop dispatcher
         {
             let mut disp = self.dispatcher_task.lock().await;
             if let Some(handle) = disp.take() {
@@ -665,9 +840,16 @@ impl TTSProvider {
             }
         }
 
-        // Cancel current generation and abort all inflight request tasks
-        self.cancel_token.cancel();
-        self.request_tasks.lock().await.abort_all();
+        // Clear speak queue and send cancellation errors to any pending jobs
+        {
+            let mut queue = self.speak_queue.lock().await;
+            while let Some(job) = queue.pop_front() {
+                debug!("Clearing queued job for text: '{}'", job.text);
+                let _ = job.sender
+                    .send(Err(TTSError::InternalError("Cancelled".to_string())))
+                    .await;
+            }
+        }
 
         // Clear pending queue
         self.pending_queue.lock().await.clear();
@@ -675,7 +857,7 @@ impl TTSProvider {
         // Reset token for next cycle
         self.cancel_token = CancellationToken::new();
 
-        debug!("Cleared pending items, cancelled request tasks, and stopped dispatcher");
+        debug!("Cleared speak queue, pending queue, and stopped workers");
         Ok(())
     }
 
@@ -738,14 +920,24 @@ impl TTSProvider {
 
 impl Drop for TTSProvider {
     fn drop(&mut self) {
-        // Best-effort cancel dispatcher and tasks without awaiting
+        // Best-effort cancel workers without awaiting
+        // Cancel token to signal workers to stop
+        self.cancel_token.cancel();
+
+        // Stop queue worker
+        if let Ok(mut worker) = self.queue_worker_task.try_lock() {
+            if let Some(handle) = worker.take() {
+                // Wake up the worker so it can exit
+                self.speak_queue_notify.notify_one();
+                handle.abort();
+            }
+        }
+
+        // Stop dispatcher
         if let Ok(mut disp) = self.dispatcher_task.try_lock() {
             if let Some(handle) = disp.take() {
                 handle.abort();
             }
-        }
-        if let Ok(mut tasks) = self.request_tasks.try_lock() {
-            tasks.abort_all();
         }
     }
 }
