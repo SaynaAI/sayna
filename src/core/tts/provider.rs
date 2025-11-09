@@ -141,8 +141,12 @@ pub struct TTSProvider {
     speak_queue_notify: Arc<Notify>,
     /// Queue worker task that processes speak jobs sequentially
     queue_worker_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Flag to quickly check if queue worker is running (avoids lock)
+    queue_worker_running: Arc<AtomicBool>,
     /// Dispatcher task that delivers audio in-order to the callback
     dispatcher_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Flag to quickly check if dispatcher is running (avoids lock)
+    dispatcher_running: Arc<AtomicBool>,
     /// Cancellation token that controls current generation lifecycle
     cancel_token: CancellationToken,
     /// Optional cache store for TTS audio
@@ -162,7 +166,9 @@ impl TTSProvider {
             speak_queue: Arc::new(Mutex::new(VecDeque::new())),
             speak_queue_notify: Arc::new(Notify::new()),
             queue_worker_task: Arc::new(Mutex::new(None)),
+            queue_worker_running: Arc::new(AtomicBool::new(false)),
             dispatcher_task: Arc::new(Mutex::new(None)),
+            dispatcher_running: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             cache: Arc::new(RwLock::new(None)),
             tts_config_hash: Arc::new(RwLock::new(None)),
@@ -422,7 +428,13 @@ impl TTSProvider {
     /// The dispatcher is responsible for delivering audio to the callback in the
     /// exact order texts were enqueued via `speak`.
     async fn ensure_dispatcher(&self) {
+        // OPTIMIZATION: Fast-path check using atomic flag (no lock needed)
+        if self.dispatcher_running.load(Ordering::Acquire) {
+            return;
+        }
+
         let mut task_guard = self.dispatcher_task.lock().await;
+        // Double-check after acquiring lock (may have started while we waited)
         if task_guard.is_some() {
             return;
         }
@@ -430,9 +442,11 @@ impl TTSProvider {
         let pending_queue = self.pending_queue.clone();
         let audio_callback = self.audio_callback.clone();
         let token = self.cancel_token.clone();
+        let running_flag = self.dispatcher_running.clone();
 
         let handle = tokio::spawn(async move {
             debug!("TTS dispatcher task started");
+            running_flag.store(true, Ordering::Release);
 
             loop {
                 tokio::select! {
@@ -516,6 +530,9 @@ impl TTSProvider {
                     } => {}
                 }
             }
+
+            running_flag.store(false, Ordering::Release);
+            debug!("TTS dispatcher task exited");
         });
 
         *task_guard = Some(handle);
@@ -527,7 +544,13 @@ impl TTSProvider {
     /// speak_queue one at a time and only starts the next job after the previous
     /// one has finished streaming all its audio.
     async fn ensure_queue_worker(&self) {
+        // OPTIMIZATION: Fast-path check using atomic flag (no lock needed)
+        if self.queue_worker_running.load(Ordering::Acquire) {
+            return;
+        }
+
         let mut task_guard = self.queue_worker_task.lock().await;
+        // Double-check after acquiring lock (may have started while we waited)
         if task_guard.is_some() {
             return;
         }
@@ -535,9 +558,11 @@ impl TTSProvider {
         let speak_queue = self.speak_queue.clone();
         let speak_queue_notify = self.speak_queue_notify.clone();
         let token = self.cancel_token.clone();
+        let running_flag = self.queue_worker_running.clone();
 
         let handle = tokio::spawn(async move {
             debug!("TTS queue worker task started");
+            running_flag.store(true, Ordering::Release);
 
             loop {
                 tokio::select! {
@@ -590,6 +615,7 @@ impl TTSProvider {
                 }
             }
 
+            running_flag.store(false, Ordering::Release);
             debug!("TTS queue worker task exited");
         });
 
@@ -672,6 +698,7 @@ impl TTSProvider {
                 handle.abort();
                 let _ = handle.await;
             }
+            self.queue_worker_running.store(false, Ordering::Release);
         }
 
         // Stop dispatcher
@@ -681,6 +708,7 @@ impl TTSProvider {
                 handle.abort();
                 let _ = handle.await;
             }
+            self.dispatcher_running.store(false, Ordering::Release);
         }
 
         // Clear speak queue and send cancellation errors to any pending jobs
@@ -730,7 +758,6 @@ impl TTSProvider {
         let text_hash = format!("{:032x}", xxh3_128(text_trimmed.as_bytes()));
 
         // Create channel for this request with buffer size of 1
-        // This ensures sender waits for receiver to read each message (like Go's unbuffered channels)
         let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, TTSError>>(1);
 
         // Get format and sample rate from current config
@@ -742,28 +769,31 @@ impl TTSProvider {
         let sample_rate = request_builder.get_config().sample_rate.unwrap_or(24000);
 
         // Add to pending queue FIRST before starting dispatcher
-        let _queue_size = {
+        {
             let mut queue = self.pending_queue.lock().await;
             queue.push_back(RequestEntry {
                 receiver,
                 format: format.clone(),
                 sample_rate,
             });
-            let size = queue.len();
             debug!(
-                "Added request to pending queue for text: '{}', queue size now: {}",
-                text_trimmed, size
+                "Added request to pending queue for text: '{}', queue size: {}",
+                text_trimmed,
+                queue.len()
             );
-            size
-        };
+        }
 
-        // IMPORTANT: Ensure dispatcher is running BEFORE spawning request task
+        // IMPORTANT: Ensure dispatcher is running BEFORE enqueuing job
         // This is critical for cached audio which returns immediately
         self.ensure_dispatcher().await;
 
-        // Prepare cache key if cache is available
-        let cache_opt = self.cache.read().await.clone();
-        let config_hash_opt = self.tts_config_hash.read().await.clone();
+        // OPTIMIZATION: Acquire cache-related locks together to reduce lock contention
+        let (cache_opt, config_hash_opt) = {
+            let cache_guard = self.cache.read().await;
+            let hash_guard = self.tts_config_hash.read().await;
+            (cache_guard.clone(), hash_guard.clone())
+        };
+
         let cache_and_key = match (cache_opt, config_hash_opt) {
             (Some(cache), Some(cfg_hash)) => Some((cache, format!("{cfg_hash}:{text_hash}"))),
             _ => None,
@@ -795,13 +825,13 @@ impl TTSProvider {
             queue.push_back(job);
             let len = queue.len();
             debug!(
-                "Enqueued speak job for text: '{}', speak queue size now: {}",
+                "Enqueued speak job for text: '{}', speak queue size: {}",
                 text_trimmed, len
             );
             len
         };
 
-        // Ensure queue worker is running BEFORE notifying
+        // Ensure queue worker is running
         self.ensure_queue_worker().await;
 
         // Notify the queue worker that new work is available
@@ -829,6 +859,7 @@ impl TTSProvider {
                 handle.abort();
                 let _ = handle.await;
             }
+            self.queue_worker_running.store(false, Ordering::Release);
         }
 
         // Stop dispatcher
@@ -838,6 +869,7 @@ impl TTSProvider {
                 handle.abort();
                 let _ = handle.await;
             }
+            self.dispatcher_running.store(false, Ordering::Release);
         }
 
         // Clear speak queue and send cancellation errors to any pending jobs
