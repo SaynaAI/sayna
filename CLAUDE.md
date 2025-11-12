@@ -115,7 +115,30 @@ Always consult these rule files when implementing new features or modifying exis
 - **Actor Pattern**: Message passing for WebSocket communication
 - **Repository Pattern**: State management with AppState
 
-## Environment Variables
+## Configuration
+
+Sayna supports two configuration methods:
+
+### YAML Configuration File (Recommended)
+
+Use a YAML configuration file for cleaner, more maintainable configuration:
+
+```bash
+# Start server with YAML config
+sayna -c config.yaml
+```
+
+See [config.example.yaml](config.example.yaml) for all available options. The file uses logical prefixes:
+- `server`: Server settings (host, port)
+- `livekit`: LiveKit integration
+- `providers`: Provider API keys (Deepgram, ElevenLabs)
+- `recording`: S3 recording configuration
+- `cache`: Cache settings
+- `auth`: Authentication configuration
+
+### Environment Variables
+
+All configuration options can also be set via environment variables. When using a YAML file, environment variables **override** YAML values, allowing flexible deployment configurations.
 
 Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
@@ -125,10 +148,13 @@ Required for production:
 - `PORT`: Server port (default: 3001)
 
 Optional authentication:
-- `AUTH_REQUIRED`: Enable authentication (default: false)
+- `AUTH_REQUIRED`: Enable authentication (default: false, accepts: true/false/1/0/yes/no)
 - `AUTH_SERVICE_URL`: External auth service endpoint (required if auth enabled)
 - `AUTH_SIGNING_KEY_PATH`: Path to JWT signing private key (required if auth enabled)
+- `AUTH_API_SECRET`: API secret for simple token-based auth (alternative to JWT)
 - `AUTH_TIMEOUT_SECONDS`: Auth request timeout in seconds (default: 5)
+
+**Configuration Priority**: Environment Variables > YAML File > Defaults
 
 ## Testing Strategy
 
@@ -151,7 +177,12 @@ When adding new features:
 - `src/livekit/livekit_manager.rs`: LiveKit room and participant management
 - `src/livekit/room_handler.rs`: LiveKit room creation and JWT token generation
 - `src/utils/noise_filter.rs`: DeepFilterNet integration and audio processing
-- `src/config.rs`: Server configuration and environment variable loading
+- `src/config/`: Modular configuration system
+  - `mod.rs`: ServerConfig struct and public API
+  - `yaml.rs`: YAML file loading
+  - `env.rs`: Environment variable loading
+  - `merge.rs`: Configuration merging logic
+  - `validation.rs`: Configuration validation
 - `src/errors/mod.rs`: Centralized error types using thiserror
 - `src/docs/openapi.rs`: OpenAPI 3.1 specification and documentation (feature-gated)
 

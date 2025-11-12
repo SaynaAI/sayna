@@ -17,7 +17,6 @@ noise-filter = [
 ]
 openapi = [
     "dep:utoipa",
-    "dep:serde_yaml",
 ]
 
 [dependencies]
@@ -55,6 +54,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Environment variables
 dotenvy = "0.15"
 
+# Configuration
+serde_yaml = "0.9"
+
 # Error handling
 thiserror = "2.0.12"
 
@@ -79,7 +81,6 @@ once_cell = "1.19"
 
 # OpenAPI documentation (feature-gated)
 utoipa = { version = "5.3", optional = true, features = ["axum_extras"] }
-serde_yaml = { version = "0.9", optional = true }
 
 # LiveKit
 livekit = "=0.7.18"

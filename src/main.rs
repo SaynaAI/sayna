@@ -1,16 +1,47 @@
-use std::env;
+use std::path::PathBuf;
 
 #[cfg(feature = "openapi")]
 use std::fs;
-#[cfg(feature = "openapi")]
-use std::path::PathBuf;
 
 use axum::{Router, middleware};
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 
 use anyhow::anyhow;
 
 use sayna::{ServerConfig, init, middleware::auth::auth_middleware, routes, state::AppState};
+
+/// Sayna - Real-time voice processing server
+#[derive(Parser, Debug)]
+#[command(name = "sayna")]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Path to configuration file (YAML)
+    #[arg(short = 'c', long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Subcommand to run
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Initialize turn detection models
+    Init,
+
+    /// Generate OpenAPI specification
+    #[cfg(feature = "openapi")]
+    Openapi {
+        /// Output format (yaml or json)
+        #[arg(short = 'f', long = "format", default_value = "yaml")]
+        format: String,
+
+        /// Output file path (prints to stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,42 +54,21 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow!("Failed to install default crypto provider"))?;
 
-    // Handle CLI commands
-    let mut args = env::args();
-    let _ = args.next();
-    if let Some(command) = args.next() {
-        match command.as_str() {
-            "init" => {
-                if let Some(extra) = args.next() {
-                    anyhow::bail!("Unexpected argument '{extra}' after 'init'");
-                }
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Init => {
                 init::run().await?;
                 return Ok(());
             }
             #[cfg(feature = "openapi")]
-            "openapi" => {
-                // Parse openapi command arguments
-                let mut format = "yaml".to_string();
-                let mut output: Option<PathBuf> = None;
-
-                while let Some(arg) = args.next() {
-                    match arg.as_str() {
-                        "-f" | "--format" => {
-                            format = args.next()
-                                .ok_or_else(|| anyhow!("--format requires a value (yaml or json)"))?;
-                            if format != "yaml" && format != "json" {
-                                anyhow::bail!("Invalid format '{}'. Must be 'yaml' or 'json'", format);
-                            }
-                        }
-                        "-o" | "--output" => {
-                            let path = args.next()
-                                .ok_or_else(|| anyhow!("--output requires a file path"))?;
-                            output = Some(PathBuf::from(path));
-                        }
-                        other => {
-                            anyhow::bail!("Unknown option '{}'. Use --format (yaml|json) or --output <file>", other);
-                        }
-                    }
+            Commands::Openapi { format, output } => {
+                // Validate format
+                if format != "yaml" && format != "json" {
+                    anyhow::bail!("Invalid format '{}'. Must be 'yaml' or 'json'", format);
                 }
 
                 // Generate the spec in the requested format
@@ -81,21 +91,16 @@ async fn main() -> anyhow::Result<()> {
 
                 return Ok(());
             }
-            other => {
-                #[cfg(feature = "openapi")]
-                {
-                    anyhow::bail!("Unknown command '{other}'. Supported commands: init, openapi");
-                }
-                #[cfg(not(feature = "openapi"))]
-                {
-                    anyhow::bail!("Unknown command '{other}'. Supported commands: init");
-                }
-            }
         }
     }
 
-    // Load configuration
-    let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
+    // Load configuration from file or environment
+    let config = if let Some(config_path) = cli.config {
+        println!("Loading configuration from {}", config_path.display());
+        ServerConfig::from_file(&config_path).map_err(|e| anyhow!(e.to_string()))?
+    } else {
+        ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?
+    };
     let address = config.address();
     println!("Starting server on {address}");
 
