@@ -58,10 +58,11 @@ The server will start on `http://localhost:3001`
 
 ## Feature Toggles
 
-Sayna exposes two Cargo features that gate heavyweight subsystems. Both are enabled by default and can be combined.
+Sayna exposes several Cargo features that gate heavyweight subsystems or documentation features.
 
-- `turn-detect`: ONNX-based speech turn detection and asset preparation
-- `noise-filter`: DeepFilterNet noise suppression pipeline
+- `turn-detect` (default): ONNX-based speech turn detection and asset preparation
+- `noise-filter` (default): DeepFilterNet noise suppression pipeline
+- `openapi`: OpenAPI 3.1 specification generation and endpoints
 
 Example commands:
 
@@ -75,13 +76,67 @@ cargo run --features turn-detect
 # Run with noise filter
 cargo run --features noise-filter
 
-# Run with both features
-cargo run --features turn-detect,noise-filter
+# Run with OpenAPI documentation
+cargo run --features openapi
+
+# Run with multiple features
+cargo run --features turn-detect,noise-filter,openapi
 ```
 
 Features are compile-time only. Disable them when you need smaller builds or want to avoid optional dependencies.
 
 `sayna init` downloads turn-detection assets when the `turn-detect` feature is enabled. Without that feature the command exits early with an explanatory error, and runtime logs mention the timer-based fallback.
+
+## OpenAPI Documentation
+
+Sayna provides machine-generated OpenAPI 3.1 specification for all REST endpoints and WebSocket message types. This feature is gated behind the `openapi` Cargo feature to keep production builds lean.
+
+### Viewing the API Documentation
+
+When the server is run with the `openapi` feature enabled, the OpenAPI spec is available at:
+
+- **JSON Format**: `GET /docs/openapi.json`
+- **YAML Format**: `GET /docs/openapi.yaml`
+
+```bash
+# Run server with OpenAPI endpoints
+cargo run --features openapi
+
+# Access the spec
+curl http://localhost:3001/docs/openapi.json
+curl http://localhost:3001/docs/openapi.yaml
+```
+
+### Regenerating the OpenAPI Spec
+
+The OpenAPI specification is automatically generated from Rust code annotations. To update the committed spec file:
+
+```bash
+# Generate YAML to stdout (default)
+cargo run --features openapi -- openapi
+
+# Generate and save YAML to file
+cargo run --features openapi -- openapi --output docs/openapi.yaml
+# or use short form
+cargo run --features openapi -- openapi -o docs/openapi.yaml
+
+# Generate JSON format
+cargo run --features openapi -- openapi --format json --output docs/openapi.json
+# or use short form
+cargo run --features openapi -- openapi -f json -o docs/openapi.json
+```
+
+**CLI Options:**
+- `-f, --format <FORMAT>`: Output format (`yaml` or `json`). Default: `yaml`
+- `-o, --output <FILE>`: Write to file instead of stdout
+
+Both YAML and JSON formats are supported and can be used with:
+- **Postman**: For API testing (supports both formats)
+- **Swagger UI**: For interactive documentation (supports both formats)
+- **Redoc**: For modern API docs (supports both formats)
+- **API clients**: Generate SDKs using OpenAPI generators
+
+Then reference the spec in your documentation pages to automatically generate API blocks.
 
 ### Running Without API Keys (Audio-Disabled Mode)
 
