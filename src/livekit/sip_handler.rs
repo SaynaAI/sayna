@@ -175,7 +175,7 @@ impl LiveKitSipHandler {
             .list_sip_inbound_trunk(ListSIPInboundTrunkFilter::All)
             .await
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to list SIP inbound trunks: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to list SIP inbound trunks: {e}"))
             })?;
 
         let trunk_exists = trunks
@@ -198,8 +198,7 @@ impl LiveKitSipHandler {
                 .await
                 .map_err(|e| {
                     LiveKitError::ConnectionFailed(format!(
-                        "Failed to create SIP inbound trunk: {}",
-                        e
+                        "Failed to create SIP inbound trunk: {e}"
                     ))
                 })?;
         }
@@ -210,7 +209,7 @@ impl LiveKitSipHandler {
             .list_sip_dispatch_rule(ListSIPDispatchRuleFilter::All)
             .await
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to list SIP dispatch rules: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to list SIP dispatch rules: {e}"))
             })?;
 
         let rule_exists = rules
@@ -244,8 +243,7 @@ impl LiveKitSipHandler {
                 .await
                 .map_err(|e| {
                     LiveKitError::ConnectionFailed(format!(
-                        "Failed to create SIP dispatch rule: {}",
-                        e
+                        "Failed to create SIP dispatch rule: {e}"
                     ))
                 })?;
 
@@ -370,7 +368,7 @@ mod tests {
             let result = if input.starts_with("tel:") {
                 input.to_string()
             } else {
-                format!("tel:{}", input)
+                format!("tel:{input}")
             };
             assert_eq!(result, expected);
         }

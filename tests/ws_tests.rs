@@ -28,6 +28,7 @@ async fn test_websocket_voice_config() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };
@@ -185,6 +186,7 @@ async fn test_websocket_invalid_message() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };

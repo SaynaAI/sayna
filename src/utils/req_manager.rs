@@ -36,8 +36,7 @@ impl RequestMetrics {
         let retry_success = self.retry_successes.load(Ordering::Relaxed);
 
         format!(
-            "Requests - Total: {}, Success: {}, Failed: {}, Active: {}, Peak: {}, Retries: {}, Retry Success: {}",
-            total, success, failed, active, peak, retries, retry_success
+            "Requests - Total: {total}, Success: {success}, Failed: {failed}, Active: {active}, Peak: {peak}, Retries: {retries}, Retry Success: {retry_success}"
         )
     }
 }
@@ -614,7 +613,7 @@ impl ReqManager {
             .sum::<u128>()
             / probe_count as u128;
 
-        println!("  Phase 1 probe: avg latency {}ms", avg_latency_ms);
+        println!("  Phase 1 probe: avg latency {avg_latency_ms}ms");
 
         // Phase 2: Full warmup if latency is good
         if avg_latency_ms < 200 {
@@ -649,8 +648,7 @@ impl ReqManager {
             let successful = results.iter().filter(|r| r.is_ok()).count();
 
             println!(
-                "  Phase 2 aggressive: {}/{} successful",
-                successful, warmup_count
+                "  Phase 2 aggressive: {successful}/{warmup_count} successful"
             );
         } else {
             println!("  Skipping phase 2 due to high latency");
@@ -676,7 +674,7 @@ impl ReqManager {
         let client = Arc::clone(&self.client);
         let _metrics = Arc::clone(&self.metrics);
 
-        println!("Starting adaptive keep-alive task for URL: {}", url);
+        println!("Starting adaptive keep-alive task for URL: {url}");
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3));
@@ -726,8 +724,7 @@ impl ReqManager {
                         // Stop after too many failures
                         if consecutive_failures > 10 {
                             eprintln!(
-                                "Keep-alive task stopping after {} failures",
-                                consecutive_failures
+                                "Keep-alive task stopping after {consecutive_failures} failures"
                             );
                             break;
                         }

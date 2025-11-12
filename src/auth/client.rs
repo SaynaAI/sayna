@@ -58,7 +58,7 @@ impl AuthClient {
             .timeout(timeout)
             .pool_max_idle_per_host(10) // Connection pooling
             .build()
-            .map_err(|e| AuthError::ConfigError(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| AuthError::ConfigError(format!("Failed to create HTTP client: {e}")))?;
 
         Ok(Self {
             client,
@@ -234,6 +234,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: None,
             auth_signing_key_path: Some(PathBuf::from("/tmp/key.pem")),
             auth_timeout_seconds: 5,
@@ -263,6 +264,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some("http://auth.example.com".to_string()),
             auth_signing_key_path: None,
             auth_timeout_seconds: 5,
@@ -305,6 +307,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -356,6 +359,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -408,6 +412,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -462,6 +467,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 1, // 1 second timeout
@@ -517,6 +523,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_secret_key: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
+            auth_api_secret: None,
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,

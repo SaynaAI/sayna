@@ -28,6 +28,7 @@ async fn test_health_check() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };
@@ -80,6 +81,7 @@ async fn test_speak_endpoint_missing_api_key() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };
@@ -140,6 +142,7 @@ async fn test_speak_endpoint_empty_text() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };
@@ -207,6 +210,7 @@ async fn test_speak_endpoint_with_pronunciations() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };
@@ -276,6 +280,7 @@ async fn test_speak_endpoint_invalid_provider() {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
     };

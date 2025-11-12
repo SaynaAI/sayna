@@ -194,7 +194,7 @@ impl LiveKitRoomHandler {
             .with_grants(self.token_permissions(room_name, false))
             .to_jwt()
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to generate user token: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to generate user token: {e}"))
             })?;
 
         Ok(token)
@@ -238,7 +238,7 @@ impl LiveKitRoomHandler {
             .with_grants(self.token_permissions(room_name, true))
             .to_jwt()
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to generate agent token: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to generate agent token: {e}"))
             })?;
 
         Ok(token)
@@ -277,7 +277,7 @@ impl LiveKitRoomHandler {
         self.room_client
             .create_room(room_name, options)
             .await
-            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to create room: {}", e)))?;
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to create room: {e}")))?;
 
         Ok(())
     }
@@ -320,7 +320,7 @@ impl LiveKitRoomHandler {
         self.room_client
             .delete_room(room_name)
             .await
-            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to delete room: {}", e)))?;
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to delete room: {e}")))?;
 
         Ok(())
     }
@@ -398,7 +398,7 @@ impl LiveKitRoomHandler {
             .start_room_composite_egress(room_name, vec![EgressOutput::File(file_output)], options)
             .await
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to start room recording: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to start room recording: {e}"))
             })?;
 
         Ok(egress_info.egress_id)
@@ -433,7 +433,7 @@ impl LiveKitRoomHandler {
             .stop_egress(egress_id)
             .await
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to stop room recording: {}", e))
+                LiveKitError::ConnectionFailed(format!("Failed to stop room recording: {e}"))
             })?;
 
         Ok(())

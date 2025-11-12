@@ -68,12 +68,13 @@ impl AppState {
             None
         };
 
-        // Initialize auth client if auth is required and configured
-        let auth_client = if config.auth_required {
+        // Initialize auth client if JWT-based auth is configured
+        // Note: API secret auth doesn't need a client - it's handled directly in middleware
+        let auth_client = if config.auth_required && config.has_jwt_auth() {
             match AuthClient::from_config(&config).await {
                 Ok(client) => {
                     tracing::info!(
-                        "Authentication enabled with service: {}",
+                        "JWT authentication enabled with service: {}",
                         config
                             .auth_service_url
                             .as_ref()
@@ -82,16 +83,18 @@ impl AppState {
                     Some(Arc::new(client))
                 }
                 Err(e) => {
-                    // Fail fast when auth is required but client initialization fails
+                    // Fail fast when JWT auth is configured but client initialization fails
                     tracing::error!("Failed to initialize auth client: {:?}", e);
                     panic!(
-                        "AUTH_REQUIRED=true but auth client initialization failed: {:?}. \
+                        "JWT authentication configured but client initialization failed: {e:?}. \
                         Cannot start server without authentication. \
-                        Please check AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH configuration.",
-                        e
+                        Please check AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH configuration."
                     );
                 }
             }
+        } else if config.auth_required && config.has_api_secret_auth() {
+            tracing::info!("API secret authentication enabled");
+            None
         } else {
             None
         };

@@ -38,6 +38,7 @@ pub struct ServerConfig {
     // Authentication configuration
     pub auth_service_url: Option<String>,
     pub auth_signing_key_path: Option<PathBuf>,
+    pub auth_api_secret: Option<String>,
     pub auth_timeout_seconds: u64,
     pub auth_required: bool,
 }
@@ -80,6 +81,7 @@ impl ServerConfig {
         // Authentication configuration from env
         let auth_service_url = env::var("AUTH_SERVICE_URL").ok();
         let auth_signing_key_path = env::var("AUTH_SIGNING_KEY_PATH").ok().map(PathBuf::from);
+        let auth_api_secret = env::var("AUTH_API_SECRET").ok();
         let auth_timeout_seconds = env::var("AUTH_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -89,13 +91,21 @@ impl ServerConfig {
             .and_then(|v| parse_bool(&v))
             .unwrap_or(false);
 
-        // Validate auth configuration if auth is required
-        if auth_required {
+        // Validate JWT auth configuration if partially provided (regardless of auth_required)
+        // This ensures better error messages for misconfiguration
+        if auth_service_url.is_some() || auth_signing_key_path.is_some() {
             if auth_service_url.is_none() {
-                return Err("AUTH_SERVICE_URL is required when AUTH_REQUIRED=true".into());
+                return Err(
+                    "AUTH_SERVICE_URL is required when AUTH_SIGNING_KEY_PATH is set".into(),
+                );
             }
+            if auth_signing_key_path.is_none() {
+                return Err(
+                    "AUTH_SIGNING_KEY_PATH is required when AUTH_SERVICE_URL is set".into(),
+                );
+            }
+            // Check if the signing key file exists
             if let Some(ref key_path) = auth_signing_key_path {
-                // Check if the signing key file exists
                 if !key_path.exists() {
                     return Err(format!(
                         "AUTH_SIGNING_KEY_PATH file does not exist: {}",
@@ -103,8 +113,18 @@ impl ServerConfig {
                     )
                     .into());
                 }
-            } else {
-                return Err("AUTH_SIGNING_KEY_PATH is required when AUTH_REQUIRED=true".into());
+            }
+        }
+
+        // Validate that when auth is required, at least one auth method is configured
+        if auth_required {
+            let has_jwt_auth = auth_service_url.is_some() && auth_signing_key_path.is_some();
+            let has_api_secret = auth_api_secret.is_some();
+
+            if !has_jwt_auth && !has_api_secret {
+                return Err(
+                    "When AUTH_REQUIRED=true, either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET must be configured".into()
+                );
             }
         }
 
@@ -126,6 +146,7 @@ impl ServerConfig {
             cache_ttl_seconds,
             auth_service_url,
             auth_signing_key_path,
+            auth_api_secret,
             auth_timeout_seconds,
             auth_required,
         })
@@ -133,6 +154,20 @@ impl ServerConfig {
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Check if JWT-based authentication is configured
+    ///
+    /// Returns true if both AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH are set
+    pub fn has_jwt_auth(&self) -> bool {
+        self.auth_service_url.is_some() && self.auth_signing_key_path.is_some()
+    }
+
+    /// Check if API secret authentication is configured
+    ///
+    /// Returns true if AUTH_API_SECRET is set
+    pub fn has_api_secret_auth(&self) -> bool {
+        self.auth_api_secret.is_some()
     }
 
     /// Get API key for a specific provider
@@ -195,6 +230,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
         };
@@ -224,6 +260,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
         };
@@ -253,6 +290,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
         };
@@ -285,6 +323,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
         };
@@ -317,6 +356,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
         };
@@ -366,6 +406,7 @@ mod tests {
             env::remove_var("AUTH_REQUIRED");
             env::remove_var("AUTH_SERVICE_URL");
             env::remove_var("AUTH_SIGNING_KEY_PATH");
+            env::remove_var("AUTH_API_SECRET");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
             env::remove_var("HOST");
             env::remove_var("PORT");
@@ -536,11 +577,12 @@ mod tests {
         unsafe {
             env::set_var("AUTH_REQUIRED", "true");
             env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+            // Missing AUTH_SERVICE_URL (and no AUTH_API_SECRET either)
         }
-        // Missing AUTH_SERVICE_URL
 
         let result = ServerConfig::from_env();
         assert!(result.is_err());
+        // Should fail because when AUTH_SIGNING_KEY_PATH is set, AUTH_SERVICE_URL is required
         assert!(
             result
                 .unwrap_err()
@@ -559,11 +601,12 @@ mod tests {
         unsafe {
             env::set_var("AUTH_REQUIRED", "true");
             env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            // Missing AUTH_SIGNING_KEY_PATH (and no AUTH_API_SECRET either)
         }
-        // Missing AUTH_SIGNING_KEY_PATH
 
         let result = ServerConfig::from_env();
         assert!(result.is_err());
+        // Should fail because when AUTH_SERVICE_URL is set, AUTH_SIGNING_KEY_PATH is required
         assert!(
             result
                 .unwrap_err()
@@ -612,5 +655,188 @@ mod tests {
         assert_eq!(config.port, 8080);
 
         cleanup_env_vars();
+    }
+
+    // API Secret authentication tests
+
+    #[test]
+    #[serial]
+    fn test_from_env_api_secret_auth_enabled() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_API_SECRET", "my-super-secret-token");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(config.auth_required);
+        assert_eq!(
+            config.auth_api_secret,
+            Some("my-super-secret-token".to_string())
+        );
+        assert!(config.auth_service_url.is_none());
+        assert!(config.auth_signing_key_path.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_api_secret_missing_when_required() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            // No AUTH_API_SECRET or AUTH_SERVICE_URL
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET"));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_both_auth_methods_configured() {
+        cleanup_env_vars();
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+        fs::write(&key_path, "fake key content").unwrap();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
+            env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
+            env::set_var("AUTH_API_SECRET", "my-secret");
+        }
+
+        // Both auth methods configured should be valid
+        let config = ServerConfig::from_env().expect("Should load config with both auth methods");
+        assert!(config.auth_required);
+        assert_eq!(config.auth_api_secret, Some("my-secret".to_string()));
+        assert_eq!(
+            config.auth_service_url,
+            Some("http://auth.example.com".to_string())
+        );
+        assert_eq!(config.auth_signing_key_path, Some(key_path));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_has_jwt_auth() {
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("test_key.pem");
+
+        let config_with_jwt = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: Some("http://auth.example.com".to_string()),
+            auth_signing_key_path: Some(key_path),
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: true,
+        };
+
+        assert!(config_with_jwt.has_jwt_auth());
+        assert!(!config_with_jwt.has_api_secret_auth());
+
+        let config_without_jwt = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+        };
+
+        assert!(!config_without_jwt.has_jwt_auth());
+    }
+
+    #[test]
+    fn test_has_api_secret_auth() {
+        let config_with_api_secret = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: Some("my-secret-token".to_string()),
+            auth_timeout_seconds: 5,
+            auth_required: true,
+        };
+
+        assert!(config_with_api_secret.has_api_secret_auth());
+        assert!(!config_with_api_secret.has_jwt_auth());
+
+        let config_without_api_secret = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+        };
+
+        assert!(!config_without_api_secret.has_api_secret_auth());
     }
 }
