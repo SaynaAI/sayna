@@ -125,7 +125,7 @@ pub fn load_private_key(key_path: &Path) -> AuthResult<(EncodingKey, Algorithm)>
 
     // Read the private key file
     let key_data = fs::read(key_path)
-        .map_err(|e| AuthError::ConfigError(format!("Failed to read private key file: {}", e)))?;
+        .map_err(|e| AuthError::ConfigError(format!("Failed to read private key file: {e}")))?;
 
     // Detect algorithm and create the appropriate EncodingKey
     let (encoding_key, algorithm) = if let Ok(key) = EncodingKey::from_rsa_pem(&key_data) {
@@ -199,7 +199,7 @@ pub fn sign_auth_request_with_key(
     let claims = AuthClaims::new(payload.clone());
 
     encode(&header, &claims, encoding_key)
-        .map_err(|e| AuthError::JwtSigningError(format!("Failed to encode JWT: {}", e)))
+        .map_err(|e| AuthError::JwtSigningError(format!("Failed to encode JWT: {e}")))
 }
 
 pub fn sign_auth_request(payload: &AuthPayload, private_key_path: &Path) -> AuthResult<String> {
@@ -213,7 +213,7 @@ pub fn sign_auth_request(payload: &AuthPayload, private_key_path: &Path) -> Auth
 
     // Sign the claims
     encode(&header, &claims, &encoding_key)
-        .map_err(|e| AuthError::JwtSigningError(format!("Failed to sign JWT: {}", e)))
+        .map_err(|e| AuthError::JwtSigningError(format!("Failed to sign JWT: {e}")))
 }
 
 #[cfg(test)]

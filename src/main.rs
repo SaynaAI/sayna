@@ -1,5 +1,8 @@
 use std::env;
+
+#[cfg(feature = "openapi")]
 use std::fs;
+#[cfg(feature = "openapi")]
 use std::path::PathBuf;
 
 use axum::{Router, middleware};

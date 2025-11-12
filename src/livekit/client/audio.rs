@@ -369,8 +369,7 @@ impl LiveKitClient {
 
         if samples_per_channel == 0 || !num_samples.is_multiple_of(channels as usize) {
             return Err(AppError::InternalServerError(format!(
-                "Invalid audio data: {} samples doesn't divide evenly by {} channels",
-                num_samples, channels
+                "Invalid audio data: {num_samples} samples doesn't divide evenly by {channels} channels"
             )));
         }
 

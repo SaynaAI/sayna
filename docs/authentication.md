@@ -2,11 +2,75 @@
 
 ## Overview
 
-Sayna implements a customer-based authentication system that delegates token validation to an external authentication service. This design provides flexibility for implementing custom authorization logic while maintaining security through JWT signing to prevent request tampering.
+Sayna supports two authentication methods for protecting API endpoints:
+
+1. **API Secret Authentication** (Simple): Direct bearer token comparison against a configured secret. Ideal for single-tenant deployments or simple use cases.
+
+2. **JWT-Based Authentication** (Advanced): Delegates token validation to an external authentication service with JWT-signed requests. Provides maximum flexibility for multi-tenant systems and complex authorization logic.
+
+Both methods can be configured independently, and you can choose the approach that best fits your deployment requirements.
+
+## Quick Start
+
+### API Secret (Simplest)
+```bash
+# 1. Generate a secret
+openssl rand -base64 32
+
+# 2. Configure
+AUTH_REQUIRED=true
+AUTH_API_SECRET=your-generated-secret
+
+# 3. Use
+curl -H "Authorization: Bearer your-generated-secret" http://localhost:3001/speak
+```
+
+### JWT-Based (Advanced)
+```bash
+# 1. Generate keys
+openssl genrsa -out private.pem 2048
+openssl rsa -in private.pem -pubout -out public.pem
+
+# 2. Configure
+AUTH_REQUIRED=true
+AUTH_SERVICE_URL=https://your-auth.com/validate
+AUTH_SIGNING_KEY_PATH=/path/to/private.pem
+
+# 3. Implement auth service (see detailed setup below)
+```
 
 ## Architecture
 
-### Authentication Flow
+### Method 1: API Secret Authentication Flow
+
+Simple bearer token comparison - no external service required.
+
+```
+┌─────────┐                 ┌───────┐
+│ Client  │                 │ Sayna │
+└────┬────┘                 └───┬───┘
+     │                          │
+     │ POST /speak              │
+     │ Authorization: Bearer tk │
+     ├─────────────────────────>│
+     │                          │
+     │                          │ Compare token "tk"
+     │                          │ with AUTH_API_SECRET
+     │                          │
+     │     Allow/Deny request   │
+     │<─────────────────────────┤
+     │                          │
+```
+
+**When to use:**
+- Single-tenant deployments
+- Simple authentication requirements
+- No need for per-request authorization logic
+- Lowest latency (no external service call)
+
+### Method 2: JWT-Based Authentication Flow
+
+Delegated validation with external auth service for advanced use cases.
 
 ```
 ┌─────────┐                 ┌───────┐                ┌──────────────┐
@@ -40,31 +104,95 @@ Sayna implements a customer-based authentication system that delegates token val
      │                          │                           │
 ```
 
+**When to use:**
+- Multi-tenant deployments
+- Complex authorization logic (permissions, roles, quotas)
+- Need to validate against external user database
+- Context-aware authorization (different permissions per endpoint)
+- Centralized authentication service
+
 ### Components
 
 1. **Authentication Middleware** (`src/middleware/auth.rs`)
    - Intercepts HTTP requests to protected endpoints
    - Extracts and validates Authorization header format
-   - Buffers request body and headers for auth validation
-   - Calls AuthClient to validate tokens
+   - **API Secret Mode**: Direct token comparison with configured secret
+   - **JWT Mode**: Buffers request body/headers and calls AuthClient
+   - Priority: API secret checked first if configured
 
-2. **Auth Client** (`src/auth/client.rs`)
+2. **Server Config** (`src/config.rs`)
+   - Loads authentication configuration from environment variables
+   - Validates that at least one auth method is configured when `AUTH_REQUIRED=true`
+   - Helper methods: `has_jwt_auth()`, `has_api_secret_auth()`
+
+3. **Auth Client** (`src/auth/client.rs`) - JWT Mode Only
    - HTTP client for communicating with external auth service
    - Signs auth payloads using JWT
    - Handles connection pooling and timeouts
 
-3. **JWT Signing Module** (`src/auth/jwt.rs`)
+4. **JWT Signing Module** (`src/auth/jwt.rs`) - JWT Mode Only
    - Signs auth request payloads with private key
    - Supports RSA and ECDSA keys in PEM format
    - Includes timestamp and 5-minute expiration
 
-4. **Error Handling** (`src/errors/auth_error.rs`)
+5. **Error Handling** (`src/errors/auth_error.rs`)
    - Comprehensive error types for auth failures
    - Proper HTTP status code mapping
 
 ## Setup
 
-### 1. Generate Signing Keys
+Choose one of the two authentication methods below based on your requirements.
+
+### Option A: API Secret Authentication (Simple)
+
+For simple deployments where you just need a shared secret.
+
+#### 1. Generate a Secure Secret
+
+```bash
+# Generate a random 32-character secret
+openssl rand -base64 32
+
+# Or use any secure string
+# Example: sk_live_abc123xyz789...
+```
+
+#### 2. Configure Environment Variables
+
+Add to your `.env` file:
+
+```bash
+# Enable authentication
+AUTH_REQUIRED=true
+
+# Set your API secret
+AUTH_API_SECRET=your-secure-secret-here
+```
+
+#### 3. Use the Token
+
+Clients authenticate by sending the secret as a bearer token:
+
+```bash
+curl -X POST http://localhost:3001/speak \
+  -H "Authorization: Bearer your-secure-secret-here" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world"}'
+```
+
+**That's it!** No external service or key generation needed.
+
+**Security Notes:**
+- Use a long, random secret (32+ characters)
+- Rotate the secret periodically
+- Never commit the secret to version control
+- Use HTTPS in production to protect the token in transit
+
+### Option B: JWT-Based Authentication (Advanced)
+
+For multi-tenant or complex authorization requirements.
+
+#### 1. Generate Signing Keys
 
 Generate an RSA key pair for JWT signing:
 
@@ -94,19 +222,21 @@ chmod 600 auth_private_key.pem
 chmod 644 auth_public_key.pem
 ```
 
-### 2. Configure Environment Variables
+#### 2. Configure Environment Variables
 
-Add the following to your `.env` file:
+Add to your `.env` file:
 
 ```bash
-# Authentication configuration
+# Enable authentication
 AUTH_REQUIRED=true
+
+# JWT-based auth configuration
 AUTH_SERVICE_URL=https://your-auth-service.com/auth
 AUTH_SIGNING_KEY_PATH=/path/to/auth_private_key.pem
 AUTH_TIMEOUT_SECONDS=5
 ```
 
-### 3. Implement Auth Service
+#### 3. Implement Auth Service
 
 Your external authentication service must:
 
@@ -118,7 +248,7 @@ Your external authentication service must:
    - `401 Unauthorized` if token is invalid
    - Any other status code for errors
 
-#### Example Auth Service (Node.js + Express)
+##### Example Auth Service (Node.js + Express)
 
 ```javascript
 const express = require('express');
@@ -162,13 +292,22 @@ app.listen(3000);
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AUTH_REQUIRED` | No | `false` | Enable/disable authentication |
-| `AUTH_SERVICE_URL` | Yes* | - | External auth service endpoint |
-| `AUTH_SIGNING_KEY_PATH` | Yes* | - | Path to RSA/ECDSA private key (PEM format) |
-| `AUTH_TIMEOUT_SECONDS` | No | `5` | Auth request timeout in seconds |
+| `AUTH_API_SECRET` | Conditional* | - | Secret token for API Secret authentication |
+| `AUTH_SERVICE_URL` | Conditional** | - | External auth service endpoint (JWT mode) |
+| `AUTH_SIGNING_KEY_PATH` | Conditional** | - | Path to RSA/ECDSA private key (JWT mode) |
+| `AUTH_TIMEOUT_SECONDS` | No | `5` | Auth request timeout in seconds (JWT mode only) |
 
-*Required when `AUTH_REQUIRED=true`
+**Configuration Requirements:**
 
-## JWT Payload Specification
+When `AUTH_REQUIRED=true`, you must configure **at least one** of:
+- **Option A (Simple)**: Set `AUTH_API_SECRET`
+- **Option B (Advanced)**: Set both `AUTH_SERVICE_URL` and `AUTH_SIGNING_KEY_PATH`
+
+**Both methods can coexist**: If both are configured, API Secret is checked first (takes priority).
+
+## JWT Payload Specification (JWT Mode Only)
+
+This section applies only to JWT-based authentication (Option B). Skip this if you're using API Secret authentication.
 
 The JWT signed by Sayna contains the following claims structure:
 
@@ -231,17 +370,45 @@ The following API endpoints require authentication when `AUTH_REQUIRED=true`:
 
 ### Making Authenticated Requests
 
+The client authentication flow is identical for both methods - just send a bearer token in the Authorization header.
+
+#### With API Secret Authentication
+
 ```bash
-# With valid token
+# Use your configured AUTH_API_SECRET as the bearer token
 curl -X POST http://localhost:3001/speak \
-  -H "Authorization: Bearer your-token-here" \
+  -H "Authorization: Bearer your-configured-secret" \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-US-JennyNeural"}'
 
-# Without token (will fail if auth is enabled)
+# List available voices
+curl -X GET http://localhost:3001/voices \
+  -H "Authorization: Bearer your-configured-secret"
+```
+
+#### With JWT-Based Authentication
+
+```bash
+# Use your user's token (validated by your auth service)
+curl -X POST http://localhost:3001/speak \
+  -H "Authorization: Bearer user-jwt-token-abc123" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "voice": "en-US-JennyNeural"}'
+
+# The token can be different for each user
+curl -X POST http://localhost:3001/speak \
+  -H "Authorization: Bearer user-jwt-token-xyz789" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Different user"}'
+```
+
+#### Without Authentication (will fail if auth is enabled)
+
+```bash
 curl -X POST http://localhost:3001/speak \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}'
+# Returns: 401 Unauthorized - Missing Authorization header
 ```
 
 ## Error Responses
@@ -474,6 +641,33 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
 
 ### Authentication Not Working
 
+#### For API Secret Authentication
+
+1. **Check configuration**:
+   ```bash
+   # Verify environment variables are set
+   echo $AUTH_REQUIRED
+   echo $AUTH_API_SECRET
+   ```
+
+2. **Verify token matches**:
+   ```bash
+   # Make sure you're sending the exact same string
+   # API secret comparison is case-sensitive
+   curl -v -X POST http://localhost:3001/speak \
+     -H "Authorization: Bearer $AUTH_API_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "test"}'
+   ```
+
+3. **Review logs**:
+   ```bash
+   # Look for: "API secret authentication enabled"
+   # Or: "API secret authentication failed: token mismatch"
+   ```
+
+#### For JWT-Based Authentication
+
 1. **Check configuration**:
    ```bash
    # Verify environment variables are set
@@ -500,8 +694,8 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
 
 4. **Review logs**:
    ```bash
-   # Sayna logs authentication events
-   # Look for: "Authentication enabled", "Auth client not initialized", etc.
+   # Look for: "JWT authentication enabled"
+   # Or: "JWT authentication failed"
    ```
 
 ### Common Errors
@@ -509,26 +703,37 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
 | Error | Cause | Solution |
 |-------|-------|----------|
 | 401 Unauthorized | Missing or invalid token | Include valid `Authorization: Bearer {token}` header |
-| 500 Internal Server Error | Auth misconfigured | Check AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH are set |
-| 503 Service Unavailable | Auth service unreachable | Verify auth service is running and reachable |
+| 401 "Invalid API secret" | Token doesn't match AUTH_API_SECRET | Check token is exactly the same as configured secret (case-sensitive) |
+| 500 "Auth required but no method configured" | AUTH_REQUIRED=true but no auth method set | Set either AUTH_API_SECRET or (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) |
+| 503 Service Unavailable | Auth service unreachable (JWT mode) | Verify auth service is running and reachable |
 
 ## Performance Considerations
 
-- **Connection Pooling**: HTTP client pools connections to auth service
-- **Timeout**: Configurable timeout prevents hanging requests
+### API Secret Authentication
+- **Fastest option**: No external service calls, just string comparison
+- **Zero latency overhead**: Authentication happens in microseconds
+- **No network dependencies**: No risk of auth service downtime
+- **Best for**: High-throughput, latency-sensitive applications
+
+### JWT-Based Authentication
+- **External service latency**: Adds network round-trip time to each request
+- **Connection Pooling**: HTTP client pools connections to minimize overhead
+- **Timeout**: Configurable timeout prevents hanging requests (default: 5s)
 - **Async**: All auth operations are non-blocking
 - **Caching**: Consider implementing token caching in future (not currently implemented)
 
 ### Optimization Tips
 
-1. **Increase timeout** for slow auth services:
+1. **For JWT mode - Increase timeout** for slow auth services:
    ```bash
    AUTH_TIMEOUT_SECONDS=10
    ```
 
-2. **Deploy auth service close to Sayna** to reduce network latency
+2. **For JWT mode - Deploy auth service close to Sayna** to reduce network latency
 
-3. **Monitor auth service performance** and scale as needed
+3. **For JWT mode - Monitor auth service performance** and scale as needed
+
+4. **Consider API Secret** if you don't need per-user authorization logic
 
 ## Development and Testing
 
@@ -547,15 +752,38 @@ For testing without a real auth service, keep `AUTH_REQUIRED=false` or implement
 
 See `tests/auth_integration_test.rs` for examples of testing authentication middleware.
 
-## Alternative Approaches
+## Choosing Between Authentication Methods
 
-### 1. Direct Token Forwarding
-Send bearer token directly to auth service with a shared secret. Simpler but less flexible.
+Use this decision guide to select the right authentication method:
 
-### 2. OAuth2 Proxy Pattern
-Use oauth2-proxy or similar in front of Sayna. Standardized but requires additional infrastructure.
+### Use API Secret Authentication When:
+✅ Single tenant or small number of known clients
+✅ Same authorization level for all authenticated requests
+✅ Performance/latency is critical
+✅ Simple deployment without external services
+✅ Quick setup and minimal configuration needed
 
-### 3. Embedded Token Validation
-Validate JWT tokens directly in Sayna (no external service). Faster but less flexible for multi-tenant scenarios.
+### Use JWT-Based Authentication When:
+✅ Multi-tenant application
+✅ Different users need different permissions
+✅ Need context-aware authorization (different permissions per endpoint)
+✅ Integration with existing user management system
+✅ Audit trail and detailed access logs required
+✅ Token validation logic changes frequently
 
-The current JWT signing approach provides maximum flexibility for complex authorization requirements.
+### Can I Use Both?
+Yes! Both methods can coexist:
+- Configure both `AUTH_API_SECRET` and `AUTH_SERVICE_URL`
+- API Secret is checked first (takes priority)
+- Useful for: admin access via secret + user access via JWT
+
+## Alternative Approaches Comparison
+
+| Approach | Pros | Cons | Use Case |
+|----------|------|------|----------|
+| **API Secret** (Current) | Simple, fast, no external deps | Single shared secret, less flexible | Simple deployments |
+| **JWT Validation** (Current) | Flexible, per-user auth, context-aware | Requires external service, latency overhead | Complex auth requirements |
+| **OAuth2 Proxy** | Standardized, battle-tested | Additional infrastructure, not integrated | Enterprise deployments |
+| **Embedded JWT** | Fast, no external service | Tightly coupled, hard to update logic | Standalone apps |
+
+Sayna's dual authentication approach combines the simplicity of API secrets with the flexibility of JWT validation, giving you the best of both worlds.

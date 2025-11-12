@@ -29,6 +29,7 @@ async fn create_test_state_auth_disabled() -> Arc<AppState> {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
+        auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false, // Auth disabled
     };
@@ -159,6 +160,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             cache_ttl_seconds: Some(3600),
             auth_service_url: Some(auth_service_url.to_string()),
             auth_signing_key_path: Some(key_path),
+            auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: true,
         };
@@ -394,5 +396,236 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "auth_service_unavailable");
+    }
+}
+
+// Integration tests for API secret authentication
+mod with_api_secret {
+    use super::*;
+
+    /// Helper to create a test AppState with API secret auth enabled
+    async fn create_test_state_with_api_secret(api_secret: &str) -> Arc<AppState> {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: Some(api_secret.to_string()),
+            auth_timeout_seconds: 5,
+            auth_required: true,
+        };
+
+        AppState::new(config).await
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_missing_header_returns_401() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "missing_auth_header");
+        assert_eq!(json["message"], "Missing Authorization header");
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_invalid_header_format_returns_401() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .header("authorization", "InvalidFormat")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_auth_header");
+        assert_eq!(json["message"], "Invalid Authorization header format");
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_valid_token_allows_request() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .header("authorization", "Bearer my-secret-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body_str, "OK");
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_invalid_token_denies_request() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .header("authorization", "Bearer wrong-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unauthorized");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid API secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_with_post_request_and_body() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/test")
+            .header("authorization", "Bearer my-secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"test": "data"}"#))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        // Should succeed with valid token, even with body
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED); // GET only handler
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_case_sensitive_token() {
+        let state = create_test_state_with_api_secret("MySecretToken").await;
+
+        // Test with different case - should fail
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state.clone());
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .header("authorization", "Bearer mysecrettoken")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Test with exact case - should succeed
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .header("authorization", "Bearer MySecretToken")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
