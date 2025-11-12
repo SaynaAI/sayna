@@ -113,18 +113,10 @@ async fn main() -> anyhow::Result<()> {
         Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
     // Combine all routes: public + protected + websocket
-    let mut app = public_routes
+    let app = public_routes
         .merge(protected_routes)
-        .merge(ws_routes);
-
-    // Add OpenAPI documentation routes if feature is enabled
-    #[cfg(feature = "openapi")]
-    {
-        println!("OpenAPI documentation available at http://{}/docs/ui", address);
-        app = app.merge(sayna::docs::openapi::router());
-    }
-
-    let app = app.with_state(app_state);
+        .merge(ws_routes)
+        .with_state(app_state);
 
     // Create listener
     let listener = TcpListener::bind(&address).await?;

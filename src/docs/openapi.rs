@@ -1,9 +1,9 @@
 //! OpenAPI specification and documentation
 //!
-//! This module provides OpenAPI/Swagger documentation for the Sayna API.
+//! This module provides OpenAPI specification generation for the Sayna API.
 //! It is only compiled when the `openapi` feature is enabled.
+//! The spec can be generated via CLI command: `cargo run --features openapi -- openapi -o docs/openapi.yaml`
 
-use axum::{routing::get, Json, Router};
 use utoipa::OpenApi;
 
 use crate::handlers::{
@@ -91,34 +91,6 @@ impl utoipa::Modify for SecurityAddon {
             )
         }
     }
-}
-
-/// Create OpenAPI documentation routes
-///
-/// Returns routes for serving the OpenAPI spec as JSON and YAML.
-/// This should only be called when the `openapi` feature is enabled.
-///
-/// Routes:
-/// - `GET /docs/openapi.json` - OpenAPI spec as JSON
-/// - `GET /docs/openapi.yaml` - OpenAPI spec as YAML
-pub fn router<S>() -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    Router::new()
-        .route("/docs/openapi.json", get(openapi_json_handler))
-        .route("/docs/openapi.yaml", get(openapi_yaml_handler))
-}
-
-/// Handler for GET /docs/openapi.json
-async fn openapi_json_handler() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
-}
-
-/// Handler for GET /docs/openapi.yaml
-async fn openapi_yaml_handler() -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
-    let yaml = spec_yaml().unwrap_or_else(|e| format!("Error generating YAML: {}", e));
-    ([(axum::http::header::CONTENT_TYPE, "application/yaml")], yaml)
 }
 
 /// Get OpenAPI spec as YAML string
