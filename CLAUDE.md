@@ -40,8 +40,9 @@ cargo run
 ### Feature Flags
 - `turn-detect` (default): ONNX-based turn detection. Required for `sayna init`.
 - `noise-filter` (default): DeepFilterNet noise suppression. Disable to reduce dependencies.
+- `openapi`: OpenAPI 3.1 specification generation and documentation endpoints using utoipa crate.
 
-Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect`.
+Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect,openapi`.
 
 ## High-Level Architecture
 
@@ -52,6 +53,7 @@ The codebase includes detailed development rules in `.cursor/rules/`:
 - **`core.mdc`**: Business logic specifications for STT/TTS provider abstractions and unified API design
 - **`axum.mdc`**: Axum framework best practices for WebSocket and REST API development
 - **`livekit.mdc`**: LiveKit integration patterns and WebSocket API implementation details
+- **`openapi.mdc`**: OpenAPI 3.1 documentation guidelines using utoipa crate, including schema annotations, path documentation, and spec generation
 
 Always consult these rule files when implementing new features or modifying existing code to ensure consistency with established patterns.
 
@@ -151,6 +153,7 @@ When adding new features:
 - `src/utils/noise_filter.rs`: DeepFilterNet integration and audio processing
 - `src/config.rs`: Server configuration and environment variable loading
 - `src/errors/mod.rs`: Centralized error types using thiserror
+- `src/docs/openapi.rs`: OpenAPI 3.1 specification and documentation (feature-gated)
 
 ## Adding New Providers
 
@@ -214,3 +217,28 @@ The LiveKit configuration in the WebSocket config message supports the following
 - Provider connections are reused when possible
 - WebSocket messages are processed asynchronously to prevent blocking
 - Memory is managed carefully in audio processing loops
+
+## OpenAPI Documentation
+
+When the `openapi` feature is enabled, you can generate the OpenAPI 3.1 specification:
+
+```bash
+# Generate YAML spec to file
+cargo run --features openapi -- openapi -o docs/openapi.yaml
+
+# Generate JSON spec
+cargo run --features openapi -- openapi --format json -o docs/openapi.json
+```
+
+### Adding OpenAPI Annotations
+
+When creating new REST endpoints or types, follow the guidelines in `.cursor/rules/openapi.mdc`:
+
+1. Add `#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]` to all request/response types
+2. Add `#[cfg_attr(feature = "openapi", utoipa::path(...))]` to handler functions
+3. Provide examples for all fields using `#[cfg_attr(feature = "openapi", schema(example = "..."))]`
+4. Register all types in `src/docs/openapi.rs` under `components(schemas(...))`
+5. Register all handlers in `src/docs/openapi.rs` under `paths(...)`
+6. Regenerate spec: `cargo run --features openapi -- openapi -o docs/openapi.yaml`
+
+See `.cursor/rules/openapi.mdc` for comprehensive guidelines and examples.

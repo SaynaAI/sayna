@@ -91,25 +91,9 @@ Features are compile-time only. Disable them when you need smaller builds or wan
 
 Sayna provides machine-generated OpenAPI 3.1 specification for all REST endpoints and WebSocket message types. This feature is gated behind the `openapi` Cargo feature to keep production builds lean.
 
-### Viewing the API Documentation
+### Generating the OpenAPI Spec
 
-When the server is run with the `openapi` feature enabled, the OpenAPI spec is available at:
-
-- **JSON Format**: `GET /docs/openapi.json`
-- **YAML Format**: `GET /docs/openapi.yaml`
-
-```bash
-# Run server with OpenAPI endpoints
-cargo run --features openapi
-
-# Access the spec
-curl http://localhost:3001/docs/openapi.json
-curl http://localhost:3001/docs/openapi.yaml
-```
-
-### Regenerating the OpenAPI Spec
-
-The OpenAPI specification is automatically generated from Rust code annotations. To update the committed spec file:
+The OpenAPI specification is automatically generated from Rust code annotations via CLI commands:
 
 ```bash
 # Generate YAML to stdout (default)
@@ -130,13 +114,12 @@ cargo run --features openapi -- openapi -f json -o docs/openapi.json
 - `-f, --format <FORMAT>`: Output format (`yaml` or `json`). Default: `yaml`
 - `-o, --output <FILE>`: Write to file instead of stdout
 
-Both YAML and JSON formats are supported and can be used with:
-- **Postman**: For API testing (supports both formats)
-- **Swagger UI**: For interactive documentation (supports both formats)
-- **Redoc**: For modern API docs (supports both formats)
-- **API clients**: Generate SDKs using OpenAPI generators
-
-Then reference the spec in your documentation pages to automatically generate API blocks.
+The generated spec can be used with:
+- **Postman**: For API testing and collection generation
+- **Swagger UI**: For interactive documentation
+- **Redoc**: For modern API docs
+- **OpenAPI Generators**: Generate client SDKs in various languages
+- **API Documentation Tools**: Import into your documentation platform
 
 ### Running Without API Keys (Audio-Disabled Mode)
 
