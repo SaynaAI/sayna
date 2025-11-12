@@ -1,4 +1,6 @@
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 
 use axum::{Router, middleware};
 use tokio::net::TcpListener;
@@ -30,8 +32,61 @@ async fn main() -> anyhow::Result<()> {
                 init::run().await?;
                 return Ok(());
             }
+            #[cfg(feature = "openapi")]
+            "openapi" => {
+                // Parse openapi command arguments
+                let mut format = "yaml".to_string();
+                let mut output: Option<PathBuf> = None;
+
+                while let Some(arg) = args.next() {
+                    match arg.as_str() {
+                        "-f" | "--format" => {
+                            format = args.next()
+                                .ok_or_else(|| anyhow!("--format requires a value (yaml or json)"))?;
+                            if format != "yaml" && format != "json" {
+                                anyhow::bail!("Invalid format '{}'. Must be 'yaml' or 'json'", format);
+                            }
+                        }
+                        "-o" | "--output" => {
+                            let path = args.next()
+                                .ok_or_else(|| anyhow!("--output requires a file path"))?;
+                            output = Some(PathBuf::from(path));
+                        }
+                        other => {
+                            anyhow::bail!("Unknown option '{}'. Use --format (yaml|json) or --output <file>", other);
+                        }
+                    }
+                }
+
+                // Generate the spec in the requested format
+                let spec_content = match format.as_str() {
+                    "yaml" => sayna::docs::openapi::spec_yaml()
+                        .map_err(|e| anyhow!("Failed to generate OpenAPI YAML: {}", e))?,
+                    "json" => sayna::docs::openapi::spec_json()
+                        .map_err(|e| anyhow!("Failed to generate OpenAPI JSON: {}", e))?,
+                    _ => unreachable!(),
+                };
+
+                // Write to file or stdout
+                if let Some(output_path) = output {
+                    fs::write(&output_path, &spec_content)
+                        .map_err(|e| anyhow!("Failed to write to {}: {}", output_path.display(), e))?;
+                    println!("OpenAPI spec written to {}", output_path.display());
+                } else {
+                    println!("{}", spec_content);
+                }
+
+                return Ok(());
+            }
             other => {
-                anyhow::bail!("Unknown command '{other}'. Supported commands: init");
+                #[cfg(feature = "openapi")]
+                {
+                    anyhow::bail!("Unknown command '{other}'. Supported commands: init, openapi");
+                }
+                #[cfg(not(feature = "openapi"))]
+                {
+                    anyhow::bail!("Unknown command '{other}'. Supported commands: init");
+                }
             }
         }
     }
@@ -58,10 +113,18 @@ async fn main() -> anyhow::Result<()> {
         Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
     // Combine all routes: public + protected + websocket
-    let app = public_routes
+    let mut app = public_routes
         .merge(protected_routes)
-        .merge(ws_routes)
-        .with_state(app_state);
+        .merge(ws_routes);
+
+    // Add OpenAPI documentation routes if feature is enabled
+    #[cfg(feature = "openapi")]
+    {
+        println!("OpenAPI documentation available at http://{}/docs/ui", address);
+        app = app.merge(sayna::docs::openapi::router());
+    }
+
+    let app = app.with_state(app_state);
 
     // Create listener
     let listener = TcpListener::bind(&address).await?;

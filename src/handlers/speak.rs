@@ -15,8 +15,10 @@ use crate::state::AppState;
 
 /// Request body for the speak endpoint
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SpeakRequest {
     /// The text to synthesize
+    #[cfg_attr(feature = "openapi", schema(example = "Hello, world!"))]
     pub text: String,
     /// TTS configuration (without API key)
     pub tts_config: TTSWebSocketConfig,
@@ -104,6 +106,29 @@ impl AudioCallback for AudioCollector {
 }
 
 /// Handler for the /speak endpoint
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/speak",
+        request_body = SpeakRequest,
+        responses(
+            (status = 200, description = "Audio generated successfully",
+                content_type = "audio/pcm",
+                headers(
+                    ("x-audio-format" = String, description = "Audio format (linear16, mp3, etc.)"),
+                    ("x-sample-rate" = u32, description = "Sample rate in Hz")
+                )
+            ),
+            (status = 400, description = "Invalid request (empty text)"),
+            (status = 500, description = "TTS synthesis failed")
+        ),
+        security(
+            ("bearer_auth" = [])
+        ),
+        tag = "tts"
+    )
+)]
 pub async fn speak_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SpeakRequest>,

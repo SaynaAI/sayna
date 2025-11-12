@@ -16,6 +16,7 @@ use super::config::{
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum IncomingMessage {
     #[serde(rename = "config")]
     Config {
@@ -37,9 +38,12 @@ pub enum IncomingMessage {
     },
     #[serde(rename = "speak")]
     Speak {
+        /// Text to synthesize
         text: String,
+        /// Flush TTS buffer immediately
         #[serde(skip_serializing_if = "Option::is_none")]
         flush: Option<bool>,
+        /// Allow this TTS to be interrupted
         #[serde(
             default = "default_allow_interruption",
             skip_serializing_if = "Option::is_none"
@@ -50,10 +54,14 @@ pub enum IncomingMessage {
     Clear,
     #[serde(rename = "send_message")]
     SendMessage {
+        /// Message content
         message: String,
+        /// Message role (e.g., "user", "assistant")
         role: String,
+        /// Optional topic/channel
         #[serde(skip_serializing_if = "Option::is_none")]
         topic: Option<String>,
+        /// Optional debug metadata
         #[serde(skip_serializing_if = "Option::is_none")]
         debug: Option<serde_json::Value>,
     },
@@ -61,11 +69,12 @@ pub enum IncomingMessage {
 
 /// Unified message structure for all incoming messages from various sources
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UnifiedMessage {
     /// Text message content (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Binary data encoded as base64 (optional)  
+    /// Binary data encoded as base64 (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
     /// Participant/sender identity
@@ -80,6 +89,7 @@ pub struct UnifiedMessage {
 
 /// Participant disconnection information
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ParticipantDisconnectedInfo {
     /// Participant's unique identity
     pub identity: String,
@@ -95,6 +105,7 @@ pub struct ParticipantDisconnectedInfo {
 /// WebSocket message types for outgoing messages
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum OutgoingMessage {
     #[serde(rename = "ready")]
     Ready {
@@ -113,9 +124,13 @@ pub enum OutgoingMessage {
     },
     #[serde(rename = "stt_result")]
     STTResult {
+        /// Transcribed text
         transcript: String,
+        /// Whether this is the final version of the transcript
         is_final: bool,
+        /// Whether speech has ended
         is_speech_final: bool,
+        /// Confidence score (0.0 to 1.0)
         confidence: f32,
     },
     #[serde(rename = "message")]
@@ -135,7 +150,10 @@ pub enum OutgoingMessage {
         timestamp: u64,
     },
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        /// Error message
+        message: String,
+    },
 }
 
 /// Message routing for optimized throughput

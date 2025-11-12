@@ -26,20 +26,28 @@ pub fn default_allow_interruption() -> Option<bool> {
 
 /// STT configuration for WebSocket messages (without API key)
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct STTWebSocketConfig {
     /// Provider name (e.g., "deepgram")
+    #[cfg_attr(feature = "openapi", schema(example = "deepgram"))]
     pub provider: String,
     /// Language code for transcription (e.g., "en-US", "es-ES")
+    #[cfg_attr(feature = "openapi", schema(example = "en-US"))]
     pub language: String,
     /// Sample rate of the audio in Hz
+    #[cfg_attr(feature = "openapi", schema(example = 16000))]
     pub sample_rate: u32,
     /// Number of audio channels (1 for mono, 2 for stereo)
+    #[cfg_attr(feature = "openapi", schema(example = 1))]
     pub channels: u16,
     /// Enable punctuation in results
+    #[cfg_attr(feature = "openapi", schema(example = true))]
     pub punctuation: bool,
     /// Encoding of the audio
+    #[cfg_attr(feature = "openapi", schema(example = "linear16"))]
     pub encoding: String,
     /// Model to use for transcription
+    #[cfg_attr(feature = "openapi", schema(example = "nova-2"))]
     pub model: String,
 }
 
@@ -67,8 +75,10 @@ impl STTWebSocketConfig {
 
 /// LiveKit configuration for WebSocket messages
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LiveKitWebSocketConfig {
     /// Room name to join or create
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
     pub room_name: String,
     /// Enable recording for this session
     #[serde(default)]
@@ -78,9 +88,11 @@ pub struct LiveKitWebSocketConfig {
     pub recording_file_key: Option<String>,
     /// Sayna AI participant identity (defaults to "sayna-ai")
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "sayna-ai"))]
     pub sayna_participant_identity: Option<String>,
     /// Sayna AI participant display name (defaults to "Sayna AI")
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "Sayna AI"))]
     pub sayna_participant_name: Option<String>,
     /// List of participant identities to listen to for audio tracks and data messages. (All participants by default)
     ///
@@ -127,22 +139,31 @@ impl LiveKitWebSocketConfig {
 
 /// TTS configuration for WebSocket messages (without API key)
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TTSWebSocketConfig {
     /// Provider name (e.g., "deepgram")
+    #[cfg_attr(feature = "openapi", schema(example = "deepgram"))]
     pub provider: String,
     /// Voice ID or name to use for synthesis
+    #[cfg_attr(feature = "openapi", schema(example = "aura-asteria-en"))]
     pub voice_id: Option<String>,
     /// Speaking rate (0.25 to 4.0, 1.0 is normal)
+    #[cfg_attr(feature = "openapi", schema(example = 1.0))]
     pub speaking_rate: Option<f32>,
     /// Audio format preference
+    #[cfg_attr(feature = "openapi", schema(example = "linear16"))]
     pub audio_format: Option<String>,
     /// Sample rate preference
+    #[cfg_attr(feature = "openapi", schema(example = 24000))]
     pub sample_rate: Option<u32>,
     /// Connection timeout in seconds
+    #[cfg_attr(feature = "openapi", schema(example = 30))]
     pub connection_timeout: Option<u64>,
     /// Request timeout in seconds
+    #[cfg_attr(feature = "openapi", schema(example = 60))]
     pub request_timeout: Option<u64>,
     /// Model to use for TTS
+    #[cfg_attr(feature = "openapi", schema(example = "aura-asteria-en"))]
     pub model: String,
     /// Pronunciation replacements to apply before TTS
     #[serde(default)]
