@@ -53,7 +53,10 @@ pub struct TokenRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TokenResponse {
     /// The generated JWT token for LiveKit
-    #[cfg_attr(feature = "openapi", schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
+    )]
     pub token: String,
     /// Echo back the room name for client confirmation
     #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
