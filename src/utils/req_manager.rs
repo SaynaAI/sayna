@@ -647,9 +647,7 @@ impl ReqManager {
             let results = join_all(warmup_futures).await;
             let successful = results.iter().filter(|r| r.is_ok()).count();
 
-            println!(
-                "  Phase 2 aggressive: {successful}/{warmup_count} successful"
-            );
+            println!("  Phase 2 aggressive: {successful}/{warmup_count} successful");
         } else {
             println!("  Skipping phase 2 due to high latency");
         }

@@ -88,9 +88,7 @@ pub async fn auth_middleware(
                 path = %request_path,
                 "API secret authentication failed: token mismatch"
             );
-            return Err(AuthError::Unauthorized(
-                "Invalid API secret".to_string(),
-            ));
+            return Err(AuthError::Unauthorized("Invalid API secret".to_string()));
         }
     }
 

@@ -6,6 +6,7 @@
 
 use utoipa::OpenApi;
 
+use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
     livekit::{TokenRequest, TokenResponse},
@@ -16,7 +17,6 @@ use crate::handlers::{
         messages::{IncomingMessage, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
     },
 };
-use crate::core::tts::Pronunciation;
 
 /// OpenAPI documentation structure
 #[derive(OpenApi)]

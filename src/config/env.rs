@@ -1,9 +1,9 @@
 use std::env;
 use std::path::PathBuf;
 
+use super::ServerConfig;
 use super::utils::parse_bool;
 use super::validation::{validate_auth_required, validate_jwt_auth};
-use super::ServerConfig;
 
 impl ServerConfig {
     /// Load configuration from environment variables
@@ -33,8 +33,8 @@ impl ServerConfig {
         // LiveKit configuration
         let livekit_url =
             env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".to_string());
-        let livekit_public_url = env::var("LIVEKIT_PUBLIC_URL")
-            .unwrap_or_else(|_| "http://localhost:7880".to_string());
+        let livekit_public_url =
+            env::var("LIVEKIT_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:7880".to_string());
         let livekit_api_key = env::var("LIVEKIT_API_KEY").ok();
         let livekit_api_secret = env::var("LIVEKIT_API_SECRET").ok();
 
@@ -295,10 +295,12 @@ mod tests {
         let result = ServerConfig::from_env();
         assert!(result.is_err());
         // Should fail because when AUTH_SIGNING_KEY_PATH is set, AUTH_SERVICE_URL is required
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("AUTH_SERVICE_URL is required"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AUTH_SERVICE_URL is required")
+        );
 
         cleanup_env_vars();
     }
@@ -317,10 +319,12 @@ mod tests {
         let result = ServerConfig::from_env();
         assert!(result.is_err());
         // Should fail because when AUTH_SERVICE_URL is set, AUTH_SIGNING_KEY_PATH is required
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("AUTH_SIGNING_KEY_PATH is required"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AUTH_SIGNING_KEY_PATH is required")
+        );
 
         cleanup_env_vars();
     }
@@ -338,10 +342,12 @@ mod tests {
 
         let result = ServerConfig::from_env();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("file does not exist"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("file does not exist")
+        );
 
         cleanup_env_vars();
     }
@@ -399,10 +405,12 @@ mod tests {
 
         let result = ServerConfig::from_env();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET")
+        );
 
         cleanup_env_vars();
     }
@@ -423,8 +431,7 @@ mod tests {
         }
 
         // Both auth methods configured should be valid
-        let config =
-            ServerConfig::from_env().expect("Should load config with both auth methods");
+        let config = ServerConfig::from_env().expect("Should load config with both auth methods");
         assert!(config.auth_required);
         assert_eq!(config.auth_api_secret, Some("my-secret".to_string()));
         assert_eq!(

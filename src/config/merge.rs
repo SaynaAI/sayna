@@ -1,9 +1,9 @@
 use std::env;
 use std::path::PathBuf;
 
+use super::ServerConfig;
 use super::utils::parse_bool;
 use super::yaml::YamlConfig;
-use super::ServerConfig;
 
 /// Merge YAML configuration with environment variables
 ///
@@ -20,13 +20,18 @@ use super::ServerConfig;
 ///
 /// # Returns
 /// * `Result<ServerConfig, Box<dyn std::error::Error>>` - The merged configuration or an error
-pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+pub fn merge_config(
+    yaml_config: Option<YamlConfig>,
+) -> Result<ServerConfig, Box<dyn std::error::Error>> {
     let yaml = yaml_config.unwrap_or_default();
 
     // Helper macro to get value with priority: ENV > YAML > Default
     macro_rules! get_value {
         ($env_var:expr, $yaml_value:expr, $default:expr) => {
-            env::var($env_var).ok().or($yaml_value).unwrap_or_else(|| $default.to_string())
+            env::var($env_var)
+                .ok()
+                .or($yaml_value)
+                .unwrap_or_else(|| $default.to_string())
         };
     }
 
@@ -45,7 +50,8 @@ pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box
     );
 
     let port = if let Ok(port_str) = env::var("PORT") {
-        port_str.parse::<u16>()
+        port_str
+            .parse::<u16>()
             .map_err(|e| format!("Invalid PORT environment variable: {e}"))?
     } else {
         yaml.server.as_ref().and_then(|s| s.port).unwrap_or(3001)
@@ -77,12 +83,16 @@ pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box
     // Provider API keys
     let deepgram_api_key = get_optional!(
         "DEEPGRAM_API_KEY",
-        yaml.providers.as_ref().and_then(|p| p.deepgram_api_key.clone())
+        yaml.providers
+            .as_ref()
+            .and_then(|p| p.deepgram_api_key.clone())
     );
 
     let elevenlabs_api_key = get_optional!(
         "ELEVENLABS_API_KEY",
-        yaml.providers.as_ref().and_then(|p| p.elevenlabs_api_key.clone())
+        yaml.providers
+            .as_ref()
+            .and_then(|p| p.elevenlabs_api_key.clone())
     );
 
     // Recording S3 configuration
@@ -103,12 +113,16 @@ pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box
 
     let recording_s3_access_key = get_optional!(
         "RECORDING_S3_ACCESS_KEY",
-        yaml.recording.as_ref().and_then(|r| r.s3_access_key.clone())
+        yaml.recording
+            .as_ref()
+            .and_then(|r| r.s3_access_key.clone())
     );
 
     let recording_s3_secret_key = get_optional!(
         "RECORDING_S3_SECRET_KEY",
-        yaml.recording.as_ref().and_then(|r| r.s3_secret_key.clone())
+        yaml.recording
+            .as_ref()
+            .and_then(|r| r.s3_secret_key.clone())
     );
 
     // Cache configuration
@@ -121,7 +135,8 @@ pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box
         ttl_str.parse::<u64>().ok()
     } else {
         yaml.cache.as_ref().and_then(|c| c.ttl_seconds)
-    }.or(Some(30 * 24 * 60 * 60)); // Default to 30 days
+    }
+    .or(Some(30 * 24 * 60 * 60)); // Default to 30 days
 
     // Authentication configuration
     let auth_service_url = get_optional!(
@@ -143,13 +158,15 @@ pub fn merge_config(yaml_config: Option<YamlConfig>) -> Result<ServerConfig, Box
         timeout_str.parse::<u64>().ok()
     } else {
         yaml.auth.as_ref().and_then(|a| a.timeout_seconds)
-    }.unwrap_or(5);
+    }
+    .unwrap_or(5);
 
     let auth_required = if let Ok(required_str) = env::var("AUTH_REQUIRED") {
         parse_bool(&required_str)
     } else {
         yaml.auth.as_ref().and_then(|a| a.required)
-    }.unwrap_or(false);
+    }
+    .unwrap_or(false);
 
     Ok(ServerConfig {
         host,
@@ -316,7 +333,10 @@ mod tests {
         let config = merge_config(Some(yaml)).unwrap();
 
         assert!(config.auth_required);
-        assert_eq!(config.auth_service_url, Some("https://auth.env.com".to_string())); // env overrides
+        assert_eq!(
+            config.auth_service_url,
+            Some("https://auth.env.com".to_string())
+        ); // env overrides
         assert_eq!(config.auth_signing_key_path, Some(key_path)); // from yaml
         assert_eq!(config.auth_timeout_seconds, 10); // from yaml
 

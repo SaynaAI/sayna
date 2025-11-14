@@ -177,12 +177,27 @@ auth:
 
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
 
-        assert_eq!(config.server.as_ref().unwrap().host, Some("127.0.0.1".to_string()));
+        assert_eq!(
+            config.server.as_ref().unwrap().host,
+            Some("127.0.0.1".to_string())
+        );
         assert_eq!(config.server.as_ref().unwrap().port, Some(8080));
-        assert_eq!(config.livekit.as_ref().unwrap().url, Some("ws://livekit.example.com".to_string()));
-        assert_eq!(config.providers.as_ref().unwrap().deepgram_api_key, Some("dg-key".to_string()));
-        assert_eq!(config.recording.as_ref().unwrap().s3_bucket, Some("my-recordings".to_string()));
-        assert_eq!(config.cache.as_ref().unwrap().path, Some("/tmp/cache".to_string()));
+        assert_eq!(
+            config.livekit.as_ref().unwrap().url,
+            Some("ws://livekit.example.com".to_string())
+        );
+        assert_eq!(
+            config.providers.as_ref().unwrap().deepgram_api_key,
+            Some("dg-key".to_string())
+        );
+        assert_eq!(
+            config.recording.as_ref().unwrap().s3_bucket,
+            Some("my-recordings".to_string())
+        );
+        assert_eq!(
+            config.cache.as_ref().unwrap().path,
+            Some("/tmp/cache".to_string())
+        );
         assert_eq!(config.auth.as_ref().unwrap().required, Some(true));
     }
 
@@ -234,7 +249,10 @@ server:
 
         let config = YamlConfig::from_file(&config_path).unwrap();
 
-        assert_eq!(config.server.as_ref().unwrap().host, Some("localhost".to_string()));
+        assert_eq!(
+            config.server.as_ref().unwrap().host,
+            Some("localhost".to_string())
+        );
         assert_eq!(config.server.as_ref().unwrap().port, Some(3000));
     }
 
@@ -244,7 +262,12 @@ server:
         let result = YamlConfig::from_file(&path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read config file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read config file")
+        );
     }
 
     #[test]
@@ -257,6 +280,11 @@ server:
         let result = YamlConfig::from_file(&config_path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse YAML"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to parse YAML")
+        );
     }
 }

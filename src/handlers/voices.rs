@@ -11,7 +11,10 @@ pub struct Voice {
     #[cfg_attr(feature = "openapi", schema(example = "aura-asteria-en"))]
     pub id: String,
     /// URL to sample audio
-    #[cfg_attr(feature = "openapi", schema(example = "https://example.com/sample.mp3"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = "https://example.com/sample.mp3")
+    )]
     pub sample: String,
     /// Display name of the voice
     #[cfg_attr(feature = "openapi", schema(example = "Asteria"))]

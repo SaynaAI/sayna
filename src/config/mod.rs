@@ -197,9 +197,11 @@ impl ServerConfig {
     /// ```
     pub fn get_api_key(&self, provider: &str) -> Result<String, String> {
         match provider.to_lowercase().as_str() {
-            "deepgram" => self.deepgram_api_key.as_ref().cloned().ok_or_else(|| {
-                "Deepgram API key not configured in server environment".to_string()
-            }),
+            "deepgram" => {
+                self.deepgram_api_key.as_ref().cloned().ok_or_else(|| {
+                    "Deepgram API key not configured in server environment".to_string()
+                })
+            }
             "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
                 "ElevenLabs API key not configured in server environment".to_string()
             }),
@@ -588,7 +590,12 @@ providers:
         let result = ServerConfig::from_file(&config_path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read config file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read config file")
+        );
 
         cleanup_env_vars();
     }
@@ -606,7 +613,12 @@ providers:
         let result = ServerConfig::from_file(&config_path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse YAML"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to parse YAML")
+        );
 
         cleanup_env_vars();
     }

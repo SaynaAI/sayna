@@ -82,8 +82,9 @@ async fn main() -> anyhow::Result<()> {
 
                 // Write to file or stdout
                 if let Some(output_path) = output {
-                    fs::write(&output_path, &spec_content)
-                        .map_err(|e| anyhow!("Failed to write to {}: {}", output_path.display(), e))?;
+                    fs::write(&output_path, &spec_content).map_err(|e| {
+                        anyhow!("Failed to write to {}: {}", output_path.display(), e)
+                    })?;
                     println!("OpenAPI spec written to {}", output_path.display());
                 } else {
                     println!("{}", spec_content);

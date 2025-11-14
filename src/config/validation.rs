@@ -18,14 +18,14 @@ pub fn validate_jwt_auth(
         }
 
         // Check if the signing key file exists
-        if let Some(key_path) = auth_signing_key_path {
-            if !key_path.exists() {
-                return Err(format!(
-                    "AUTH_SIGNING_KEY_PATH file does not exist: {}",
-                    key_path.display()
-                )
-                .into());
-            }
+        if let Some(key_path) = auth_signing_key_path
+            && !key_path.exists()
+        {
+            return Err(format!(
+                "AUTH_SIGNING_KEY_PATH file does not exist: {}",
+                key_path.display()
+            )
+            .into());
         }
     }
 
