@@ -642,8 +642,10 @@ async fn test_hard_timeout_with_turn_detector_failure() {
     // Create a turn detector with temporary cache directory
     use crate::core::turn_detect::TurnDetectorConfig;
     let temp_dir = std::env::temp_dir().join("sayna_test_turn_detect");
-    let mut turn_config = TurnDetectorConfig::default();
-    turn_config.cache_path = Some(temp_dir);
+    let turn_config = TurnDetectorConfig {
+        cache_path: Some(temp_dir),
+        ..Default::default()
+    };
 
     let turn_detector = Arc::new(RwLock::new(
         TurnDetector::with_config(turn_config)
