@@ -249,11 +249,8 @@ async fn initialize_voice_manager(
     let stt_config = stt_ws_config.to_stt_config(stt_api_key);
     let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
-    // Create voice manager configuration
-    let voice_config = VoiceManagerConfig {
-        stt_config: stt_config.clone(),
-        tts_config: tts_config.clone(),
-    };
+    // Create voice manager configuration with default speech final settings
+    let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
 
     let turn_detector = app_state.core_state.get_turn_detector();
 

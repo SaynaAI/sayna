@@ -253,6 +253,24 @@ Send raw audio bytes that match `sample_rate`, `channels`, and `encoding` suppli
 | `is_speech_final` | boolean | Indicates end-of-turn detection (improved by the `turn-detect` feature). |
 | `confidence` | number | Provider-supplied confidence score. |
 
+**Speech Final Timing Behavior**
+
+Sayna implements a three-tier fallback system to ensure every utterance receives a `speech_final` event:
+
+1. **Primary path (0-2s)**: Wait for the STT provider to send `is_speech_final=true`. Most providers detect natural pauses and emit this automatically.
+
+2. **Turn detection fallback (2s)**: If no `speech_final` arrives after 2 seconds of silence, the ONNX turn detector (when enabled) analyzes the buffered text. If it confirms the turn is complete, `speech_final` is fired.
+
+3. **Hard timeout guarantee (5s)**: If neither the STT provider nor turn detector fires within 5 seconds of the first `is_final` result, the system **automatically forces** a `speech_final` event. This prevents utterances from hanging indefinitely.
+
+The hard timeout is measured from the **first** `is_final` result in a speech segment and is **not restarted** by subsequent `is_final` results (continuous speech). This ensures that even long utterances are bounded by the 5-second maximum wait time.
+
+**Observability**: When the hard timeout fires, a `WARN`-level log is emitted:
+```
+Hard timeout fired after Xms - forcing speech_final (no real speech_final or turn detection confirmation received)
+```
+This allows SREs to monitor fallback frequency and tune provider configurations or turn detection thresholds.
+
 ##### `message`
 
 | Field | Type | Description |
