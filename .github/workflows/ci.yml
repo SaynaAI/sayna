@@ -15,7 +15,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,18 +23,12 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: swatinem/rust-cache@v2
+
       - name: Format check
         run: cargo fmt --all -- --check
+
       - name: Clippy lint
         run: cargo clippy --all-targets --all-features -- -D warnings
-
-  test:
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
 
       - name: Discover features
         id: features
