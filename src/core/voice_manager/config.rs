@@ -21,9 +21,9 @@ pub struct SpeechFinalConfig {
 impl Default for SpeechFinalConfig {
     fn default() -> Self {
         Self {
-            stt_speech_final_wait_ms: 2000, // Wait 2s for real speech_final from STT
+            stt_speech_final_wait_ms: 1800, // Wait 1.8s for real speech_final from STT
             turn_detection_inference_timeout_ms: 500, // 500ms max for model inference
-            speech_final_hard_timeout_ms: 5000, // 5s hard upper bound for any utterance
+            speech_final_hard_timeout_ms: 4000, // 4s hard upper bound for any utterance
             duplicate_window_ms: 500,       // 500ms duplicate prevention window
         }
     }
