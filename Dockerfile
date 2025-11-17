@@ -28,7 +28,7 @@ RUN rm -rf src
 # ---------- 1b. Build the real application ----------
 COPY src ./src
 
-RUN cargo build --release
+RUN cargo build --release --all-features
 
 ############################
 # 2️⃣  Runtime stage

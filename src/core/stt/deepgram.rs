@@ -220,19 +220,19 @@ impl DeepgramSTT {
                     Ok(response) => {
                         match response.response_type.as_str() {
                             "Results" => {
-                                if let Some(channel) = response.channel {
-                                    if let Some(alternative) = channel.alternatives.first() {
-                                        let stt_result = STTResult::new(
-                                            alternative.transcript.clone(),
-                                            response.is_final.unwrap_or(false),
-                                            response.speech_final.unwrap_or(false),
-                                            alternative.confidence,
-                                        );
+                                if let Some(channel) = response.channel
+                                    && let Some(alternative) = channel.alternatives.first()
+                                {
+                                    let stt_result = STTResult::new(
+                                        alternative.transcript.clone(),
+                                        response.is_final.unwrap_or(false),
+                                        response.speech_final.unwrap_or(false),
+                                        alternative.confidence,
+                                    );
 
-                                        // Send result (non-blocking)
-                                        if result_tx.send(stt_result).is_err() {
-                                            warn!("Failed to send result - channel closed");
-                                        }
+                                    // Send result (non-blocking)
+                                    if result_tx.send(stt_result).is_err() {
+                                        warn!("Failed to send result - channel closed");
                                     }
                                 }
                             }

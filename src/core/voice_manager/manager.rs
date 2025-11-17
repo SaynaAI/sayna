@@ -19,13 +19,13 @@ use crate::core::{
 
 use super::{
     callbacks::{
-        AudioClearCallback, STTCallback, TTSAudioCallback, TTSErrorCallback,
+        AudioClearCallback, STTCallback, TTSAudioCallback, TTSCompleteCallback, TTSErrorCallback,
         VoiceManagerTTSCallback,
     },
     config::VoiceManagerConfig,
     errors::{VoiceManagerError, VoiceManagerResult},
     state::{InterruptionState, SpeechFinalState},
-    stt_result::STTResultProcessor,
+    stt_result::{STTProcessingConfig, STTResultProcessor},
 };
 
 /// VoiceManager provides a unified interface for managing STT and TTS providers
@@ -39,6 +39,7 @@ pub struct VoiceManager {
     tts_audio_callback: Arc<SyncRwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<SyncRwLock<Option<TTSErrorCallback>>>,
     audio_clear_callback: Arc<SyncRwLock<Option<AudioClearCallback>>>,
+    tts_complete_callback: Arc<SyncRwLock<Option<TTSCompleteCallback>>>,
 
     // Speech final timing control - using parking_lot for faster access
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
@@ -72,19 +73,18 @@ impl VoiceManager {
     /// use sayna::core::tts::TTSConfig;
     ///
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = VoiceManagerConfig {
-    ///         stt_config: STTConfig {
-    ///             provider: "deepgram".to_string(),
-    ///             api_key: "your-api-key".to_string(),
-    ///             ..Default::default()
-    ///         },
-    ///         tts_config: TTSConfig {
-    ///             provider: "deepgram".to_string(),
-    ///             api_key: "your-api-key".to_string(),
-    ///             ..Default::default()
-    ///         },
+    ///     let stt_config = STTConfig {
+    ///         provider: "deepgram".to_string(),
+    ///         api_key: "your-api-key".to_string(),
+    ///         ..Default::default()
+    ///     };
+    ///     let tts_config = TTSConfig {
+    ///         provider: "deepgram".to_string(),
+    ///         api_key: "your-api-key".to_string(),
+    ///         ..Default::default()
     ///     };
     ///
+    ///     let config = VoiceManagerConfig::new(stt_config, tts_config);
     ///     let voice_manager = VoiceManager::new(config, None)?;
     ///     Ok(())
     /// }
@@ -109,13 +109,17 @@ impl VoiceManager {
             tts_audio_callback: Arc::new(SyncRwLock::new(None)),
             tts_error_callback: Arc::new(SyncRwLock::new(None)),
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+            tts_complete_callback: Arc::new(SyncRwLock::new(None)),
             speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                 text_buffer,
                 turn_detection_handle: None,
+                hard_timeout_handle: None,
                 waiting_for_speech_final: AtomicBool::new(false),
                 user_callback: None,
                 turn_detection_last_fired_ms: AtomicUsize::new(0),
                 last_forced_text: String::with_capacity(1024),
+                segment_start_ms: AtomicUsize::new(0),
+                hard_timeout_deadline_ms: AtomicUsize::new(0),
             })),
             turn_detector,
             interruption_state: Arc::new(InterruptionState {
@@ -161,10 +165,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.start().await?;
     /// # Ok(())
@@ -190,6 +191,7 @@ impl VoiceManager {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback: self.tts_error_callback.read().clone(),
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -211,10 +213,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.stop().await?;
     /// # Ok(())
@@ -227,6 +226,10 @@ impl VoiceManager {
             if let Some(handle) = state.turn_detection_handle.take() {
                 handle.abort();
             }
+            // Cancel hard timeout handle
+            if let Some(handle) = state.hard_timeout_handle.take() {
+                handle.abort();
+            }
             // Reset speech final state - reuse allocated capacity
             state.text_buffer.clear();
             state
@@ -237,6 +240,8 @@ impl VoiceManager {
                 .turn_detection_last_fired_ms
                 .store(0, Ordering::Release);
             state.last_forced_text.clear();
+            state.segment_start_ms.store(0, Ordering::Release);
+            state.hard_timeout_deadline_ms.store(0, Ordering::Release);
         }
 
         // Disconnect STT provider
@@ -270,10 +275,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// if voice_manager.is_ready().await {
     ///     println!("VoiceManager is ready!");
@@ -310,10 +312,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// let audio_data = vec![0u8; 1024]; // Your audio data
     /// voice_manager.receive_audio(audio_data).await?;
@@ -345,10 +344,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// // Queue text without immediate processing
     /// voice_manager.speak("Hello, world!", false).await?;
@@ -509,10 +505,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_stt_result(|result| {
     ///     Box::pin(async move {
@@ -544,7 +537,17 @@ impl VoiceManager {
         let speech_final_state_clone = self.speech_final_state.clone();
         let interruption_state_clone = self.interruption_state.clone();
         let turn_detector_clone = self.turn_detector.clone();
-        let stt_processor = STTResultProcessor::default();
+
+        // Create STT processor with configured timeouts from VoiceManagerConfig
+        let processing_config = STTProcessingConfig::new(
+            self.config.speech_final_config.stt_speech_final_wait_ms,
+            self.config
+                .speech_final_config
+                .turn_detection_inference_timeout_ms,
+            self.config.speech_final_config.speech_final_hard_timeout_ms,
+            self.config.speech_final_config.duplicate_window_ms,
+        );
+        let stt_processor = STTResultProcessor::new(processing_config);
 
         let wrapper_callback: STTResultCallback = Arc::new(move |result| {
             // Clone Arc references per invocation (lightweight operation)
@@ -600,10 +603,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_tts_audio(|audio_data| {
     ///     Box::pin(async move {
@@ -684,6 +684,7 @@ impl VoiceManager {
                 audio_callback,
                 error_callback: self.tts_error_callback.read().clone(),
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -718,6 +719,7 @@ impl VoiceManager {
                 audio_callback: self.tts_audio_callback.read().clone(),
                 error_callback,
                 interruption_state: Some(self.interruption_state.clone()),
+                complete_callback: self.tts_complete_callback.read().clone(),
             });
 
             tts.on_audio(tts_callback)
@@ -745,10 +747,7 @@ impl VoiceManager {
     /// # use sayna::core::tts::TTSConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = VoiceManagerConfig {
-    /// #     stt_config: STTConfig::default(),
-    /// #     tts_config: TTSConfig::default(),
-    /// # };
+    /// # let config = VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default());
     /// # let voice_manager = VoiceManager::new(config, None)?;
     /// voice_manager.on_audio_clear(|| {
     ///     Box::pin(async move {
@@ -765,6 +764,71 @@ impl VoiceManager {
     {
         let mut audio_clear_callback = self.audio_clear_callback.write();
         *audio_clear_callback = Some(Arc::new(callback));
+        Ok(())
+    }
+
+    /// Register a callback to be invoked when TTS playback completes
+    ///
+    /// The completion callback is triggered after the TTS provider finishes generating
+    /// all audio chunks for a given `speak()` command. This is useful for:
+    /// - Updating UI state (hiding loading indicators)
+    /// - Coordinating sequential actions
+    /// - Analytics and monitoring
+    /// - Knowing when it's safe to perform operations
+    ///
+    /// # Important Notes
+    /// - Callback fires once per `speak()` call
+    /// - Callback fires after all audio chunks are generated
+    /// - Callback timing indicates server-side generation completion, not client playback
+    /// - Multiple `speak()` calls will trigger multiple callbacks in FIFO order
+    ///
+    /// # Arguments
+    /// * `callback` - Async function to call when TTS playback completes
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<()>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sayna::core::voice_manager::VoiceManager;
+    ///
+    /// let voice_manager = VoiceManager::new(config, None)?;
+    /// voice_manager.start().await?;
+    ///
+    /// // Register completion callback
+    /// voice_manager.on_tts_complete(|| {
+    ///     Box::pin(async move {
+    ///         println!("TTS playback completed!");
+    ///         // Update UI state, trigger next action, etc.
+    ///     })
+    /// }).await?;
+    ///
+    /// voice_manager.speak("Hello world", true, true).await?;
+    /// // Callback will fire after "Hello world" is fully generated
+    /// ```
+    pub async fn on_tts_complete<F>(&self, callback: F) -> VoiceManagerResult<()>
+    where
+        F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+    {
+        // Store the callback
+        *self.tts_complete_callback.write() = Some(Arc::new(callback));
+
+        // Update the TTS provider's callback to include completion callback
+        let mut tts = self.tts.write().await;
+        let audio_callback = self.tts_audio_callback.read().clone();
+        let error_callback = self.tts_error_callback.read().clone();
+        let complete_callback = self.tts_complete_callback.read().clone();
+
+        let callback = Arc::new(VoiceManagerTTSCallback {
+            audio_callback,
+            error_callback,
+            interruption_state: Some(self.interruption_state.clone()),
+            complete_callback,
+        });
+
+        tts.on_audio(callback)
+            .map_err(VoiceManagerError::TTSError)?;
+
         Ok(())
     }
 

@@ -94,6 +94,8 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     // Spawn task to handle outgoing messages - simple and direct for low latency
     let sender_task = tokio::spawn(async move {
         while let Some(route) = message_rx.recv().await {
+            let should_close = matches!(route, MessageRoute::Close);
+
             let result = match route {
                 MessageRoute::Outgoing(message) => {
                     // Direct serialization and send - no batching for low latency
@@ -106,10 +108,19 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
                     }
                 }
                 MessageRoute::Binary(data) => sender.send(Message::Binary(data)).await,
+                MessageRoute::Close => {
+                    info!("Closing WebSocket connection");
+                    sender.send(Message::Close(None)).await
+                }
             };
 
             if let Err(e) = result {
                 error!("Failed to send WebSocket message: {}", e);
+                break;
+            }
+
+            // If we sent a Close message, break the loop
+            if should_close {
                 break;
             }
         }
@@ -163,10 +174,15 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     {
         let state_guard = state.read().await;
         if let Some(voice_manager) = &state_guard.voice_manager {
-            if let Err(e) = voice_manager.stop().await {
-                error!("Failed to stop voice manager: {}", e);
+            match voice_manager.stop().await {
+                Ok(_) => {}
+                Err(e) => error!("Failed to stop voice manager: {}", e),
             }
         }
+
+        // Get recording and room info before cleanup
+        let recording_egress_id = state_guard.recording_egress_id.clone();
+        let room_name = state_guard.livekit_room_name.clone();
 
         if let Some(livekit_client) = &state_guard.livekit_client {
             // Try to get write lock with timeout for cleanup
@@ -179,6 +195,28 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
                 Err(_) => {
                     warn!("Timeout acquiring LiveKit lock for cleanup - client may be busy");
                 }
+            }
+        }
+
+        // Stop recording if it was started
+        if let (Some(egress_id), Some(room_handler)) =
+            (&recording_egress_id, &app_state.livekit_room_handler)
+        {
+            info!("Stopping recording with egress ID: {}", egress_id);
+            if let Err(e) = room_handler.stop_room_recording(egress_id).await {
+                error!("Failed to stop room recording: {:?}", e);
+            } else {
+                info!("Recording stopped successfully");
+            }
+        }
+
+        // Delete room if it exists
+        if let (Some(room), Some(room_handler)) = (&room_name, &app_state.livekit_room_handler) {
+            info!("Deleting LiveKit room: {}", room);
+            if let Err(e) = room_handler.delete_room(room).await {
+                error!("Failed to delete room: {:?}", e);
+            } else {
+                info!("Room deleted successfully");
             }
         }
     }

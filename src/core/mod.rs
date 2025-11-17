@@ -5,6 +5,11 @@ pub mod tts;
 pub mod turn_detect;
 pub mod voice_manager;
 
+#[cfg(feature = "turn-detect")]
+pub use turn_detect::{TurnDetector, TurnDetectorBuilder, TurnDetectorConfig};
+#[cfg(not(feature = "turn-detect"))]
+pub use turn_detect::{TurnDetector, TurnDetectorBuilder, TurnDetectorConfig};
+
 // Re-export commonly used types for convenience
 pub use stt::{
     BaseSTT, DeepgramSTT, DeepgramSTTConfig, STTConfig, STTConnectionState, STTError, STTProvider,

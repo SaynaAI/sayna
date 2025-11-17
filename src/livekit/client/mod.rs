@@ -111,6 +111,7 @@ impl LiveKitClient {
     }
 
     /// Return a buffer to the pool for reuse
+    #[cfg(feature = "noise-filter")]
     pub(crate) fn return_buffer_to_pool(pool: &Arc<Mutex<Vec<Vec<u8>>>>, mut buffer: Vec<u8>) {
         const MAX_POOL_SIZE: usize = 8;
         const MAX_BUFFER_SIZE: usize = 48000; // ~500ms at 48kHz stereo

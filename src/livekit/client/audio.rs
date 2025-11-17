@@ -8,17 +8,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use livekit::options::TrackPublishOptions;
-use livekit::prelude::{DataPacketKind, LocalTrackPublication, Room, RoomEvent, RoomOptions};
+use livekit::prelude::{DataPacketKind, Room, RoomEvent, RoomOptions};
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use super::{
-    AudioCallback, DataCallback, LiveKitClient, LiveKitConfig, LiveKitOperation,
-    ParticipantDisconnectCallback,
-};
+use super::{LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext};
 use crate::AppError;
 
 impl LiveKitClient {
@@ -108,14 +105,20 @@ impl LiveKitClient {
                     // Process the drained audio without holding any locks
                     for audio_data in queued_data {
                         // Use convert_audio_to_frame_ref to avoid allocations
-                        if let Ok(audio_frame) = LiveKitClient::convert_audio_to_frame_ref(
+                        match LiveKitClient::convert_audio_to_frame_ref(
                             &audio_data,
                             sample_rate,
                             channels,
                         ) {
-                            if let Err(e) = audio_source_clone.capture_frame(&audio_frame).await {
-                                error!("Failed to send queued audio frame: {:?}", e);
-                                // Don't re-queue on error to avoid infinite loop
+                            Ok(audio_frame) => {
+                                if let Err(e) = audio_source_clone.capture_frame(&audio_frame).await
+                                {
+                                    error!("Failed to send queued audio frame: {:?}", e);
+                                    // Don't re-queue on error to avoid infinite loop
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to convert queued audio frame: {:?}", e);
                             }
                         }
                     }
@@ -297,10 +300,15 @@ impl LiveKitClient {
                                 let mut queue = audio_queue.lock().await;
                                 if queue.len() >= super::MAX_AUDIO_QUEUE_SIZE {
                                     // Drop the oldest audio frame to prevent unbounded latency
-                                    if let Some(_dropped) = queue.pop_front() {
-                                        warn!(
-                                            "Audio queue full, dropping oldest frame to prevent latency spike"
-                                        );
+                                    match queue.pop_front() {
+                                        Some(_dropped) => {
+                                            warn!(
+                                                "Audio queue full, dropping oldest frame to prevent latency spike"
+                                            );
+                                        }
+                                        None => warn!(
+                                            "Audio queue full but nothing to drop; queue state may be inconsistent"
+                                        ),
                                     }
                                 }
                                 queue.push_back(audio_data);
@@ -326,10 +334,15 @@ impl LiveKitClient {
         // No audio source yet, queue for when track is ready with bounded queue
         let mut queue = audio_queue.lock().await;
         if queue.len() >= super::MAX_AUDIO_QUEUE_SIZE {
-            if let Some(_dropped) = queue.pop_front() {
-                warn!(
-                    "Audio queue full (no source), dropping oldest frame to prevent latency spike"
-                );
+            match queue.pop_front() {
+                Some(_dropped) => {
+                    warn!(
+                        "Audio queue full (no source), dropping oldest frame to prevent latency spike"
+                    );
+                }
+                None => warn!(
+                    "Audio queue full (no source) but nothing to drop; queue state may be inconsistent"
+                ),
             }
         }
         queue.push_back(audio_data);
@@ -354,16 +367,15 @@ impl LiveKitClient {
         let num_samples = audio_data.len() / 2;
         let samples_per_channel = num_samples / channels as usize;
 
-        if samples_per_channel == 0 || num_samples % channels as usize != 0 {
+        if samples_per_channel == 0 || !num_samples.is_multiple_of(channels as usize) {
             return Err(AppError::InternalServerError(format!(
-                "Invalid audio data: {} samples doesn't divide evenly by {} channels",
-                num_samples, channels
+                "Invalid audio data: {num_samples} samples doesn't divide evenly by {channels} channels"
             )));
         }
 
         // Zero-copy conversion using bytemuck for aligned data
         // Fall back to manual conversion for unaligned data
-        let samples: Vec<i16> = if audio_data.as_ptr() as usize % 2 == 0 {
+        let samples: Vec<i16> = if (audio_data.as_ptr() as usize).is_multiple_of(2) {
             // Data is aligned, use zero-copy reinterpretation
             unsafe {
                 // SAFETY: We've verified the length is even and the data is aligned
@@ -410,29 +422,20 @@ impl LiveKitClient {
     }
 
     pub(super) async fn process_reconnect(
-        room: &Arc<Mutex<Option<Room>>>,
-        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
-        local_track_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
-        is_connected: &Arc<Mutex<bool>>,
-        config: &LiveKitConfig,
-        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
-        _active_streams: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-        _audio_callback: &Option<AudioCallback>,
-        _data_callback: &Option<DataCallback>,
-        _participant_disconnect_callback: &Option<ParticipantDisconnectCallback>,
+        ctx: &OperationContext,
     ) -> Result<(Option<mpsc::UnboundedReceiver<RoomEvent>>, bool), AppError> {
         warn!("Processing reconnect operation due to publisher timeout");
 
-        if !*is_connected.lock().await {
+        if !*ctx.is_connected.lock().await {
             info!("Already disconnected, skipping reconnect");
             return Ok((None, false));
         }
 
-        match Room::connect(&config.url, &config.token, RoomOptions::default()).await {
+        match Room::connect(&ctx.config.url, &ctx.config.token, RoomOptions::default()).await {
             Ok((new_room, room_events)) => {
                 // Clear old audio resources
-                *audio_source.lock().await = None;
-                *local_track_publication.lock().await = None;
+                *ctx.audio_source.lock().await = None;
+                *ctx.local_track_publication.lock().await = None;
 
                 // Configure data channel threshold on the new room
                 {
@@ -455,14 +458,14 @@ impl LiveKitClient {
 
                 // Extract local participant while holding the lock briefly, then store the new room
                 let local_participant = {
-                    let mut room_guard = room.lock().await;
+                    let mut room_guard = ctx.room.lock().await;
                     *room_guard = Some(new_room);
 
                     if let Some(room_ref) = &*room_guard {
                         room_ref.local_participant().clone()
                     } else {
                         error!("Room not available after reconnect");
-                        *is_connected.lock().await = false;
+                        *ctx.is_connected.lock().await = false;
                         return Err(AppError::InternalServerError(
                             "Room not available after reconnect".to_string(),
                         ));
@@ -476,11 +479,11 @@ impl LiveKitClient {
                     auto_gain_control: false,
                 };
 
-                let samples_per_frame = (config.sample_rate * 10) / 1000;
+                let samples_per_frame = (ctx.config.sample_rate * 10) / 1000;
                 let new_audio_source = Arc::new(NativeAudioSource::new(
                     audio_source_options,
-                    config.sample_rate,
-                    config.channels as u32,
+                    ctx.config.sample_rate,
+                    ctx.config.channels as u32,
                     samples_per_frame,
                 ));
 
@@ -502,15 +505,15 @@ impl LiveKitClient {
                     .await
                 {
                     Ok(publication) => {
-                        *audio_source.lock().await = Some(new_audio_source.clone());
-                        *local_track_publication.lock().await = Some(publication);
+                        *ctx.audio_source.lock().await = Some(new_audio_source.clone());
+                        *ctx.local_track_publication.lock().await = Some(publication);
 
                         // Spawn a task to drain queued audio just like in initial setup
-                        let audio_queue_clone = Arc::clone(audio_queue);
+                        let audio_queue_clone = Arc::clone(&ctx.audio_queue);
                         let audio_source_clone = Arc::clone(&new_audio_source);
-                        let sample_rate = config.sample_rate;
-                        let channels = config.channels;
-                        let active_streams_clone = Arc::clone(_active_streams);
+                        let sample_rate = ctx.config.sample_rate;
+                        let channels = ctx.config.channels;
+                        let active_streams_clone = Arc::clone(&ctx.active_streams);
 
                         let handle = tokio::spawn(async move {
                             // Extract all queued data to avoid holding the lock during async operations
@@ -529,15 +532,20 @@ impl LiveKitClient {
 
                             // Process the drained audio without holding any locks
                             for audio_data in queued_data {
-                                if let Ok(audio_frame) = Self::convert_audio_to_frame_ref(
+                                match Self::convert_audio_to_frame_ref(
                                     &audio_data,
                                     sample_rate,
                                     channels,
                                 ) {
-                                    if let Err(e) =
-                                        audio_source_clone.capture_frame(&audio_frame).await
-                                    {
-                                        error!("Failed to send queued audio frame: {:?}", e);
+                                    Ok(audio_frame) => {
+                                        if let Err(e) =
+                                            audio_source_clone.capture_frame(&audio_frame).await
+                                        {
+                                            error!("Failed to send queued audio frame: {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to convert queued audio to frame: {:?}", e);
                                     }
                                 }
                             }
@@ -553,7 +561,7 @@ impl LiveKitClient {
                     }
                     Err(e) => {
                         error!("Failed to re-publish audio track after reconnect: {:?}", e);
-                        *is_connected.lock().await = false;
+                        *ctx.is_connected.lock().await = false;
                         Err(AppError::InternalServerError(format!(
                             "Failed to re-publish audio track: {e:?}"
                         )))
@@ -562,7 +570,7 @@ impl LiveKitClient {
             }
             Err(e) => {
                 error!("Failed to reconnect to LiveKit room: {:?}", e);
-                *is_connected.lock().await = false;
+                *ctx.is_connected.lock().await = false;
                 Err(AppError::InternalServerError(format!(
                     "Failed to reconnect: {e:?}"
                 )))

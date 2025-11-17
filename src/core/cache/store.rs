@@ -175,11 +175,11 @@ impl CacheBackend for MemoryCacheBackend {
 
     async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         if let Some(entry) = self.cache.get(key).await {
-            if let Some(expires_at) = entry.expires_at {
-                if Instant::now() > expires_at {
-                    self.cache.invalidate(key).await;
-                    return Ok(None);
-                }
+            if let Some(expires_at) = entry.expires_at
+                && Instant::now() > expires_at
+            {
+                self.cache.invalidate(key).await;
+                return Ok(None);
             }
             Ok(Some(entry.data.clone()))
         } else {
@@ -189,11 +189,11 @@ impl CacheBackend for MemoryCacheBackend {
 
     async fn exists(&self, key: &str) -> Result<bool> {
         if let Some(entry) = self.cache.get(key).await {
-            if let Some(expires_at) = entry.expires_at {
-                if Instant::now() > expires_at {
-                    self.cache.invalidate(key).await;
-                    return Ok(false);
-                }
+            if let Some(expires_at) = entry.expires_at
+                && Instant::now() > expires_at
+            {
+                self.cache.invalidate(key).await;
+                return Ok(false);
             }
             Ok(true)
         } else {

@@ -1,10 +1,47 @@
-use std::env;
+use std::path::PathBuf;
 
+#[cfg(feature = "openapi")]
+use std::fs;
+
+use axum::{Router, middleware};
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 
 use anyhow::anyhow;
 
-use sayna::{ServerConfig, init, routes, state::AppState};
+use sayna::{ServerConfig, init, middleware::auth::auth_middleware, routes, state::AppState};
+
+/// Sayna - Real-time voice processing server
+#[derive(Parser, Debug)]
+#[command(name = "sayna")]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Path to configuration file (YAML)
+    #[arg(short = 'c', long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Subcommand to run
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Initialize turn detection models
+    Init,
+
+    /// Generate OpenAPI specification
+    #[cfg(feature = "openapi")]
+    Openapi {
+        /// Output format (yaml or json)
+        #[arg(short = 'f', long = "format", default_value = "yaml")]
+        format: String,
+
+        /// Output file path (prints to stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,35 +54,77 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow!("Failed to install default crypto provider"))?;
 
-    // Handle CLI commands
-    let mut args = env::args();
-    let _ = args.next();
-    if let Some(command) = args.next() {
-        match command.as_str() {
-            "init" => {
-                if let Some(extra) = args.next() {
-                    anyhow::bail!("Unexpected argument '{extra}' after 'init'");
-                }
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Init => {
                 init::run().await?;
                 return Ok(());
             }
-            other => {
-                anyhow::bail!("Unknown command '{other}'. Supported commands: init");
+            #[cfg(feature = "openapi")]
+            Commands::Openapi { format, output } => {
+                // Validate format
+                if format != "yaml" && format != "json" {
+                    anyhow::bail!("Invalid format '{}'. Must be 'yaml' or 'json'", format);
+                }
+
+                // Generate the spec in the requested format
+                let spec_content = match format.as_str() {
+                    "yaml" => sayna::docs::openapi::spec_yaml()
+                        .map_err(|e| anyhow!("Failed to generate OpenAPI YAML: {}", e))?,
+                    "json" => sayna::docs::openapi::spec_json()
+                        .map_err(|e| anyhow!("Failed to generate OpenAPI JSON: {}", e))?,
+                    _ => unreachable!(),
+                };
+
+                // Write to file or stdout
+                if let Some(output_path) = output {
+                    fs::write(&output_path, &spec_content).map_err(|e| {
+                        anyhow!("Failed to write to {}: {}", output_path.display(), e)
+                    })?;
+                    println!("OpenAPI spec written to {}", output_path.display());
+                } else {
+                    println!("{}", spec_content);
+                }
+
+                return Ok(());
             }
         }
     }
 
-    // Load configuration
-    let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
+    // Load configuration from file or environment
+    let config = if let Some(config_path) = cli.config {
+        println!("Loading configuration from {}", config_path.display());
+        ServerConfig::from_file(&config_path).map_err(|e| anyhow!(e.to_string()))?
+    } else {
+        ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?
+    };
     let address = config.address();
     println!("Starting server on {address}");
 
     // Create application state
     let app_state = AppState::new(config).await;
 
-    // Create router with both API and WebSocket routes
-    let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+    // Create protected API routes with authentication middleware
+    let protected_routes = routes::api::create_api_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
+
+    // Create WebSocket routes (no auth for now, see action plan task 8)
+    let ws_routes = routes::ws::create_ws_router();
+
+    // Create public health check route (no auth)
+    let public_routes =
+        Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
+
+    // Combine all routes: public + protected + websocket
+    let app = public_routes
+        .merge(protected_routes)
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener

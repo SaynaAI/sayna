@@ -29,7 +29,8 @@
 //!         room_name: "your-room".to_string(),
 //!         sample_rate: 24000,
 //!         channels: 1,
-//!         enable_noise_filter: true,
+//!         enable_noise_filter: cfg!(feature = "noise-filter"),
+//!         listen_participants: vec![],
 //!     };
 //!
 //!     // Create and initialize manager
@@ -68,12 +69,16 @@
 mod client;
 mod manager;
 pub mod operations;
+pub mod room_handler;
+pub mod sip_handler;
 mod types;
 
 // Re-export public types and traits
 pub use client::{AudioCallback, DataCallback, DataMessage, LiveKitClient};
 pub use manager::LiveKitManager;
 pub use operations::{LiveKitOperation, OperationQueue};
+pub use room_handler::LiveKitRoomHandler;
+pub use sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
 pub use types::{
     AudioFrameInfo, ConnectionStatus, LiveKitConfig, LiveKitError, ParticipantInfo, RoomInfo,
 };
@@ -104,12 +109,13 @@ mod tests {
             room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
-            enable_noise_filter: true,
+            enable_noise_filter: cfg!(feature = "noise-filter"),
+            listen_participants: vec![],
         };
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
-        assert!(config.enable_noise_filter);
+        assert_eq!(config.enable_noise_filter, cfg!(feature = "noise-filter"));
     }
 
     #[test]

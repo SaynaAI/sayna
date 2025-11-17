@@ -14,17 +14,33 @@ async fn test_health_check() {
         host: "0.0.0.0".to_string(),
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         deepgram_api_key: None,
         elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
     let app_state = AppState::new(config).await;
 
-    // Create router with state
-    let app = routes::api::create_api_router().with_state(app_state);
+    // Create router with health check endpoint (public, no auth)
+    use axum::{Router, routing::get};
+    let app = Router::new()
+        .route("/", get(sayna::handlers::api::health_check))
+        .with_state(app_state);
 
     // Create request
     let request = Request::builder().uri("/").body(Body::empty()).unwrap();
@@ -49,12 +65,25 @@ async fn test_speak_endpoint_missing_api_key() {
     // Create test configuration without API keys
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: None,
         elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -97,12 +126,25 @@ async fn test_speak_endpoint_empty_text() {
     // Create test configuration
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         port: 3001,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -153,11 +195,24 @@ async fn test_speak_endpoint_with_pronunciations() {
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
         port: 3001,
+        livekit_api_key: None,
+        livekit_api_secret: None,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state
@@ -210,11 +265,24 @@ async fn test_speak_endpoint_invalid_provider() {
     let config = ServerConfig {
         host: "0.0.0.0".to_string(),
         port: 3001,
+        livekit_api_key: None,
+        livekit_api_secret: None,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create app state

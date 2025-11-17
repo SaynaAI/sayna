@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::auth::AuthClient;
 use crate::config::ServerConfig;
 use crate::core::CoreState;
 use crate::core::cache::store::CacheStore;
+use crate::livekit::room_handler::{LiveKitRoomHandler, RecordingConfig};
 use crate::utils::req_manager::ReqManager;
 
 /// Application state that can be shared across handlers
@@ -11,13 +13,98 @@ pub struct AppState {
     pub config: ServerConfig,
     /// Core layer state that holds shared resources, such as TTS request managers
     pub core_state: Arc<CoreState>,
+    /// LiveKit room handler for room and token management
+    pub livekit_room_handler: Option<Arc<LiveKitRoomHandler>>,
+    /// Authentication client for validating bearer tokens (if auth is enabled)
+    pub auth_client: Option<Arc<AuthClient>>,
 }
 
 impl AppState {
     pub async fn new(config: ServerConfig) -> Arc<Self> {
         let core_state = CoreState::new(&config).await;
 
-        Arc::new(Self { config, core_state })
+        // Initialize LiveKit room handler if API keys are available
+        let livekit_room_handler = if let (Some(api_key), Some(api_secret)) =
+            (&config.livekit_api_key, &config.livekit_api_secret)
+        {
+            // Build recording config if all S3 settings are present
+            let recording_config = if let (
+                Some(bucket),
+                Some(region),
+                Some(endpoint),
+                Some(access_key),
+                Some(secret_key),
+            ) = (
+                &config.recording_s3_bucket,
+                &config.recording_s3_region,
+                &config.recording_s3_endpoint,
+                &config.recording_s3_access_key,
+                &config.recording_s3_secret_key,
+            ) {
+                Some(RecordingConfig {
+                    bucket: bucket.clone(),
+                    region: region.clone(),
+                    endpoint: endpoint.clone(),
+                    access_key: access_key.clone(),
+                    secret_key: secret_key.clone(),
+                })
+            } else {
+                None
+            };
+
+            match LiveKitRoomHandler::new(
+                config.livekit_url.clone(),
+                api_key.clone(),
+                api_secret.clone(),
+                recording_config,
+            ) {
+                Ok(handler) => Some(Arc::new(handler)),
+                Err(e) => {
+                    tracing::warn!("Failed to initialize LiveKit room handler: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Initialize auth client if JWT-based auth is configured
+        // Note: API secret auth doesn't need a client - it's handled directly in middleware
+        let auth_client = if config.auth_required && config.has_jwt_auth() {
+            match AuthClient::from_config(&config).await {
+                Ok(client) => {
+                    tracing::info!(
+                        "JWT authentication enabled with service: {}",
+                        config
+                            .auth_service_url
+                            .as_ref()
+                            .unwrap_or(&"unknown".to_string())
+                    );
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    // Fail fast when JWT auth is configured but client initialization fails
+                    tracing::error!("Failed to initialize auth client: {:?}", e);
+                    panic!(
+                        "JWT authentication configured but client initialization failed: {e:?}. \
+                        Cannot start server without authentication. \
+                        Please check AUTH_SERVICE_URL and AUTH_SIGNING_KEY_PATH configuration."
+                    );
+                }
+            }
+        } else if config.auth_required && config.has_api_secret_auth() {
+            tracing::info!("API secret authentication enabled");
+            None
+        } else {
+            None
+        };
+
+        Arc::new(Self {
+            config,
+            core_state,
+            livekit_room_handler,
+            auth_client,
+        })
     }
 
     /// Get a TTS request manager for a specific provider
