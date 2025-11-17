@@ -52,6 +52,17 @@ struct ElevenLabsRequestBuilder {
 impl TTSRequestBuilder for ElevenLabsRequestBuilder {
     /// Build the ElevenLabs-specific HTTP request with URL, headers and body
     fn build_http_request(&self, client: &reqwest::Client, text: &str) -> reqwest::RequestBuilder {
+        // Forward to the context method without previous_text
+        self.build_http_request_with_context(client, text, None)
+    }
+
+    /// Build the ElevenLabs-specific HTTP request with context support
+    fn build_http_request_with_context(
+        &self,
+        client: &reqwest::Client,
+        text: &str,
+        previous_text: Option<&str>,
+    ) -> reqwest::RequestBuilder {
         // Get voice_id from config, required for ElevenLabs
         let default_voice = "21m00Tcm4TlvDq8ikWAM".to_string();
         let voice_id = self.config.voice_id.as_ref().unwrap_or(&default_voice);
@@ -113,6 +124,11 @@ impl TTSRequestBuilder for ElevenLabsRequestBuilder {
             "text": text,
             "voice_settings": self.voice_settings,
         });
+
+        // Add previous_text for context continuity if available
+        if let Some(prev) = previous_text {
+            body["previous_text"] = json!(prev);
+        }
 
         // Add model_id if specified
         if !self.config.model.is_empty() {
@@ -408,5 +424,81 @@ mod tests {
         // The provider should be properly initialized
         assert!(tts.request_builder.voice_settings.speed.is_some());
         assert!(tts.request_builder.voice_settings.stability.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_previous_text_included_when_provided() {
+        let config = TTSConfig {
+            voice_id: Some("test_voice_id".to_string()),
+            audio_format: Some("linear16".to_string()),
+            sample_rate: Some(24000),
+            api_key: "test_key".to_string(),
+            model: "eleven_multilingual_v2".to_string(),
+            ..Default::default()
+        };
+
+        let voice_settings = VoiceSettings::default();
+        let builder = ElevenLabsRequestBuilder {
+            config,
+            voice_settings,
+        };
+        let client = reqwest::Client::new();
+
+        // Build request with previous_text
+        let request = builder.build_http_request_with_context(
+            &client,
+            "Second utterance",
+            Some("First utterance"),
+        );
+
+        // Get the request as built
+        let built_request = request.build().unwrap();
+
+        // Extract and verify the body contains previous_text
+        let body_bytes = built_request.body().and_then(|b| b.as_bytes());
+        assert!(body_bytes.is_some());
+
+        let body_str = std::str::from_utf8(body_bytes.unwrap()).unwrap();
+        let body_json: serde_json::Value = serde_json::from_str(body_str).unwrap();
+
+        assert_eq!(body_json["text"], "Second utterance");
+        assert_eq!(body_json["previous_text"], "First utterance");
+        assert!(body_json["model_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_previous_text_omitted_when_none() {
+        let config = TTSConfig {
+            voice_id: Some("test_voice_id".to_string()),
+            audio_format: Some("linear16".to_string()),
+            sample_rate: Some(24000),
+            api_key: "test_key".to_string(),
+            model: "eleven_multilingual_v2".to_string(),
+            ..Default::default()
+        };
+
+        let voice_settings = VoiceSettings::default();
+        let builder = ElevenLabsRequestBuilder {
+            config,
+            voice_settings,
+        };
+        let client = reqwest::Client::new();
+
+        // Build request without previous_text
+        let request = builder.build_http_request_with_context(&client, "First utterance", None);
+
+        // Get the request as built
+        let built_request = request.build().unwrap();
+
+        // Extract and verify the body does NOT contain previous_text
+        let body_bytes = built_request.body().and_then(|b| b.as_bytes());
+        assert!(body_bytes.is_some());
+
+        let body_str = std::str::from_utf8(body_bytes.unwrap()).unwrap();
+        let body_json: serde_json::Value = serde_json::from_str(body_str).unwrap();
+
+        assert_eq!(body_json["text"], "First utterance");
+        assert!(body_json["previous_text"].is_null());
+        assert!(body_json["model_id"].is_string());
     }
 }

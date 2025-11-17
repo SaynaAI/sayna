@@ -16,6 +16,7 @@ use super::{
     ParticipantDisconnectCallback, ParticipantDisconnectEvent,
 };
 use crate::AppError;
+#[cfg(feature = "noise-filter")]
 use crate::utils::noise_filter::reduce_noise_async;
 
 impl LiveKitClient {
@@ -109,6 +110,19 @@ impl LiveKitClient {
                     participant.identity()
                 );
 
+                // Check if we should process this participant's audio
+                if !config.listen_participants.is_empty()
+                    && !config
+                        .listen_participants
+                        .contains(&participant.identity().to_string())
+                {
+                    debug!(
+                        "Ignoring audio track from participant {} (not in listen_participants list)",
+                        participant.identity()
+                    );
+                    return Ok(());
+                }
+
                 match track {
                     RemoteTrack::Audio(audio_track) => {
                         debug!(
@@ -126,6 +140,7 @@ impl LiveKitClient {
                             );
 
                             let enable_noise_filter = config.enable_noise_filter;
+                            #[cfg(feature = "noise-filter")]
                             let sample_rate = config.sample_rate;
                             let participant_id = participant.identity().to_string();
 
@@ -140,6 +155,14 @@ impl LiveKitClient {
                                     participant_id, enable_noise_filter
                                 );
 
+                                #[cfg(not(feature = "noise-filter"))]
+                                if enable_noise_filter {
+                                    warn!(
+                                        "Noise filter requested for participant {} but the 'noise-filter' feature is disabled; forwarding raw audio",
+                                        participant_id
+                                    );
+                                }
+
                                 while let Some(audio_frame) = audio_stream.next().await {
                                     debug!(
                                         "Received audio frame: {} samples",
@@ -152,25 +175,31 @@ impl LiveKitClient {
                                     );
 
                                     if enable_noise_filter {
-                                        // For noise filtering, we need to clone since the filter may modify the buffer
-                                        match reduce_noise_async(
-                                            audio_buffer.clone().into(),
-                                            sample_rate,
-                                        )
-                                        .await
+                                        #[cfg(feature = "noise-filter")]
                                         {
-                                            Ok(filtered_audio) => {
-                                                // Return original buffer to pool since we're using filtered version
-                                                LiveKitClient::return_buffer_to_pool(
-                                                    &stream_buffer_pool,
-                                                    audio_buffer,
-                                                );
-                                                callback_clone(filtered_audio);
+                                            // For noise filtering, we need to clone since the filter may modify the buffer
+                                            match reduce_noise_async(
+                                                audio_buffer.clone().into(),
+                                                sample_rate,
+                                            )
+                                            .await
+                                            {
+                                                Ok(filtered_audio) => {
+                                                    LiveKitClient::return_buffer_to_pool(
+                                                        &stream_buffer_pool,
+                                                        audio_buffer,
+                                                    );
+                                                    callback_clone(filtered_audio);
+                                                }
+                                                Err(e) => {
+                                                    error!("Error reducing noise: {:?}", e);
+                                                    callback_clone(audio_buffer);
+                                                }
                                             }
-                                            Err(e) => {
-                                                error!("Error reducing noise: {:?}", e);
-                                                callback_clone(audio_buffer);
-                                            }
+                                        }
+                                        #[cfg(not(feature = "noise-filter"))]
+                                        {
+                                            callback_clone(audio_buffer);
                                         }
                                     } else {
                                         callback_clone(audio_buffer);
@@ -237,21 +266,32 @@ impl LiveKitClient {
                 participant,
                 ..
             } => {
+                let participant_identity = participant
+                    .as_ref()
+                    .map(|p| p.identity().to_string())
+                    .unwrap_or_else(|| "server".to_string());
+
                 debug!(
                     "Data received from participant: {}, {} bytes",
-                    participant
-                        .as_ref()
-                        .map(|p| p.identity().to_string())
-                        .unwrap_or_else(|| "server".to_string()),
+                    participant_identity,
                     payload.len()
                 );
 
+                // Check if we should process this participant's data messages
+                if !config.listen_participants.is_empty()
+                    && participant.is_some()
+                    && !config.listen_participants.contains(&participant_identity)
+                {
+                    debug!(
+                        "Ignoring data message from participant {} (not in listen_participants list)",
+                        participant_identity
+                    );
+                    return Ok(());
+                }
+
                 if let Some(callback) = data_callback {
                     let data_message = DataMessage {
-                        participant_identity: participant
-                            .as_ref()
-                            .map(|p| p.identity().to_string())
-                            .unwrap_or_else(|| "server".to_string()),
+                        participant_identity,
                         data: payload.to_vec(),
                         topic,
                         timestamp: std::time::SystemTime::now()

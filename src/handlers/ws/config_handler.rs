@@ -117,28 +117,32 @@ pub async fn handle_config_message(
     }
 
     // Initialize LiveKit client if configured
-    let livekit_client = if let Some(livekit_ws_config) = livekit_ws_config {
-        match initialize_livekit_client(
-            livekit_ws_config,
-            tts_ws_config.as_ref(),
-            &app_state.config.livekit_url,
-            voice_manager.as_ref(),
-            message_tx,
-        )
-        .await
-        {
-            Some((client, operation_queue)) => {
-                // Store in connection state
-                let mut state_guard = state.write().await;
-                state_guard.livekit_client = Some(client.clone());
-                state_guard.livekit_operation_queue = operation_queue;
-                Some(client)
+    let (livekit_client, livekit_room_name, sayna_identity, sayna_name) =
+        if let Some(livekit_ws_config) = livekit_ws_config {
+            match initialize_livekit_client(
+                livekit_ws_config,
+                tts_ws_config.as_ref(),
+                &app_state.config.livekit_url,
+                voice_manager.as_ref(),
+                message_tx,
+                app_state.livekit_room_handler.as_ref(),
+            )
+            .await
+            {
+                Some((client, operation_queue, room_name, egress_id, identity, name)) => {
+                    // Store in connection state
+                    let mut state_guard = state.write().await;
+                    state_guard.livekit_client = Some(client.clone());
+                    state_guard.livekit_operation_queue = operation_queue;
+                    state_guard.livekit_room_name = Some(room_name.clone());
+                    state_guard.recording_egress_id = egress_id;
+                    (Some(client), Some(room_name), Some(identity), Some(name))
+                }
+                None => return true,
             }
-            None => return true,
-        }
-    } else {
-        None
-    };
+        } else {
+            (None, None, None, None)
+        };
 
     // Register final TTS callback with LiveKit routing
     if let Some(ref vm) = voice_manager {
@@ -157,9 +161,14 @@ pub async fn handle_config_message(
         .await;
     }
 
-    // Send ready message
+    // Send ready message with optional LiveKit room information
     let _ = message_tx
-        .send(MessageRoute::Outgoing(OutgoingMessage::Ready))
+        .send(MessageRoute::Outgoing(OutgoingMessage::Ready {
+            livekit_room_name: livekit_room_name.clone(),
+            livekit_url: Some(app_state.config.livekit_public_url.clone()),
+            sayna_participant_identity: sayna_identity,
+            sayna_participant_name: sayna_name,
+        }))
         .await;
     info!("Voice manager ready and configured");
 
@@ -240,11 +249,8 @@ async fn initialize_voice_manager(
     let stt_config = stt_ws_config.to_stt_config(stt_api_key);
     let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
-    // Create voice manager configuration
-    let voice_config = VoiceManagerConfig {
-        stt_config: stt_config.clone(),
-        tts_config: tts_config.clone(),
-    };
+    // Create voice manager configuration with default speech final settings
+    let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
 
     let turn_detector = app_state.core_state.get_turn_detector();
 
@@ -289,6 +295,11 @@ async fn initialize_voice_manager(
 
     // Set up TTS error callback
     if !register_tts_error_callback(&voice_manager, message_tx).await {
+        return None;
+    }
+
+    // Set up TTS completion callback
+    if !register_tts_complete_callback(&voice_manager, message_tx).await {
         return None;
     }
 
@@ -358,6 +369,59 @@ async fn register_tts_error_callback(
             .await;
         return false;
     }
+    true
+}
+
+/// Register TTS completion callback to send WebSocket notifications
+///
+/// This callback is invoked by the TTS provider's dispatcher after all audio
+/// chunks for a given `speak()` command have been generated and sent.
+///
+/// # Arguments
+/// * `voice_manager` - VoiceManager instance to register callback with
+/// * `message_tx` - Channel for sending WebSocket messages
+///
+/// # Returns
+/// * `bool` - true on success, false on error (triggers connection termination)
+async fn register_tts_complete_callback(
+    voice_manager: &Arc<VoiceManager>,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) -> bool {
+    let message_tx_clone = message_tx.clone();
+
+    if let Err(e) = voice_manager
+        .on_tts_complete(move || {
+            let message_tx = message_tx_clone.clone();
+            Box::pin(async move {
+                // Calculate timestamp when completion occurred
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                // Send completion message to WebSocket client
+                let msg = OutgoingMessage::TTSPlaybackComplete { timestamp };
+
+                // Ignore send errors - client may have disconnected
+                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
+
+                debug!(
+                    "TTS playback completion event sent at timestamp {}",
+                    timestamp
+                );
+            })
+        })
+        .await
+    {
+        error!("Failed to set up TTS completion callback: {}", e);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up TTS completion callback: {e}"),
+            }))
+            .await;
+        return false;
+    }
+
     true
 }
 
@@ -526,11 +590,101 @@ async fn initialize_livekit_client(
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
+    room_handler: Option<&Arc<crate::livekit::room_handler::LiveKitRoomHandler>>,
 ) -> Option<(
     Arc<RwLock<LiveKitClient>>,
     Option<crate::livekit::OperationQueue>,
+    String,         // Room name for client info
+    Option<String>, // Egress ID for recording cleanup
+    String,         // Sayna participant identity
+    String,         // Sayna participant name
 )> {
-    info!("Setting up LiveKit client with URL: {}", livekit_url);
+    info!(
+        "Setting up LiveKit client with URL: {}, room: {}",
+        livekit_url, livekit_ws_config.room_name
+    );
+
+    // Get room handler or return error
+    let room_handler = match room_handler {
+        Some(handler) => handler,
+        None => {
+            error!("LiveKit room handler not initialized. Check API keys configuration.");
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: "LiveKit room handler not initialized. Check API keys configuration."
+                        .to_string(),
+                }))
+                .await;
+            return None;
+        }
+    };
+
+    // Create the room
+    if let Err(e) = room_handler.create_room(&livekit_ws_config.room_name).await {
+        error!("Failed to create LiveKit room: {:?}", e);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to create LiveKit room: {e:?}"),
+            }))
+            .await;
+        return None;
+    }
+
+    info!(
+        "LiveKit room '{}' created successfully",
+        livekit_ws_config.room_name
+    );
+
+    // Get participant identity and name with defaults
+    let sayna_identity = livekit_ws_config
+        .sayna_participant_identity
+        .as_deref()
+        .unwrap_or("sayna-ai");
+    let sayna_name = livekit_ws_config
+        .sayna_participant_name
+        .as_deref()
+        .unwrap_or("Sayna AI");
+
+    // Generate agent token for AI participant with custom identity and name
+    let agent_token =
+        match room_handler.agent_token(&livekit_ws_config.room_name, sayna_identity, sayna_name) {
+            Ok(token) => token,
+            Err(e) => {
+                error!("Failed to generate agent token: {:?}", e);
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to generate agent token: {e:?}"),
+                    }))
+                    .await;
+                return None;
+            }
+        };
+
+    info!("LiveKit agent token generated successfully");
+
+    // Start recording if requested
+    let egress_id = if livekit_ws_config.enable_recording {
+        let file_key = livekit_ws_config
+            .recording_file_key
+            .as_deref()
+            .unwrap_or("default");
+        match room_handler
+            .setup_room_recording(&livekit_ws_config.room_name, file_key)
+            .await
+        {
+            Ok(egress_id) => {
+                info!("Recording started with egress ID: {}", egress_id);
+                Some(egress_id)
+            }
+            Err(e) => {
+                warn!("Failed to start recording: {:?}", e);
+                // Continue without recording - not a critical error
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Use default TTS config for LiveKit audio parameters when TTS is not configured
     let default_tts_config = TTSWebSocketConfig {
@@ -546,7 +700,8 @@ async fn initialize_livekit_client(
     };
 
     let tts_config_for_livekit = tts_config.unwrap_or(&default_tts_config);
-    let livekit_config = livekit_ws_config.to_livekit_config(tts_config_for_livekit, livekit_url);
+    let livekit_config =
+        livekit_ws_config.to_livekit_config(agent_token, tts_config_for_livekit, livekit_url);
     let mut livekit_client = LiveKitClient::new(livekit_config);
 
     // Set up audio callback to forward to STT processing
@@ -585,7 +740,14 @@ async fn initialize_livekit_client(
     }
 
     info!("LiveKit client connected and ready");
-    Some((livekit_client_arc, operation_queue))
+    Some((
+        livekit_client_arc,
+        operation_queue,
+        livekit_ws_config.room_name.clone(),
+        egress_id,
+        sayna_identity.to_string(),
+        sayna_name.to_string(),
+    ))
 }
 
 /// Set up LiveKit audio callback to forward audio to STT
@@ -682,8 +844,8 @@ fn setup_livekit_disconnect_callback(
 
         // Spawn task for async send to ensure delivery
         tokio::spawn(async move {
-            debug!(
-                "Participant {} disconnected from LiveKit room {}",
+            info!(
+                "Participant {} disconnected from LiveKit room {} - closing WebSocket connection",
                 disconnect_event.participant_identity, disconnect_event.room_name
             );
 
@@ -699,8 +861,14 @@ fn setup_livekit_disconnect_callback(
                 participant: participant_info,
             };
 
-            // Use send for guaranteed delivery
+            // Send notification about participant disconnection
             let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
+
+            // Give a brief moment for the message to be sent
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+            // Close the WebSocket connection to trigger cleanup
+            let _ = message_tx.send(MessageRoute::Close).await;
         });
     });
 }

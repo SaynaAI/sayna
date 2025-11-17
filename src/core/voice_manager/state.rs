@@ -12,6 +12,8 @@ pub struct SpeechFinalState {
     pub text_buffer: String,
     /// Turn detection task handle
     pub turn_detection_handle: Option<JoinHandle<()>>,
+    /// Hard timeout task handle - cancels when real speech_final arrives
+    pub hard_timeout_handle: Option<JoinHandle<()>>,
     /// Whether we're currently waiting for speech_final - atomic for lock-free reads
     pub waiting_for_speech_final: AtomicBool,
     /// User callback to call when turn detection completes
@@ -20,6 +22,10 @@ pub struct SpeechFinalState {
     pub turn_detection_last_fired_ms: AtomicUsize,
     /// Last text that was force-finalized by turn detection
     pub last_forced_text: String,
+    /// Timestamp (ms since epoch) when first is_final frame of current utterance arrived
+    pub segment_start_ms: AtomicUsize,
+    /// Hard timeout deadline (ms since epoch) - when the hard timeout will fire
+    pub hard_timeout_deadline_ms: AtomicUsize,
 }
 
 /// State for managing interruption control

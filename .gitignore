@@ -3,4 +3,6 @@ node_modules
 .env
 tmp/
 sayna-deploy/
-certs
+todo/
+certs/
+reports/

@@ -1,0 +1,48 @@
+# Sayna Configuration File Example
+#
+# This file demonstrates all available configuration options.
+# Copy this file to config.yaml and customize as needed.
+#
+# Usage: sayna -c config.yaml
+#
+# Priority: Environment variables > YAML values > Defaults
+# This means you can override any value in this file by setting
+# the corresponding environment variable.
+
+# Server configuration
+server:
+  host: "0.0.0.0"      # ENV: HOST
+  port: 3001           # ENV: PORT
+
+# LiveKit configuration
+livekit:
+  url: "ws://localhost:7880"              # ENV: LIVEKIT_URL
+  public_url: "http://localhost:7880"     # ENV: LIVEKIT_PUBLIC_URL
+  api_key: "your-livekit-api-key"         # ENV: LIVEKIT_API_KEY
+  api_secret: "your-livekit-api-secret"   # ENV: LIVEKIT_API_SECRET
+
+# Provider API keys
+providers:
+  deepgram_api_key: "your-deepgram-api-key"     # ENV: DEEPGRAM_API_KEY
+  elevenlabs_api_key: "your-elevenlabs-api-key" # ENV: ELEVENLABS_API_KEY
+
+# LiveKit recording configuration (S3)
+recording:
+  s3_bucket: "my-recordings"              # ENV: RECORDING_S3_BUCKET
+  s3_region: "us-west-2"                  # ENV: RECORDING_S3_REGION
+  s3_endpoint: "https://s3.amazonaws.com" # ENV: RECORDING_S3_ENDPOINT
+  s3_access_key: "your-access-key"        # ENV: RECORDING_S3_ACCESS_KEY
+  s3_secret_key: "your-secret-key"        # ENV: RECORDING_S3_SECRET_KEY
+
+# Cache configuration
+cache:
+  path: "/var/cache/sayna"  # ENV: CACHE_PATH (if omitted, uses in-memory cache)
+  ttl_seconds: 2592000      # ENV: CACHE_TTL_SECONDS (default: 30 days)
+
+# Authentication configuration
+auth:
+  required: false                             # ENV: AUTH_REQUIRED (true/false/1/0/yes/no)
+  service_url: "https://auth.example.com"     # ENV: AUTH_SERVICE_URL
+  signing_key_path: "/path/to/key.pem"        # ENV: AUTH_SIGNING_KEY_PATH
+  api_secret: "your-api-secret"               # ENV: AUTH_API_SECRET
+  timeout_seconds: 5                          # ENV: AUTH_TIMEOUT_SECONDS

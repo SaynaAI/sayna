@@ -152,10 +152,13 @@ pub trait AudioCallback: Send + Sync {
 
 /// Pronunciation replacement configuration
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Pronunciation {
     /// Word to replace
+    #[cfg_attr(feature = "openapi", schema(example = "API"))]
     pub word: String,
     /// Pronunciation to use instead
+    #[cfg_attr(feature = "openapi", schema(example = "A P I"))]
     pub pronunciation: String,
 }
 

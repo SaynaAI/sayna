@@ -3,6 +3,22 @@ name = "sayna"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+turn-detect = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+noise-filter = [
+    "dep:deep_filter",
+    "dep:tract-core",
+    "dep:tract-onnx",
+    "dep:tract-pulse",
+    "dep:tract-hir",
+    "dep:ndarray",
+    "dep:num_cpus",
+]
+openapi = [
+    "dep:utoipa",
+]
+
 [dependencies]
 async-trait = "0.1.88"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -17,10 +33,14 @@ tower-http = { version = "0.6.6", features = ["trace"] }
 futures = "0.3"
 futures-util = "0.3"
 bytes = "1.8"
+http-body-util = "0.1"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 hound = "3.5"
+
+# JWT authentication
+jsonwebtoken = "9"
 
 # WebSocket client
 tokio-tungstenite = { version = "0.27.0", features = ["rustls-tls-webpki-roots"] }
@@ -33,6 +53,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Environment variables
 dotenvy = "0.15"
+
+# Configuration
+serde_yaml = "0.9"
 
 # Error handling
 thiserror = "2.0.12"
@@ -52,31 +75,40 @@ tracing-subscriber = "0.3"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
-# Text processing  
+# Text processing
 regex = "1.10"
 once_cell = "1.19"
 
+# OpenAPI documentation (feature-gated)
+utoipa = { version = "5.3", optional = true, features = ["axum_extras"] }
+
 # LiveKit
 livekit = "=0.7.18"
+livekit-api = "=0.4.6"
+livekit-protocol = "=0.4.0"
 
-deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model-ll"] }
-tract-core = "=0.21.5"
-tract-onnx = "=0.21.5"
-tract-pulse = "=0.21.5"
-tract-hir = "=0.21.5"
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "f1d19bffbeccd98a616f23c89903a2386a1d1dba", package = "deep_filter", default-features = true, features = ["tract", "default-model-ll"], optional = true }
+tract-core = { version = "=0.21.5", optional = true }
+tract-onnx = { version = "=0.21.5", optional = true }
+tract-pulse = { version = "=0.21.5", optional = true }
+tract-hir = { version = "=0.21.5", optional = true }
 time = ">=0.3.35"
-ndarray = "0.15.6"
-num_cpus = "1.17.0"
+ndarray = { version = "0.15.6", optional = true }
+num_cpus = { version = "1.17.0", optional = true }
 
 # Turn detection dependencies
-ort = { version = "1.16", features = ["load-dynamic", "download-binaries"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+ort = { version = "1.16", features = ["load-dynamic", "download-binaries"], optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 sha2 = "0.10"
 anyhow = "1.0"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 tempfile = "3.8"
+serial_test = "3.2"
+tokio-test = "0.4"
+mockito = "1.2"
+wiremock = "0.6"
 
 # Debug profile optimizations to fix tract codegen issues
 # Disable debug assertions specifically for problematic dependencies

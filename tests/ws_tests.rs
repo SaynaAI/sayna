@@ -12,12 +12,25 @@ async fn test_websocket_voice_config() {
     // Create test config
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
+        livekit_api_key: Some("test_key".to_string()),
+        livekit_api_secret: Some("test_key".to_string()),
         port: 0, // Let the OS assign a port
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create application state
@@ -157,12 +170,25 @@ async fn test_websocket_invalid_message() {
     // Create test config
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
         port: 0,
         livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
         deepgram_api_key: Some("test_key".to_string()),
         elevenlabs_api_key: Some("test_key".to_string()),
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
         cache_path: None,
         cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
     };
 
     // Create application state

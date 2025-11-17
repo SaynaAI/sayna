@@ -1,0 +1,680 @@
+openapi: 3.1.0
+info:
+  title: Sayna API
+  description: Real-time voice processing server with Speech-to-Text (STT) and Text-to-Speech (TTS) services
+  contact:
+    name: Sayna
+    url: https://api.sayna.dev
+  license:
+    name: ''
+  version: 0.1.0
+servers:
+- url: https://api.sayna.dev
+  description: Production API
+- url: http://localhost:3001
+  description: Local development
+paths:
+  /:
+    get:
+      tags:
+      - health
+      summary: |-
+        Health check handler
+        Returns a simple JSON response indicating the server is running
+      operationId: health_check
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /livekit/token:
+    post:
+      tags:
+      - livekit
+      summary: Handler for POST /livekit/token endpoint
+      description: |-
+        Generates a LiveKit JWT token for a participant to join a specific room.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `request` - Token request with room name and participant details
+
+        # Returns
+        * `Response` - JSON response with token or error status
+
+        # Errors
+        * 400 Bad Request - Invalid request data (empty fields)
+        * 500 Internal Server Error - LiveKit service not configured or token generation failed
+      operationId: generate_token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+        required: true
+      responses:
+        '200':
+          description: Token generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Invalid request (missing or empty fields)
+        '500':
+          description: LiveKit service not configured or token generation failed
+      security:
+      - bearer_auth: []
+  /speak:
+    post:
+      tags:
+      - tts
+      summary: Handler for the /speak endpoint
+      operationId: speak_handler
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeakRequest'
+        required: true
+      responses:
+        '200':
+          description: Audio generated successfully
+          headers:
+            x-audio-format:
+              schema:
+                type: string
+              description: Audio format (linear16, mp3, etc.)
+            x-sample-rate:
+              schema:
+                type: integer
+                format: int32
+                minimum: 0
+              description: Sample rate in Hz
+          content:
+            audio/pcm: {}
+        '400':
+          description: Invalid request (empty text)
+        '500':
+          description: TTS synthesis failed
+      security:
+      - bearer_auth: []
+  /voices:
+    get:
+      tags:
+      - voices
+      summary: Handler for GET /voices - returns available voices per provider
+      operationId: list_voices
+      responses:
+        '200':
+          description: Available voices grouped by provider
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Voice'
+                propertyNames:
+                  type: string
+        '500':
+          description: Internal server error
+      security:
+      - bearer_auth: []
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      description: Health check response
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          description: Server status
+          example: OK
+    IncomingMessage:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          audio:
+            type:
+            - boolean
+            - 'null'
+            description: Enable audio processing (STT/TTS). Defaults to true if not specified.
+          livekit:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LiveKitWebSocketConfig'
+              description: Optional LiveKit configuration for real-time audio streaming
+          stt_config:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/STTWebSocketConfig'
+              description: STT configuration (required only when audio=true)
+          tts_config:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/TTSWebSocketConfig'
+              description: TTS configuration (required only when audio=true)
+          type:
+            type: string
+            enum:
+            - config
+      - type: object
+        required:
+        - text
+        - type
+        properties:
+          allow_interruption:
+            type:
+            - boolean
+            - 'null'
+            description: Allow this TTS to be interrupted
+          flush:
+            type:
+            - boolean
+            - 'null'
+            description: Flush TTS buffer immediately
+          text:
+            type: string
+            description: Text to synthesize
+          type:
+            type: string
+            enum:
+            - speak
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - clear
+      - type: object
+        required:
+        - message
+        - role
+        - type
+        properties:
+          debug:
+            description: Optional debug metadata
+          message:
+            type: string
+            description: Message content
+          role:
+            type: string
+            description: Message role (e.g., "user", "assistant")
+          topic:
+            type:
+            - string
+            - 'null'
+            description: Optional topic/channel
+          type:
+            type: string
+            enum:
+            - send_message
+      description: WebSocket message types for incoming messages
+    LiveKitWebSocketConfig:
+      type: object
+      description: LiveKit configuration for WebSocket messages
+      required:
+      - room_name
+      properties:
+        enable_recording:
+          type: boolean
+          description: Enable recording for this session
+        listen_participants:
+          type: array
+          items:
+            type: string
+          description: |-
+            List of participant identities to listen to for audio tracks and data messages. (All participants by default)
+
+            **Behavior**:
+            - If **empty** (default): Audio tracks and data messages from **all participants** will be processed
+            - If **populated**: Only audio tracks and data messages from participants whose identities
+              are in this list will be processed; others will be ignored
+        recording_file_key:
+          type:
+          - string
+          - 'null'
+          description: File key for recording (required if enable_recording is true)
+        room_name:
+          type: string
+          description: Room name to join or create
+          example: conversation-room-123
+        sayna_participant_identity:
+          type:
+          - string
+          - 'null'
+          description: Sayna AI participant identity (defaults to "sayna-ai")
+          example: sayna-ai
+        sayna_participant_name:
+          type:
+          - string
+          - 'null'
+          description: Sayna AI participant display name (defaults to "Sayna AI")
+          example: Sayna AI
+    OutgoingMessage:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          livekit_room_name:
+            type:
+            - string
+            - 'null'
+            description: Optional LiveKit room name that was created
+          livekit_url:
+            type:
+            - string
+            - 'null'
+            description: Optional LiveKit URL to connect to
+          sayna_participant_identity:
+            type:
+            - string
+            - 'null'
+            description: Optional identity of the AI agent participant in the room
+          sayna_participant_name:
+            type:
+            - string
+            - 'null'
+            description: Optional display name of the AI agent participant
+          type:
+            type: string
+            enum:
+            - ready
+      - type: object
+        required:
+        - transcript
+        - is_final
+        - is_speech_final
+        - confidence
+        - type
+        properties:
+          confidence:
+            type: number
+            format: float
+            description: Confidence score (0.0 to 1.0)
+          is_final:
+            type: boolean
+            description: Whether this is the final version of the transcript
+          is_speech_final:
+            type: boolean
+            description: Whether speech has ended
+          transcript:
+            type: string
+            description: Transcribed text
+          type:
+            type: string
+            enum:
+            - stt_result
+      - type: object
+        required:
+        - message
+        - type
+        properties:
+          message:
+            $ref: '#/components/schemas/UnifiedMessage'
+            description: Unified message structure containing text/data from various sources
+          type:
+            type: string
+            enum:
+            - message
+      - type: object
+        required:
+        - participant
+        - type
+        properties:
+          participant:
+            $ref: '#/components/schemas/ParticipantDisconnectedInfo'
+            description: Information about the participant who disconnected
+          type:
+            type: string
+            enum:
+            - participant_disconnected
+      - type: object
+        description: TTS playback completion notification
+        required:
+        - timestamp
+        - type
+        properties:
+          timestamp:
+            type: integer
+            format: int64
+            description: Timestamp when completion occurred (milliseconds since epoch)
+            minimum: 0
+          type:
+            type: string
+            enum:
+            - tts_playback_complete
+      - type: object
+        required:
+        - message
+        - type
+        properties:
+          message:
+            type: string
+            description: Error message
+          type:
+            type: string
+            enum:
+            - error
+      description: WebSocket message types for outgoing messages
+    ParticipantDisconnectedInfo:
+      type: object
+      description: Participant disconnection information
+      required:
+      - identity
+      - room
+      - timestamp
+      properties:
+        identity:
+          type: string
+          description: Participant's unique identity
+        name:
+          type:
+          - string
+          - 'null'
+          description: Participant's display name (if available)
+        room:
+          type: string
+          description: Room identifier
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp when the disconnection occurred
+          minimum: 0
+    Pronunciation:
+      type: object
+      description: Pronunciation replacement configuration
+      required:
+      - word
+      - pronunciation
+      properties:
+        pronunciation:
+          type: string
+          description: Pronunciation to use instead
+          example: A P I
+        word:
+          type: string
+          description: Word to replace
+          example: API
+    STTWebSocketConfig:
+      type: object
+      description: STT configuration for WebSocket messages (without API key)
+      required:
+      - provider
+      - language
+      - sample_rate
+      - channels
+      - punctuation
+      - encoding
+      - model
+      properties:
+        channels:
+          type: integer
+          format: int32
+          description: Number of audio channels (1 for mono, 2 for stereo)
+          example: 1
+          minimum: 0
+        encoding:
+          type: string
+          description: Encoding of the audio
+          example: linear16
+        language:
+          type: string
+          description: Language code for transcription (e.g., "en-US", "es-ES")
+          example: en-US
+        model:
+          type: string
+          description: Model to use for transcription
+          example: nova-2
+        provider:
+          type: string
+          description: Provider name (e.g., "deepgram")
+          example: deepgram
+        punctuation:
+          type: boolean
+          description: Enable punctuation in results
+          example: true
+        sample_rate:
+          type: integer
+          format: int32
+          description: Sample rate of the audio in Hz
+          example: 16000
+          minimum: 0
+    SpeakRequest:
+      type: object
+      description: Request body for the speak endpoint
+      required:
+      - text
+      - tts_config
+      properties:
+        text:
+          type: string
+          description: The text to synthesize
+          example: Hello, world!
+        tts_config:
+          $ref: '#/components/schemas/TTSWebSocketConfig'
+          description: TTS configuration (without API key)
+    TTSWebSocketConfig:
+      type: object
+      description: TTS configuration for WebSocket messages (without API key)
+      required:
+      - provider
+      - model
+      properties:
+        audio_format:
+          type:
+          - string
+          - 'null'
+          description: Audio format preference
+          example: linear16
+        connection_timeout:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Connection timeout in seconds
+          example: 30
+          minimum: 0
+        model:
+          type: string
+          description: Model to use for TTS
+          example: aura-asteria-en
+        pronunciations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Pronunciation'
+          description: Pronunciation replacements to apply before TTS
+        provider:
+          type: string
+          description: Provider name (e.g., "deepgram")
+          example: deepgram
+        request_timeout:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Request timeout in seconds
+          example: 60
+          minimum: 0
+        sample_rate:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Sample rate preference
+          example: 24000
+          minimum: 0
+        speaking_rate:
+          type:
+          - number
+          - 'null'
+          format: float
+          description: Speaking rate (0.25 to 4.0, 1.0 is normal)
+          example: 1.0
+        voice_id:
+          type:
+          - string
+          - 'null'
+          description: Voice ID or name to use for synthesis
+          example: aura-asteria-en
+    TokenRequest:
+      type: object
+      description: |-
+        Request body for generating a LiveKit token
+
+        # Example
+        ```json
+        {
+          "room_name": "conversation-room-123",
+          "participant_name": "Alice Smith",
+          "participant_identity": "user-alice-456"
+        }
+        ```
+      required:
+      - room_name
+      - participant_name
+      - participant_identity
+      properties:
+        participant_identity:
+          type: string
+          description: Unique identifier for the participant (e.g., "user-123")
+          example: user-alice-456
+        participant_name:
+          type: string
+          description: Display name for the participant (e.g., "John Doe")
+          example: Alice Smith
+        room_name:
+          type: string
+          description: The LiveKit room name to generate a token for
+          example: conversation-room-123
+    TokenResponse:
+      type: object
+      description: |-
+        Response containing the generated LiveKit token
+
+        # Example
+        ```json
+        {
+          "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+          "room_name": "conversation-room-123",
+          "participant_identity": "user-alice-456",
+          "livekit_url": "ws://localhost:7880"
+        }
+        ```
+      required:
+      - token
+      - room_name
+      - participant_identity
+      - livekit_url
+      properties:
+        livekit_url:
+          type: string
+          description: The LiveKit server URL to connect to
+          example: ws://localhost:7880
+        participant_identity:
+          type: string
+          description: Echo back the participant identity for client confirmation
+          example: user-alice-456
+        room_name:
+          type: string
+          description: Echo back the room name for client confirmation
+          example: conversation-room-123
+        token:
+          type: string
+          description: The generated JWT token for LiveKit
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+    UnifiedMessage:
+      type: object
+      description: Unified message structure for all incoming messages from various sources
+      required:
+      - identity
+      - topic
+      - room
+      - timestamp
+      properties:
+        data:
+          type:
+          - string
+          - 'null'
+          description: Binary data encoded as base64 (optional)
+        identity:
+          type: string
+          description: Participant/sender identity
+        message:
+          type:
+          - string
+          - 'null'
+          description: Text message content (optional)
+        room:
+          type: string
+          description: Room/space identifier
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp when the message was received
+          minimum: 0
+        topic:
+          type: string
+          description: Topic/channel for the message
+    Voice:
+      type: object
+      required:
+      - id
+      - sample
+      - name
+      - accent
+      - gender
+      - language
+      properties:
+        accent:
+          type: string
+          description: Accent or dialect
+          example: American
+        gender:
+          type: string
+          description: Gender of the voice
+          example: Female
+        id:
+          type: string
+          description: Voice ID or canonical name
+          example: aura-asteria-en
+        language:
+          type: string
+          description: Language supported by the voice
+          example: English
+        name:
+          type: string
+          description: Display name of the voice
+          example: Asteria
+        sample:
+          type: string
+          description: URL to sample audio
+          example: https://example.com/sample.mp3
+  securitySchemes:
+    bearer_auth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from the authentication service. Required when AUTH_REQUIRED is enabled.
+tags:
+- name: health
+  description: Health check endpoints
+- name: voices
+  description: TTS voice management
+- name: tts
+  description: Text-to-speech synthesis
+- name: livekit
+  description: LiveKit room and token management
+- name: websocket
+  description: WebSocket API for real-time communication

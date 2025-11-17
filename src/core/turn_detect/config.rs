@@ -63,6 +63,7 @@ pub enum GraphOptimizationLevel {
 }
 
 impl GraphOptimizationLevel {
+    #[cfg(feature = "turn-detect")]
     pub fn to_ort_level(&self) -> ort::GraphOptimizationLevel {
         match self {
             Self::Disabled => ort::GraphOptimizationLevel::Disable,

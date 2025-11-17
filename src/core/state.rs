@@ -1,14 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "turn-detect")]
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
+#[cfg(not(feature = "turn-detect"))]
+use tracing::info;
+#[cfg(feature = "turn-detect")]
 use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
+#[cfg(not(feature = "turn-detect"))]
+use crate::core::turn_detect::TurnDetector;
+#[cfg(feature = "turn-detect")]
 use crate::core::turn_detect::{TurnDetector, TurnDetectorConfig};
 use crate::utils::req_manager::ReqManager;
 
@@ -83,6 +90,7 @@ impl CoreState {
         self.tts_req_managers.read().await.get(provider).cloned()
     }
 
+    #[cfg(feature = "turn-detect")]
     /// Initialize and warmup the Turn Detector model
     async fn initialize_turn_detector(
         cache_path: Option<&PathBuf>,
@@ -92,8 +100,10 @@ impl CoreState {
         let start = Instant::now();
 
         // Create config with cache path
-        let mut config = TurnDetectorConfig::default();
-        config.cache_path = cache_path.cloned();
+        let config = TurnDetectorConfig {
+            cache_path: cache_path.cloned(),
+            ..Default::default()
+        };
 
         // Add a timeout to prevent hanging forever during initialization
         let init_timeout = Duration::from_secs(30);
@@ -146,12 +156,22 @@ impl CoreState {
         }
     }
 
+    #[cfg(not(feature = "turn-detect"))]
+    async fn initialize_turn_detector(
+        cache_path: Option<&PathBuf>,
+    ) -> Option<Arc<RwLock<TurnDetector>>> {
+        let _ = cache_path;
+        info!("Turn detection feature disabled; using timer-based speech_final fallback logic");
+        None
+    }
+
+    #[cfg(feature = "turn-detect")]
     /// Warmup the Turn Detector model with sample inputs
     async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
         debug!("Starting Turn Detector warmup with sample inputs");
 
         // Sample inputs that cover common speech patterns
-        let warmup_samples = vec![
+        let warmup_samples = [
             "Hello",
             "How are you?",
             "What is the weather like today?",

@@ -5,12 +5,28 @@ use std::{collections::HashMap, sync::Arc};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Voice {
+    /// Voice ID or canonical name
+    #[cfg_attr(feature = "openapi", schema(example = "aura-asteria-en"))]
     pub id: String,
+    /// URL to sample audio
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = "https://example.com/sample.mp3")
+    )]
     pub sample: String,
+    /// Display name of the voice
+    #[cfg_attr(feature = "openapi", schema(example = "Asteria"))]
     pub name: String,
+    /// Accent or dialect
+    #[cfg_attr(feature = "openapi", schema(example = "American"))]
     pub accent: String,
+    /// Gender of the voice
+    #[cfg_attr(feature = "openapi", schema(example = "Female"))]
     pub gender: String,
+    /// Language supported by the voice
+    #[cfg_attr(feature = "openapi", schema(example = "English"))]
     pub language: String,
 }
 
@@ -225,6 +241,21 @@ async fn fetch_deepgram_voices(
 }
 
 /// Handler for GET /voices - returns available voices per provider
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/voices",
+        responses(
+            (status = 200, description = "Available voices grouped by provider", body = HashMap<String, Vec<Voice>>),
+            (status = 500, description = "Internal server error")
+        ),
+        security(
+            ("bearer_auth" = [])
+        ),
+        tag = "voices"
+    )
+)]
 pub async fn list_voices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<VoicesResponse>, StatusCode> {
