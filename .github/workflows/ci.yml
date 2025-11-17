@@ -28,61 +28,41 @@ jobs:
       - name: Clippy lint
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  discover-features:
+  test:
     runs-on: ubuntu-latest
     needs: lint
-    outputs:
-      features: ${{ steps.get-features.outputs.features }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Get feature list
-        id: get-features
+      - uses: swatinem/rust-cache@v2
+
+      - name: Discover features
+        id: features
         run: |
-          # Extract all features from Cargo.toml and create JSON array
+          # Extract all features from Cargo.toml (excluding 'default')
           features=$(cargo metadata --no-deps --format-version 1 | \
-            jq -r '.packages[0].features | keys | map(select(. != "default")) | @json')
-          echo "features=$features" >> $GITHUB_OUTPUT
-          echo "Discovered features: $features"
+            jq -r '.packages[0].features | keys | map(select(. != "default")) | .[]')
+          echo "Discovered features:"
+          echo "$features"
+          echo "features<<EOF" >> $GITHUB_OUTPUT
+          echo "$features" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-  build-and-test:
-    runs-on: ubuntu-latest
-    needs: discover-features
-    strategy:
-      fail-fast: false
-      matrix:
-        # Test each individual feature plus no-features and all-features
-        feature-set:
-          - name: no-features
-            args: --no-default-features
-          - name: all-features
-            args: --all-features
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.feature-set.name }}
-      - name: Build ${{ matrix.feature-set.name }}
-        run: cargo build --locked ${{ matrix.feature-set.args }}
-      - name: Test ${{ matrix.feature-set.name }}
-        run: cargo test --locked ${{ matrix.feature-set.args }}
+      - name: Test each individual feature
+        run: |
+          echo "Testing individual features..."
+          while IFS= read -r feature; do
+            if [ -n "$feature" ]; then
+              echo "::group::Building and testing feature: $feature"
+              cargo build --locked --no-default-features --features "$feature"
+              cargo test --locked --no-default-features --features "$feature"
+              echo "::endgroup::"
+            fi
+          done <<< "${{ steps.features.outputs.features }}"
 
-  test-individual-features:
-    runs-on: ubuntu-latest
-    needs: discover-features
-    if: needs.discover-features.outputs.features != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        feature: ${{ fromJson(needs.discover-features.outputs.features) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          key: feature-${{ matrix.feature }}
-      - name: Build with feature ${{ matrix.feature }}
-        run: cargo build --locked --no-default-features --features ${{ matrix.feature }}
-      - name: Test with feature ${{ matrix.feature }}
-        run: cargo test --locked --no-default-features --features ${{ matrix.feature }}
+      - name: Test all features
+        run: |
+          echo "::group::Building and testing with all features"
+          cargo build --locked --all-features
+          cargo test --locked --all-features
+          echo "::endgroup::"
