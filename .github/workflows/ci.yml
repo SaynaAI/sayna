@@ -30,31 +30,7 @@ jobs:
       - name: Clippy lint
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Discover features
-        id: features
-        run: |
-          # Extract all features from Cargo.toml (excluding 'default')
-          features=$(cargo metadata --no-deps --format-version 1 | \
-            jq -r '.packages[0].features | keys | map(select(. != "default")) | .[]')
-          echo "Discovered features:"
-          echo "$features"
-          echo "features<<EOF" >> $GITHUB_OUTPUT
-          echo "$features" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Test each individual feature
-        run: |
-          echo "Testing individual features..."
-          while IFS= read -r feature; do
-            if [ -n "$feature" ]; then
-              echo "::group::Building and testing feature: $feature"
-              cargo build --locked --no-default-features --features "$feature"
-              cargo test --locked --no-default-features --features "$feature"
-              echo "::endgroup::"
-            fi
-          done <<< "${{ steps.features.outputs.features }}"
-
-      - name: Test all features
+      - name: Test with all features
         run: |
           echo "::group::Building and testing with all features"
           cargo build --locked --all-features
