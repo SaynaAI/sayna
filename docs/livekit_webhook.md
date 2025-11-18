@@ -459,28 +459,30 @@ tracing::info!(
 
 ## Implementation Checklist
 
-### Phase 1: Basic Webhook Endpoint
-- [ ] Create `POST /livekit/webhook` endpoint in `src/handlers/livekit.rs`
-- [ ] Extract raw body bytes before any parsing
-- [ ] Extract JWT from `Authorization: Bearer <token>` header
-- [ ] Build `WebhookReceiver` from `ServerConfig` (on-demand, not stored)
-- [ ] Call `webhook_receiver.receive(body_str, auth_token)`
-- [ ] Return appropriate HTTP status codes (200, 401, 503)
+### Phase 1: Basic Webhook Endpoint ✅
+- [x] Create `POST /livekit/webhook` endpoint in `src/handlers/livekit_webhook.rs`
+- [x] Extract raw body bytes before any parsing
+- [x] Extract JWT from `Authorization: Bearer <token>` header
+- [x] Build `WebhookReceiver` from `ServerConfig` (on-demand, not stored)
+- [x] Call `webhook_receiver.receive(body_str, auth_token)`
+- [x] Return appropriate HTTP status codes (200, 401, 503)
+- [x] Create dedicated webhook router in `src/routes/webhooks.rs`
+- [x] Integrate webhook router in `src/main.rs` without auth middleware
 
-### Phase 2: Event Processing
-- [ ] Parse successful webhook into `livekit_protocol::WebhookEvent`
-- [ ] Log event metadata (id, event type, room name)
-- [ ] Log participant metadata (identity, name, kind)
-- [ ] Detect SIP participants (`kind == Kind::Sip`)
-- [ ] Log all `sip.*` attributes for SIP participants
+### Phase 2: Event Processing ✅
+- [x] Parse successful webhook into `livekit_protocol::WebhookEvent`
+- [x] Log event metadata (id, event type, room name)
+- [x] Log participant metadata (identity, name, kind)
+- [x] Detect SIP participants (`kind == Kind::Sip`)
+- [x] Log all `sip.*` attributes for SIP participants
 
-### Phase 3: Error Handling
-- [ ] Handle missing `Authorization` header → 401
-- [ ] Handle invalid JWT signature → 401
-- [ ] Handle body hash mismatch → 401
-- [ ] Handle missing LiveKit config → 503
-- [ ] Handle JSON parsing errors → 401
-- [ ] Log all failure cases at appropriate levels (warn/error)
+### Phase 3: Error Handling ✅
+- [x] Handle missing `Authorization` header → 401
+- [x] Handle invalid JWT signature → 401
+- [x] Handle body hash mismatch → 401
+- [x] Handle missing LiveKit config → 503
+- [x] Handle JSON parsing errors → 401
+- [x] Log all failure cases at appropriate levels (warn/error)
 
 ### Phase 4: Testing
 - [ ] Unit test: Verify valid webhook with correct signature

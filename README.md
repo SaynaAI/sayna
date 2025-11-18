@@ -212,8 +212,15 @@ For complete authentication setup and architecture details, see [docs/authentica
 
 ### REST API
 
-- **Health Check**: `GET /health`
-- **Metrics**: `GET /metrics` (if enabled)
+- **Health Check**: `GET /` - Server health check endpoint
+- **Voices**: `GET /voices` - List available TTS voices (requires auth if `AUTH_REQUIRED=true`)
+- **Speak**: `POST /speak` - Generate speech from text (requires auth if `AUTH_REQUIRED=true`)
+- **LiveKit Token**: `POST /livekit/token` - Generate LiveKit participant token (requires auth if `AUTH_REQUIRED=true`)
+- **LiveKit Webhook**: `POST /livekit/webhook` - Webhook endpoint for LiveKit events (unauthenticated, uses LiveKit signature verification)
+  - Called by LiveKit to deliver room and participant events
+  - Validates requests using LiveKit's JWT signature mechanism
+  - Logs SIP-related attributes for phone call troubleshooting
+  - See [docs/livekit_webhook.md](docs/livekit_webhook.md) for details
 
 ## Architecture Overview
 
@@ -294,6 +301,8 @@ docker run -p 3001:3001 --env-file .env sayna
 | `DEEPGRAM_API_KEY` | Deepgram API authentication | - | No* |
 | `ELEVENLABS_API_KEY` | ElevenLabs API authentication | - | No* |
 | `LIVEKIT_URL` | LiveKit server WebSocket URL | `ws://localhost:7880` | No |
+| `LIVEKIT_API_KEY` | LiveKit API key (for webhooks and token generation) | - | No*** |
+| `LIVEKIT_API_SECRET` | LiveKit API secret (for webhooks and token generation) | - | No*** |
 | `HOST` | Server bind address | `0.0.0.0` | No |
 | `PORT` | Server port | `3001` | No |
 | `AUTH_REQUIRED` | Enable authentication | `false` | No |
@@ -303,6 +312,7 @@ docker run -p 3001:3001 --env-file .env sayna
 
 *Not required when using audio-disabled mode
 **Required when `AUTH_REQUIRED=true`
+***Required for LiveKit webhook validation and token generation features
 
 ## Performance Considerations
 

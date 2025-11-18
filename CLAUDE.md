@@ -215,6 +215,15 @@ When adding new features:
 
 **Breaking Change (2025-10-17)**: The WebSocket Ready message no longer includes `livekit_token`. Instead, it provides `livekit_room_name`, `sayna_participant_identity`, and `sayna_participant_name`. Clients must call the `/livekit/token` endpoint to obtain participant tokens.
 
+### Webhook API
+
+- `POST /livekit/webhook` - LiveKit webhook event receiver (unauthenticated, uses LiveKit signature verification)
+  - Receives webhook events from LiveKit (participant joins/leaves, room events, SIP calls, etc.)
+  - Validates requests using LiveKit's JWT signature in the `Authorization` header
+  - Logs SIP-related participant attributes for troubleshooting phone calls
+  - Returns `200 OK` on success, `401 Unauthorized` for invalid signatures, `503 Service Unavailable` if LiveKit credentials not configured
+  - See [docs/livekit_webhook.md](docs/livekit_webhook.md) for detailed implementation and design docs
+
 **Configuration Note**: The `sayna_participant_identity` and `sayna_participant_name` fields can be customized in the LiveKit config during WebSocket initialization. Defaults are "sayna-ai" and "Sayna AI" respectively.
 
 #### LiveKit Configuration Options
