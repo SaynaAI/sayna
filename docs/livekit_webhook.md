@@ -13,7 +13,8 @@ This design brief serves as training material for engineers who have never worke
 3. [Event Data Structures](#event-data-structures)
 4. [Configuration Requirements](#configuration-requirements)
 5. [Logging and Telemetry](#logging-and-telemetry)
-6. [Implementation Checklist](#implementation-checklist)
+6. [SIP Webhook Forwarding](#sip-webhook-forwarding)
+7. [Implementation Checklist](#implementation-checklist)
 
 ---
 
@@ -457,6 +458,259 @@ tracing::info!(
 
 ---
 
+## SIP Webhook Forwarding
+
+### Overview
+
+Sayna supports **automatic forwarding of LiveKit webhook events to downstream services** based on the SIP domain in the `sip.h.to` participant attribute. This enables per-domain automation and integration with external systems when SIP calls are received.
+
+**Use Case**: When a SIP participant joins a LiveKit room, Sayna can automatically notify a domain-specific webhook endpoint (e.g., `webhook.example.com`) based on the destination SIP domain from the call's `To` header.
+
+### How It Works
+
+1. **Receive webhook** from LiveKit at `POST /livekit/webhook`
+2. **Verify signature** and extract participant attributes
+3. **Parse SIP domain** from `sip.h.to` attribute (e.g., `sip:user@example.com` → `example.com`)
+4. **Look up hook configuration** for the extracted domain
+5. **Forward event** to the configured webhook URL asynchronously (non-blocking)
+6. **Return 200 OK** to LiveKit immediately (doesn't wait for downstream hook)
+
+### Configuration
+
+SIP webhook forwarding is configured via the `sip` section in `config.yaml`:
+
+```yaml
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.example.com/livekit-events"
+    - host: "test.org"
+      url: "https://webhook.test.org/sip-notifications"
+```
+
+**Configuration Notes:**
+
+- **`host`**: The SIP domain to match (case-insensitive, lowercase normalized)
+- **`url`**: HTTPS endpoint to forward webhook events to
+- Multiple hooks can be configured for different domains
+- Hooks are matched case-insensitively against parsed SIP domains
+
+### SIP Domain Parsing
+
+The `parse_sip_domain` helper function extracts the domain from various SIP header formats:
+
+**Supported Formats:**
+
+- Simple: `sip:user@example.com` → `example.com`
+- Angle brackets: `"User Name" <sip:user@example.com>` → `example.com`
+- URI parameters: `sip:user@example.com;user=phone;tag=xyz` → `example.com`
+- Secure SIP: `sips:user@secure.example.com` → `secure.example.com`
+- With port: `sip:user@example.com:5060` → `example.com:5060`
+
+**Normalization:**
+
+- Domains are converted to lowercase for case-insensitive matching
+- URI parameters (everything after `;`) are stripped before extraction
+- Leading/trailing whitespace is trimmed
+
+### HTTP Request Format
+
+When forwarding webhooks, Sayna sends an HTTP POST request with:
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Body:**
+- The **exact JSON payload** received from LiveKit (forwarded verbatim)
+- This allows downstream services to parse the canonical `WebhookEvent` structure
+
+**Timeout:**
+- 5 seconds per request
+- Failed requests are logged but don't block LiveKit response
+
+**Example Forwarded Request:**
+
+```bash
+POST https://webhook.example.com/livekit-events
+Content-Type: application/json
+
+{
+  "event": "participant_joined",
+  "id": "evt_abc123",
+  "createdAt": 1700000000,
+  "room": { ... },
+  "participant": {
+    "sid": "PA_sip123",
+    "identity": "sip-caller-456",
+    "attributes": {
+      "sip.h.to": "sip:customer@example.com",
+      "sip.trunkPhoneNumber": "+15551234567",
+      "sip.callID": "call-xyz789"
+    },
+    ...
+  }
+}
+```
+
+### Connection Pooling with ReqManager
+
+Sayna uses the existing **`ReqManager`** infrastructure (from `src/utils/req_manager.rs`) for webhook forwarding:
+
+**Benefits:**
+
+- **Per-domain connection pooling**: Reuses HTTP/2 connections for multiple webhooks to the same host
+- **Concurrency limits**: Prevents overwhelming downstream services (default: 3 concurrent requests per host)
+- **Automatic retries**: Built-in exponential backoff for transient failures
+- **Metrics tracking**: Request counts, success/failure rates, and latencies
+
+**ReqManager Lifecycle:**
+
+1. On first webhook to a domain, create a new `ReqManager` instance
+2. Cache it in `AppState.core_state.tts_req_managers` with key `sip-hook-{host}`
+3. Reuse for subsequent webhooks to the same host
+4. Manager persists for the lifetime of the server
+
+**Implementation Note:**
+
+The `get_or_create_hook_manager` function in `src/handlers/livekit_webhook.rs:307` handles lazy initialization and caching of `ReqManager` instances.
+
+### Logging
+
+**Successful Forwarding (info level):**
+
+```
+INFO Successfully forwarded webhook to SIP hook
+  event_id="evt_abc123"
+  domain="example.com"
+  hook_url="https://webhook.example.com/livekit-events"
+  status=200
+  duration_ms=42
+```
+
+**Failed Forwarding (warn level):**
+
+```
+WARN Webhook forwarding returned non-2xx status
+  event_id="evt_abc123"
+  domain="example.com"
+  hook_url="https://webhook.example.com/livekit-events"
+  status=500
+  duration_ms=5003
+  response_body="Internal Server Error: ..."
+```
+
+**Skipped Forwarding (debug level):**
+
+```
+DEBUG Webhook forwarding skipped or failed: No SIP configuration
+DEBUG Webhook forwarding skipped or failed: No participant in event
+DEBUG Webhook forwarding skipped or failed: No sip.h.to attribute
+DEBUG Webhook forwarding skipped or failed: No hook configured for domain: unknown.com
+```
+
+**ReqManager Creation (info level):**
+
+```
+INFO Created new ReqManager for SIP webhook forwarding
+  provider_key="sip-hook-webhook.example.com"
+  url="https://webhook.example.com/livekit-events"
+```
+
+### Error Handling
+
+Webhook forwarding is **non-blocking** and **best-effort**:
+
+1. **No SIP config**: Forwarding is skipped silently
+2. **No participant in event**: Forwarding is skipped (e.g., `room_finished` events)
+3. **No `sip.h.to` attribute**: Forwarding is skipped (non-SIP participants)
+4. **Malformed SIP domain**: Logged at debug level, forwarding skipped
+5. **No matching hook**: Logged at debug level with domain name
+6. **HTTP request failure**: Logged at warn level with error details
+7. **Non-2xx response**: Logged at warn level with status and body
+
+**Important**: All errors are logged but **do not affect the 200 OK response to LiveKit**. The main webhook handler always returns immediately to prevent LiveKit retries.
+
+### Background Task Execution
+
+Webhook forwarding runs in a **spawned Tokio task** (`tokio::spawn`) to avoid blocking the main handler:
+
+```rust
+tokio::spawn(async move {
+    if let Err(e) = forward_to_sip_hook(&state, &event, &body_json).await {
+        debug!("Webhook forwarding skipped or failed: {}", e);
+    }
+});
+```
+
+**Benefits:**
+
+- LiveKit receives 200 OK response in <10ms (signature verification time)
+- Downstream webhook forwarding happens asynchronously
+- Slow or failing downstream hooks don't delay LiveKit retries
+- Multiple hooks can be called concurrently if needed (future enhancement)
+
+### Testing Webhook Forwarding
+
+**Unit Tests** (in `tests/livekit_webhook_test.rs`):
+
+- ✅ `parse_sip_domain` helper with various header formats
+- ✅ Domain extraction from SIP URIs with parameters, angle brackets, ports
+- ✅ Case-insensitive domain matching
+- ✅ Malformed SIP URI handling
+
+**Manual Testing:**
+
+Since webhook forwarding is non-blocking and runs in the background, manual testing requires:
+
+1. **Configure SIP hooks** in `config.yaml`
+2. **Set up a webhook receiver** (e.g., https://webhook.site or a local HTTP server)
+3. **Send test webhook** using the `scripts/test_webhook.sh` script with SIP attributes
+4. **Check logs** for forwarding success/failure messages
+5. **Verify webhook receiver** received the exact LiveKit JSON payload
+
+**Example Test Setup:**
+
+```yaml
+# config.yaml
+sip:
+  room_prefix: "sip-"
+  allowed_addresses: []
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.site/your-unique-url"
+```
+
+```bash
+# Send test webhook with sip.h.to attribute
+cargo run --example sign_webhook
+# Copy the curl command and run it
+```
+
+**E2E Testing (Future):**
+
+Integration tests with `wiremock` or `mockito` to mock HTTP servers and verify:
+
+- Correct payload forwarding
+- Proper header inclusion
+- Timeout handling
+- Retry behavior
+
+### Security Considerations
+
+1. **No authentication**: Forwarded webhooks do NOT include LiveKit's JWT signature
+   - Downstream services should verify requests using IP allowlisting or shared secrets
+2. **HTTPS recommended**: Use HTTPS for webhook URLs to prevent eavesdropping
+3. **Timeout protection**: 5-second timeout prevents hanging on slow downstream services
+4. **Rate limiting**: ReqManager limits concurrent requests per host (default: 3)
+5. **Sensitive data**: Be cautious when logging SIP attributes (phone numbers may be PII)
+
+---
+
 ## Implementation Checklist
 
 ### Phase 1: Basic Webhook Endpoint ✅
@@ -499,6 +753,16 @@ tracing::info!(
 - [x] Add example webhook payload to `docs/` or inline comments
 - [x] Document required environment variables (`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`)
 - [x] Add developer testing tools documentation
+
+### Phase 6: SIP Webhook Forwarding ✅
+- [x] Implement `parse_sip_domain` helper function to extract domain from SIP headers
+- [x] Add `forward_to_sip_hook` function to route webhooks based on SIP domain
+- [x] Integrate ReqManager for per-domain connection pooling
+- [x] Add `get_or_create_hook_manager` for lazy ReqManager initialization
+- [x] Update `log_webhook_event` to include parsed SIP domain
+- [x] Spawn background task for non-blocking webhook forwarding
+- [x] Add comprehensive unit tests for `parse_sip_domain` (10+ test cases)
+- [x] Update documentation in `docs/livekit_webhook.md` with SIP forwarding section
 
 ---
 
