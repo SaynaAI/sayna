@@ -547,7 +547,9 @@ mod unit_tests {
     use super::*;
     use livekit_api::webhooks::WebhookError;
     use livekit_protocol::ParticipantInfo;
-    use sayna::handlers::livekit_webhook::{extract_sip_attributes, webhook_error_to_status, SipForwardingError};
+    use sayna::handlers::livekit_webhook::{
+        SipForwardingError, extract_sip_attributes, webhook_error_to_status,
+    };
 
     #[test]
     fn test_extract_sip_attributes_with_sip_keys() {

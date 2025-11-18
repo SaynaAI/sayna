@@ -317,7 +317,9 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
     let uri = uri.split(';').next().unwrap_or(uri);
 
     // Extract domain from sip:user@domain format
-    if let Some(sip_part) = uri.strip_prefix("sip:").or_else(|| uri.strip_prefix("sips:"))
+    if let Some(sip_part) = uri
+        .strip_prefix("sip:")
+        .or_else(|| uri.strip_prefix("sips:"))
         && let Some(at_pos) = sip_part.find('@')
     {
         let domain = &sip_part[at_pos + 1..];
@@ -355,11 +357,13 @@ async fn forward_to_sip_hook(
     body_json: &str,
 ) -> Result<(), SipForwardingError> {
     // Step 1: Extract participant from event
-    let participant = event.participant.as_ref().ok_or_else(|| {
-        SipForwardingError::NoParticipant {
-            event_type: event.event.clone(),
-        }
-    })?;
+    let participant =
+        event
+            .participant
+            .as_ref()
+            .ok_or_else(|| SipForwardingError::NoParticipant {
+                event_type: event.event.clone(),
+            })?;
 
     // Step 2: Extract sip.h.to attribute
     let sip_to_header = participant
@@ -368,11 +372,10 @@ async fn forward_to_sip_hook(
         .ok_or(SipForwardingError::MissingSipHeader)?;
 
     // Step 3: Parse domain from SIP header
-    let domain = parse_sip_domain(sip_to_header).ok_or_else(|| {
-        SipForwardingError::MalformedSipHeader {
+    let domain =
+        parse_sip_domain(sip_to_header).ok_or_else(|| SipForwardingError::MalformedSipHeader {
             header: sip_to_header.clone(),
-        }
-    })?;
+        })?;
 
     // Step 4: Look up hook configuration (case-insensitive)
     let hook = sip_config
@@ -384,18 +387,18 @@ async fn forward_to_sip_hook(
         })?;
 
     // Step 5: Get or create ReqManager for this hook host
-    let req_manager =
-        get_or_create_hook_manager(state, &hook.url)
-            .await
-            .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
+    let req_manager = get_or_create_hook_manager(state, &hook.url)
+        .await
+        .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
 
     // Step 6: Forward the webhook payload
     let start = Instant::now();
-    let guard = req_manager.acquire().await.map_err(|e| {
-        SipForwardingError::HttpClientError {
+    let guard = req_manager
+        .acquire()
+        .await
+        .map_err(|e| SipForwardingError::HttpClientError {
             error: e.to_string(),
-        }
-    })?;
+        })?;
 
     let response = guard
         .client()

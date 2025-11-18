@@ -251,7 +251,7 @@ mod tests {
             port: 3001,
             livekit_url: "ws://localhost:7880".to_string(),
             livekit_public_url: "http://localhost:7880".to_string(),
-            livekit_api_key: None, // Missing API key
+            livekit_api_key: None,    // Missing API key
             livekit_api_secret: None, // Missing API secret
             deepgram_api_key: None,
             elevenlabs_api_key: None,
