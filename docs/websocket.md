@@ -1,38 +1,117 @@
-# Realtime WebSocket Sessions
+# WebSocket API Reference
 
-Sayna's `/ws` endpoint is the heart of the platform. Every low-latency STT/TTS experience, every LiveKit bridge, and every conversational agent loop begins with a WebSocket session. This document explains the session theory of operation, message grammar, LiveKit integration modes, and the internal plumbing (VoiceManager, LiveKitClient, queues, caches) that keep the audio graph stable under heavy load.
+The Sayna WebSocket API is the foundation of all real-time voice processing features in the platform. Whether you're building a voice assistant, transcription service, or interactive voice application, the WebSocket endpoint at `/ws` provides low-latency, bidirectional communication for streaming audio, receiving transcriptions, and controlling text-to-speech synthesis.
 
----
-
-## Transport & Authentication Model
-- **Endpoint:** `GET /ws`. The Axum router upgrades the connection and wraps it with `TraceLayer` so every connection is traced like an HTTP request.
-- **Authentication:** WebSockets are intentionally unauthenticated. Gate access at the network or proxy layer or embed your own token in the first `config` message. REST endpoints (`/voices`, `/speak`, `/livekit/token`) remain protected when `AUTH_REQUIRED=true`.
-- **Liveness:** Axum handles ping/pong. The server checks for stalled receivers every 10s to close abandoned sockets.
-- **Backpressure:** A dedicated Tokio channel (`CHANNEL_BUFFER_SIZE = 1024`) buffers outgoing frames so bursts of STT results or TTS audio do not fight each other.
+This guide walks you through everything you need to integrate Sayna's WebSocket API into your application, from establishing connections to handling complex multi-party voice scenarios with LiveKit.
 
 ---
 
-## Session Lifecycle (High Level)
-1. **Connect:** Client opens a WebSocket to `/ws`.
-2. **Configure:** First message must be a JSON `config` block describing STT, TTS, optional LiveKit settings, and whether audio features are enabled. Missing configs yield an `error` frame but the socket stays open so the client can retry.
-3. **Initialization:** `VoiceManager` boots the requested providers, wires STT/TTS callbacks, primes the audio cache, and (when requested) spins up a LiveKit client plus operation worker.
-4. **Ready:** Once providers are live (and LiveKit is joined), the server emits `{"type":"ready", ...}` describing the LiveKit room/URL plus the Sayna agent identity.
-5. **Streaming:** Clients stream binary audio frames for STT, fire `speak` commands for TTS, send `clear`/`send_message` controls, and listen for transcripts, TTS chunks, LiveKit messages, and telemetry.
-6. **Cleanup:** When the socket closes, the handler stops the VoiceManager, disconnects LiveKit, stops any recording egress, and deletes the LiveKit room to avoid orphaned meetings.
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Connection & Authentication](#connection--authentication)
+3. [Session Lifecycle](#session-lifecycle)
+4. [Message Protocol](#message-protocol)
+5. [Configuration](#configuration)
+6. [Use Case Patterns](#use-case-patterns)
+7. [Audio Processing](#audio-processing)
+8. [LiveKit Integration](#livekit-integration)
+9. [Error Handling](#error-handling)
+10. [Best Practices](#best-practices)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Connection State Internals
+## Overview
 
-Each connection owns a `ConnectionState` guarded by an `Arc<RwLock<_>>`. Important fields:
-- `voice_manager: Arc<VoiceManager>` – handles STT/TTS providers, callbacks, caches, and interruption state.
-- `audio_enabled: AtomicBool` – avoids locking on the hot path; `audio=false` sessions can still leverage LiveKit data channels.
-- `livekit_client: Arc<RwLock<LiveKitClient>>` plus `OperationQueue` – serializes LiveKit audio/data operations so WebSocket handling never blocks on RTC calls.
-- `livekit_room_name` & `recording_egress_id` – tracked for cleanup when the socket exits.
+### What is the WebSocket API?
+
+Sayna's WebSocket API provides real-time voice processing capabilities through a persistent bidirectional connection. Unlike traditional REST APIs that require a new request for each operation, WebSockets maintain an open channel allowing continuous streaming of audio data and instant delivery of transcription results.
+
+**Key Capabilities:**
+- **Speech-to-Text (STT)**: Stream audio and receive real-time transcriptions with confidence scores
+- **Text-to-Speech (TTS)**: Convert text to natural-sounding audio with voice customization
+- **LiveKit Integration**: Connect voice processing to WebRTC rooms for multi-party voice applications
+- **Low Latency**: Optimized for real-time voice interactions with minimal delay
+- **Flexible Modes**: Operate with or without LiveKit, with or without audio processing
+
+### When to Use WebSocket vs REST
+
+**Use WebSocket When:**
+- You need continuous audio streaming
+- Real-time transcription is required
+- Building conversational AI or voice assistants
+- Integrating with LiveKit for multi-party voice
+- Latency is critical (sub-second response times)
+
+**Use REST When:**
+- Processing single audio files
+- Batch TTS synthesis
+- Simple voice list queries
+- Obtaining LiveKit tokens
 
 ---
 
-## Configuration Message
+## Connection & Authentication
+
+### Establishing a Connection
+
+Connect to the WebSocket endpoint using standard WebSocket protocols:
+
+```
+ws://your-server:3001/ws
+```
+
+Or for secure connections:
+
+```
+wss://your-server:3001/ws
+```
+
+**Connection Flow:**
+1. Client initiates WebSocket handshake
+2. Server accepts and upgrades HTTP connection
+3. Server waits for configuration message
+4. Upon valid configuration, server initializes voice providers
+5. Server sends `ready` message when initialization completes
+6. Bidirectional communication begins
+
+### Authentication Model
+
+By design, WebSocket endpoints are **unauthenticated** to simplify integration and reduce complexity. Audio data is ephemeral and not persisted by the server.
+
+**Security Options:**
+- **Network-Level Protection**: Deploy behind reverse proxy (nginx, Envoy) with authentication
+- **Application Tokens**: Implement custom token validation in configuration messages
+- **VPN/Private Network**: Restrict WebSocket access to trusted networks
+
+**Note:** REST endpoints (`/voices`, `/speak`, `/livekit/token`) support authentication when `AUTH_REQUIRED=true` in server configuration. See authentication documentation for details.
+
+### Connection Stability
+
+The server actively monitors connection health:
+- **Ping/Pong**: Automatic WebSocket keep-alive handled by the framework
+- **Timeout Detection**: Stale connections detected and closed after 10 seconds of inactivity
+- **Graceful Shutdown**: Server sends close frames and cleans up resources on disconnect
+
+---
+
+## Session Lifecycle
+
+Every WebSocket session follows a predictable lifecycle. Understanding this flow is essential for building robust integrations.
+
+### 1. Connection Phase
+
+Client establishes WebSocket connection to `/ws` endpoint.
+
+```
+[Client] ---> WebSocket Handshake ---> [Server]
+[Server] ---> 101 Switching Protocols ---> [Client]
+```
+
+### 2. Configuration Phase
+
+**First message MUST be a configuration message.** This tells Sayna what voice providers to initialize and how to configure them.
 
 ```json
 {
@@ -53,173 +132,2076 @@ Each connection owns a `ConnectionState` guarded by an `Arc<RwLock<_>>`. Importa
     "voice_id": "aura-asteria-en",
     "speaking_rate": 1.0,
     "audio_format": "linear16",
-    "sample_rate": 24000,
-    "connection_timeout": 30,
-    "request_timeout": 60,
-    "pronunciations": []
-  },
-  "livekit": {
-    "room_name": "demo-room",
-    "enable_recording": true,
-    "recording_file_key": "sessions/demo-room",
-    "sayna_participant_identity": "sayna-ai",
-    "sayna_participant_name": "Sayna AI",
-    "listen_participants": ["host", "moderator"]
+    "sample_rate": 24000
   }
 }
 ```
 
+**What Happens During Configuration:**
+1. Server validates configuration structure
+2. Injects API keys from server environment (clients never send keys)
+3. Initializes STT provider connection
+4. Initializes TTS provider connection
+5. Sets up audio caching system
+6. If LiveKit configured, creates/joins room and generates tokens
+7. Registers callbacks for transcription and synthesis events
+8. Waits for all providers to reach ready state (30-second timeout)
+
+**Configuration Failures:**
+If configuration is invalid or providers fail to initialize, server sends an error message but **keeps the connection open**, allowing you to retry with corrected configuration.
+
+```json
+{
+  "type": "error",
+  "message": "STT and TTS configurations required when audio is enabled"
+}
+```
+
+### 3. Ready Phase
+
+When all systems are initialized, server sends a `ready` message signaling that you can begin streaming audio and issuing commands.
+
+```json
+{
+  "type": "ready",
+  "livekit_room_name": "conversation-room-123",
+  "livekit_url": "wss://livekit.example.com",
+  "sayna_participant_identity": "sayna-ai",
+  "sayna_participant_name": "Sayna AI"
+}
+```
+
+**LiveKit Token Generation:**
+If using LiveKit, clients (other than Sayna) must call `POST /livekit/token` to obtain their own participant tokens:
+
+```json
+POST /livekit/token
+{
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-123",
+  "participant_name": "John Doe"
+}
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-123",
+  "livekit_url": "wss://livekit.example.com"
+}
+```
+
+### 4. Active Phase
+
+This is where your application logic runs. You can:
+- Stream binary audio frames for transcription
+- Send `speak` commands for text-to-speech
+- Send `clear` commands to interrupt TTS playback
+- Send `send_message` commands for LiveKit data channels
+- Receive STT transcription results
+- Receive TTS audio chunks
+- Receive LiveKit participant messages
+- Receive LiveKit participant events
+
+**Example Active Session:**
+```
+[Client] ---> Binary Audio (16-bit PCM) ---> [Server]
+[Server] ---> { "type": "stt_result", "transcript": "hello", ... } ---> [Client]
+[Client] ---> { "type": "speak", "text": "Hello! How are you?" } ---> [Server]
+[Server] ---> Binary Audio (TTS synthesized) ---> [Client]
+[Server] ---> { "type": "tts_playback_complete", ... } ---> [Client]
+```
+
+### 5. Cleanup Phase
+
+When the WebSocket connection closes (client disconnect, network failure, or server shutdown), Sayna automatically:
+1. Stops all STT/TTS provider connections
+2. Disconnects from LiveKit room (if connected)
+3. Stops any active recordings
+4. Deletes the LiveKit room (to prevent orphaned rooms)
+5. Clears all cached data for the session
+6. Releases all resources
+
+**Graceful Disconnect:**
+Clients should close the WebSocket connection cleanly when done:
+
+```javascript
+// JavaScript example
+websocket.close(1000, "Session complete");
+```
+
+**Server-Initiated Close:**
+Server may close the connection if:
+- LiveKit participant disconnect event occurs (100ms grace period for UI updates)
+- Fatal errors during provider initialization
+- Connection timeout (no activity for 10 seconds)
+
+---
+
+## Message Protocol
+
+All messages are JSON (text) or binary (audio data). The server automatically distinguishes between message types.
+
+### Incoming Messages (Client → Server)
+
+These are messages your application sends to Sayna.
+
+#### 1. Config Message
+
+**Purpose:** Initialize voice providers and optionally configure LiveKit integration.
+
+**Required:** Yes, must be the first message sent.
+
+**Structure:**
+```json
+{
+  "type": "config",
+  "audio": true,
+  "stt_config": { ... },
+  "tts_config": { ... },
+  "livekit": { ... }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `"config"` |
+| `audio` | boolean | No | `true` | Enable audio processing (STT/TTS). Set to `false` for LiveKit control-only mode. |
+| `stt_config` | object | Conditional | - | Required when `audio=true`. Speech-to-text configuration. |
+| `tts_config` | object | Conditional | - | Required when `audio=true`. Text-to-speech configuration. |
+| `livekit` | object | No | - | Optional LiveKit room configuration. |
+
+See [Configuration](#configuration) section for detailed field specifications.
+
+---
+
+#### 2. Speak Message
+
+**Purpose:** Generate speech from text using configured TTS provider.
+
+**Structure:**
+```json
+{
+  "type": "speak",
+  "text": "Hello! How can I help you today?",
+  "flush": true,
+  "allow_interruption": true
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `"speak"` |
+| `text` | string | Yes | - | Text to synthesize into speech |
+| `flush` | boolean | No | `true` | If `true`, clears TTS queue before speaking. If `false`, appends to queue. |
+| `allow_interruption` | boolean | No | `true` | If `true`, playback can be interrupted by `clear` commands or new audio. If `false`, playback completes regardless of interruption attempts. |
+
+**Behavior:**
+- Server validates that audio is enabled
+- Text is sent to TTS provider for synthesis
+- Synthesized audio is streamed back as binary messages
+- If `flush=true`, any pending TTS audio is cleared first
+- If `allow_interruption=false`, creates a non-interruptible playback window
+- When complete, server sends `tts_playback_complete` message
+- If LiveKit is configured, audio is also published to the LiveKit room
+
+**Example Use Cases:**
+```json
+// Queue multiple phrases
+{"type": "speak", "text": "First sentence.", "flush": false}
+{"type": "speak", "text": "Second sentence.", "flush": false}
+
+// Interrupt current speech with urgent message
+{"type": "speak", "text": "URGENT: System alert!", "flush": true}
+
+// Play important message that cannot be interrupted
+{"type": "speak", "text": "Please listen carefully...", "allow_interruption": false}
+```
+
+---
+
+#### 3. Binary Audio Message
+
+**Purpose:** Stream audio data for speech-to-text transcription.
+
+**Structure:** Raw binary WebSocket message (not JSON)
+
+**Requirements:**
+- Audio format must match `stt_config` parameters:
+  - `sample_rate`: Audio sample rate in Hz (e.g., 16000)
+  - `channels`: Number of channels (1 for mono, 2 for stereo)
+  - `encoding`: Audio encoding format (e.g., "linear16" for 16-bit PCM)
+- Audio is streamed continuously, not in complete files
+- Server processes audio in real-time as it arrives
+
+**Behavior:**
+- Server receives binary frames (zero-copy optimization)
+- Audio passed to STT provider for transcription
+- Transcription results sent back as `stt_result` messages
+- Optional noise filtering applied (if enabled)
+- Optional turn detection determines when speaker has finished
+
+**Best Practices:**
+- Send audio in small chunks (e.g., 100-200ms worth of audio per message)
+- Maintain consistent chunk sizes for optimal latency
+- Ensure audio format exactly matches configuration (no automatic resampling)
+- For 16kHz mono linear16: send ~3200 bytes per 100ms (16000 samples/sec × 2 bytes/sample × 0.1 sec)
+
+---
+
+#### 4. Clear Message
+
+**Purpose:** Stop current TTS playback and clear queued audio.
+
+**Structure:**
+```json
+{
+  "type": "clear"
+}
+```
+
+**Behavior:**
+- Clears TTS provider's audio queue
+- Clears LiveKit audio buffer (if connected)
+- Resets interruption guard to allow new TTS
+- **Ignored** if current playback has `allow_interruption=false`
+- Does NOT clear STT processing (only affects TTS)
+
+**Use Cases:**
+```javascript
+// User interrupts AI while it's speaking
+// Your app detects user started speaking, sends clear to stop AI
+{"type": "clear"}
+
+// User clicks "Stop" button in UI
+{"type": "clear"}
+```
+
+---
+
+#### 5. Send Message
+
+**Purpose:** Send custom messages through LiveKit data channel to other participants.
+
+**Structure:**
+```json
+{
+  "type": "send_message",
+  "message": "Hello from the AI!",
+  "role": "assistant",
+  "topic": "chat",
+  "debug": {
+    "source": "sayna-ai",
+    "version": "1.0"
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Must be `"send_message"` |
+| `message` | string | Yes | Message content to send |
+| `role` | string | Yes | Sender role (e.g., "assistant", "user", "system") |
+| `topic` | string | No | Message topic/channel for routing (default: empty) |
+| `debug` | object | No | Optional debug metadata (any valid JSON) |
+
+**Requirements:**
+- LiveKit must be configured in initial config
+- Message sent asynchronously via operation queue
+- Returns error if LiveKit not available
+
+**Behavior:**
+- Message queued for LiveKit data channel delivery
+- Sent to all participants in the room (or filtered by `listen_participants`)
+- Other participants receive message via their LiveKit data channel subscription
+- Does NOT echo back to sender via WebSocket
+
+**Use Cases:**
+```json
+// Send chat message
+{"type": "send_message", "message": "How can I help?", "role": "assistant", "topic": "chat"}
+
+// Send state update
+{"type": "send_message", "message": "typing", "role": "assistant", "topic": "status"}
+
+// Send structured data
+{"type": "send_message", "message": "{\"action\":\"navigate\",\"url\":\"/home\"}", "role": "system", "topic": "commands"}
+```
+
+---
+
+### Outgoing Messages (Server → Client)
+
+These are messages Sayna sends to your application.
+
+#### 1. Ready Message
+
+**Purpose:** Notify client that all voice providers are initialized and session is ready for audio streaming.
+
+**Structure:**
+```json
+{
+  "type": "ready",
+  "livekit_room_name": "conversation-room-123",
+  "livekit_url": "wss://livekit.example.com",
+  "sayna_participant_identity": "sayna-ai",
+  "sayna_participant_name": "Sayna AI"
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"ready"` |
+| `livekit_room_name` | string | LiveKit room name (only if LiveKit configured) |
+| `livekit_url` | string | LiveKit server WebSocket URL (only if LiveKit configured) |
+| `sayna_participant_identity` | string | Sayna AI's participant identity in LiveKit room |
+| `sayna_participant_name` | string | Sayna AI's display name in LiveKit room |
+
+**When Received:**
+- After successful configuration
+- All STT/TTS providers are connected and ready
+- LiveKit room created and joined (if configured)
+- Safe to begin sending audio frames and speak commands
+
+**Next Steps:**
+- If using LiveKit, other participants should call `POST /livekit/token` to get their tokens
+- Begin streaming audio for transcription
+- Send speak commands for TTS synthesis
+
+---
+
+#### 2. STT Result Message
+
+**Purpose:** Deliver speech-to-text transcription results.
+
+**Structure:**
+```json
+{
+  "type": "stt_result",
+  "transcript": "Hello, how are you today?",
+  "is_final": true,
+  "is_speech_final": true,
+  "confidence": 0.94
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"stt_result"` |
+| `transcript` | string | Transcribed text |
+| `is_final` | boolean | `true` if this is the final version of the transcript (no more updates for this phrase) |
+| `is_speech_final` | boolean | `true` if the speaker has stopped speaking (turn detection) |
+| `confidence` | number | Confidence score from 0.0 to 1.0 (higher is more confident) |
+
+**Understanding Transcript Finality:**
+
+**Interim Results** (`is_final=false`):
+```json
+{"transcript": "hel", "is_final": false, "is_speech_final": false, "confidence": 0.7}
+{"transcript": "hello", "is_final": false, "is_speech_final": false, "confidence": 0.82}
+{"transcript": "hello how", "is_final": false, "is_speech_final": false, "confidence": 0.85}
+```
+
+**Final Result** (`is_final=true`):
+```json
+{"transcript": "Hello, how are you?", "is_final": true, "is_speech_final": false, "confidence": 0.94}
+```
+
+**Speech Final** (`is_speech_final=true`):
+```json
+{"transcript": "Hello, how are you?", "is_final": true, "is_speech_final": true, "confidence": 0.94}
+```
+
+The `is_speech_final` flag indicates the speaker has finished their thought (detected via silence or turn-detection model). This is useful for knowing when to respond in conversational AI.
+
+**Frequency:**
+- Interim results arrive frequently during speech (every 100-500ms depending on provider)
+- Final results arrive when provider finalizes transcription
+- Speech final results arrive when turn detection determines speech has ended
+
+**Use Cases:**
+```javascript
+// Show live transcription in UI (interim results)
+if (!result.is_final) {
+  updateLiveTranscript(result.transcript);
+}
+
+// Save final transcription
+if (result.is_final) {
+  saveFinalTranscript(result.transcript);
+}
+
+// Trigger AI response when user finishes speaking
+if (result.is_speech_final) {
+  generateAIResponse(result.transcript);
+}
+```
+
+---
+
+#### 3. TTS Playback Complete Message
+
+**Purpose:** Notify when text-to-speech synthesis and playback has finished.
+
+**Structure:**
+```json
+{
+  "type": "tts_playback_complete",
+  "timestamp": 1700000000000
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"tts_playback_complete"` |
+| `timestamp` | number | Unix timestamp in milliseconds when playback completed |
+
+**When Received:**
+- After all audio chunks for a `speak` command have been sent
+- After LiveKit audio publication completes (if configured)
+- Useful for latency measurement and state management
+
+**Use Cases:**
+```javascript
+// Measure TTS latency
+const speakTime = Date.now();
+// ... receive tts_playback_complete ...
+const latency = ttsComplete.timestamp - speakTime;
+
+// Re-enable microphone after AI finishes speaking
+if (message.type === "tts_playback_complete") {
+  enableMicrophone();
+}
+
+// Show "AI is listening" indicator
+if (message.type === "tts_playback_complete") {
+  showListeningIndicator();
+}
+```
+
+---
+
+#### 4. Message (Unified Message)
+
+**Purpose:** Deliver messages received from LiveKit participants via data channel.
+
+**Structure:**
+```json
+{
+  "type": "message",
+  "message": {
+    "message": "Hello from participant!",
+    "data": null,
+    "identity": "user-123",
+    "topic": "chat",
+    "room": "conversation-room-123",
+    "timestamp": 1700000000000
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"message"` |
+| `message` | object | Unified message envelope (see below) |
+
+**Unified Message Envelope:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `message` | string | Text message content (present if text message) |
+| `data` | string | Base64-encoded binary data (present if binary message) |
+| `identity` | string | Sender participant identity |
+| `topic` | string | Message topic/channel |
+| `room` | string | Room name where message originated |
+| `timestamp` | number | Unix timestamp in milliseconds when received |
+
+**Message Types:**
+- **Text Messages**: `message` field populated, `data` is `null`
+- **Binary Messages**: `data` field populated (base64), `message` is `null`
+
+**Filtering:**
+- If `listen_participants` configured in LiveKit config, only messages from specified participants are forwarded
+- Server-generated messages (identity = server) always forwarded
+- Empty `listen_participants` array means all messages forwarded
+
+**Use Cases:**
+```javascript
+// Handle text chat
+if (msg.message.message) {
+  displayChatMessage(msg.message.identity, msg.message.message);
+}
+
+// Handle binary data
+if (msg.message.data) {
+  const binary = base64Decode(msg.message.data);
+  processBinaryData(binary);
+}
+
+// Route by topic
+if (msg.message.topic === "chat") {
+  handleChatMessage(msg.message);
+} else if (msg.message.topic === "commands") {
+  handleCommand(msg.message);
+}
+```
+
+---
+
+#### 5. Participant Disconnected Message
+
+**Purpose:** Notify when a LiveKit participant leaves the room.
+
+**Structure:**
+```json
+{
+  "type": "participant_disconnected",
+  "participant": {
+    "identity": "user-123",
+    "name": "John Doe"
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"participant_disconnected"` |
+| `participant.identity` | string | Participant's unique identity |
+| `participant.name` | string | Participant's display name |
+
+**Important Behavior:**
+- Server waits 100ms after sending this message
+- Server then automatically **closes the WebSocket connection**
+- This ensures LiveKit session cleanup when participants leave
+- Re-establish connection if you need to continue
+
+**Use Cases:**
+```javascript
+// Update UI when participant leaves
+if (message.type === "participant_disconnected") {
+  removeParticipantFromUI(message.participant.identity);
+
+  // Prepare for connection close
+  showReconnectPrompt();
+}
+```
+
+---
+
+#### 6. Error Message
+
+**Purpose:** Communicate errors without terminating the connection.
+
+**Structure:**
+```json
+{
+  "type": "error",
+  "message": "STT and TTS configurations required when audio is enabled"
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"error"` |
+| `message` | string | Human-readable error description |
+
+**Common Errors:**
+- Configuration validation failures
+- Provider initialization errors
+- Missing audio configuration when `audio=true`
+- LiveKit not configured for commands requiring it
+- Audio processing failures
+- Provider API errors
+
+**Connection Behavior:**
+- Most errors do NOT close the connection
+- Server keeps WebSocket open allowing retry with corrected data
+- Fatal errors (rare) followed by connection close
+
+**Use Cases:**
+```javascript
+// Handle errors gracefully
+if (message.type === "error") {
+  console.error("Sayna error:", message.message);
+
+  // Retry configuration if it failed
+  if (message.message.includes("configuration")) {
+    retryConfigurationWithFix();
+  }
+
+  // Show error to user
+  displayErrorNotification(message.message);
+}
+```
+
+---
+
+#### 7. Binary Audio Message
+
+**Purpose:** Deliver synthesized TTS audio.
+
+**Structure:** Raw binary WebSocket message (not JSON)
+
+**Content:** Audio data in format specified by `tts_config`:
+- Format: As specified in `audio_format` (e.g., "linear16" for 16-bit PCM)
+- Sample rate: As specified in `sample_rate` (e.g., 24000 Hz)
+- Channels: Typically mono (1 channel)
+
+**Receiving Audio:**
+- Multiple binary messages may be sent for a single `speak` command
+- Audio streamed as it's generated (low latency)
+- Final `tts_playback_complete` message sent after last chunk
+- Audio can be played directly or buffered for smoothness
+
+**Use Cases:**
+```javascript
+websocket.onmessage = (event) => {
+  if (event.data instanceof Blob) {
+    // Binary audio message
+    playAudioChunk(event.data);
+  } else {
+    // JSON control message
+    const message = JSON.parse(event.data);
+    handleControlMessage(message);
+  }
+};
+```
+
+---
+
+## Configuration
+
+The configuration message is the most important message in the protocol. It determines what capabilities are available for the session.
+
 ### Audio Flag
-- Defaults to `true`. When `false`, the WebSocket behaves as a control/data bridge (LiveKit messages, LiveKit recording automation) without spinning up STT/TTS providers.
-- Attempting to send binary audio or `speak` commands before enabling audio yields an `error` frame but does not sever the connection.
 
-### STT Block (`stt_config`)
-- Contains the provider metadata minus API keys. The server injects secrets from `ServerConfig`.
-- `sample_rate`, `channels`, and `encoding` must match the binary frames you will stream. The hot path does no conversion, so mismatches manifest as garbage transcripts.
-- `model` drives provider-specific behaviour. Whatever you request is passed directly to the provider factory.
-
-### TTS Block (`tts_config`)
-- Same keyless contract: just provider/model/voice parameters.
-- VoiceManager hashes the config (via `compute_tts_config_hash`) and seeds the shared cache so repeated prompts can be replayed instantly.
-- `speaking_rate`, `audio_format`, and `sample_rate` control provider output. The binary frames pushed to the WebSocket (and optionally to LiveKit) mirror the provider’s native format—no transcoding layer hides errors.
-- `pronunciations` can be used to patch provider lexicons before synthesis.
-
-### LiveKit Block (`livekit`)
-- Optional. When supplied, the handler creates the room through `LiveKitRoomHandler`, generates a Sayna agent token (`sayna_participant_*` overrides the defaults), and optionally starts a recording egress if `enable_recording=true`.
-- `listen_participants`: filter list of participant identities. Leave empty to consume every track/data channel.
-- Sessions using LiveKit should instruct human participants to call `POST /livekit/token` with the `room_name` to obtain their own tokens.
-
----
-
-## Incoming Messages
-
-| Type | Payload | Purpose |
-| --- | --- | --- |
-| `config` | See above | Bootstraps providers and (optionally) LiveKit. Must arrive first. |
-| `speak` | `{ "text": "...", "flush": true, "allow_interruption": false }` | Queues or flushes TTS work. `flush` defaults to `true`. `allow_interruption=false` pins the interruption guard so `clear` or STT events cannot cancel playback until chunks finish streaming. |
-| Binary | raw PCM/Opus/etc. | Direct audio frames sent as `Bytes`. The handler forwards them to `VoiceManager::receive_audio` with zero-copy semantics. |
-| `clear` | `{ "type": "clear" }` | Clears queued TTS plus LiveKit audio buffers (unless playback is currently marked non-interruptible). |
-| `send_message` | `{ "message": "...", "role": "user", "topic": "chat", "debug": {...} }` | Publishes a LiveKit data-channel message. Requires a LiveKit session because it is executed through `LiveKitOperation::SendMessage`. |
-
----
-
-## Outgoing Messages
-
-| Type | Fields | Notes |
-| --- | --- | --- |
-| `ready` | `livekit_room_name`, `livekit_url`, `sayna_participant_identity`, `sayna_participant_name` | Emitted once STT, TTS, cache, and LiveKit (if requested) are ready. Use `livekit_url` to dial the corresponding room via REST token. |
-| `stt_result` | `transcript`, `is_final`, `is_speech_final`, `confidence` | Produced from the VoiceManager STT callback. `is_speech_final` benefits from the optional ONNX turn detector so you can know when Sayna believes a speaker is done. |
-| `message` | `message: UnifiedMessage` | Unified envelope for LiveKit data received by the agent. Contains optional `message` (UTF‑8 text) or base64 `data`, plus `identity`, `topic`, `room`, `timestamp`. |
-| `participant_disconnected` | `participant` block | Fired when LiveKit signals a participant disconnect. The handler gives clients 100 ms to flush UI updates before it schedules a WebSocket close. |
-| `tts_playback_complete` | `timestamp` | Fired after the TTS dispatcher emits the final chunk for a `speak` command. Compare with the time you sent the prompt to measure latency. |
-| `error` | `message` | Non-fatal errors (missing config, LiveKit queue failures, provider initialization issues). Fatal errors are followed by a socket close. |
-| Binary | audio bytes | Direct TTS frames. When LiveKit is enabled, the same bytes are piped into the RTC track via the operation queue so browser participants hear the AI voice exactly as the WebSocket client receives it. |
-
----
-
-## Audio Flow Without LiveKit
-
-1. **Binary frames** -> `handle_audio_message` -> `VoiceManager::receive_audio`.
-2. `VoiceManager` feeds STT, which calls back into the handler with transcripts.
-3. `speak` (flush true) -> `VoiceManager::speak_with_interruption` -> provider -> TTS callback -> `MessageRoute::Binary`.
-4. Optional caching replays identical prompts immediately (the early callback fires as soon as cached bytes are available).
-5. `clear` uses the `audio_clear_callback` to purge pending audio, after which `VoiceManager` resets the interruption guard so new prompts can start.
-
-Because there is no LiveKit leg, the WebSocket is both the ingest and egress transport for all media.
-
----
-
-## LiveKit-Enabled Sessions
-
-When `livekit` is supplied in the config:
-
-### Room Creation & Tokens
-- `LiveKitRoomHandler` ensures the room exists, generates an agent token, and (if `enable_recording`) starts an S3 egress using `recording_file_key`.
-- The handler also records `livekit_room_name` so it can delete the room and stop recording once the socket drops.
-- Clients joining the same room request their own token via `POST /livekit/token`. The response echoes the room name, participant identity, and `livekit_public_url` so browsers know which URL to dial.
-
-### Audio Routing
-- Incoming LiveKit audio is converted to raw bytes and passed through the same STT pipeline as WebSocket audio, which means DeepFilterNet, turn detection, and confidence scoring apply uniformly.
-- TTS output is duplicated: first streamed to the WebSocket, then sent through `LiveKitOperation::SendAudio`. The queue gives audio operations the highest priority so RTC playback never starves.
-- `listen_participants` filters whose tracks/data are forwarded (handy in multiparty rooms).
-
-### Data Channel & Control Plane
-- `send_message` commands are executed by queuing `LiveKitOperation::SendMessage`. The operation worker handles retries and enforces backpressure against the RTC data channel.
-- Received LiveKit data messages are wrapped into the `message` envelope described above, preserving `topic` and sender identity.
-
-### Recording & Cleanup
-- If recording was enabled, the `recording_egress_id` stored in `ConnectionState` is used to call `stop_room_recording` before room deletion.
-- Participant disconnect events are forwarded to the client and deliberately followed by a WebSocket close to ensure the server tears down the LiveKit session promptly.
-
-### LiveKit Control Mode (`audio: false`)
-- You can omit STT/TTS and still leverage Sayna as a managed LiveKit agent. Set `audio: false`, provide a `livekit` block, and use `send_message` or LiveKit data messages to exchange metadata while TTS/STT happen elsewhere.
-
----
-
-## Interruption & Playback Semantics
-
-VoiceManager enforces predictable playback:
-- `allow_interruption=false` sets a non-interruptible window. New `speak` commands queue but do not pre-empt, `clear` returns silently, and STT results are ignored until playback completes.
-- When audio is interruptible, `clear` immediately flushes provider queues and calls the LiveKit audio clear callback so both transports stay synchronized.
-- `tts_playback_complete` is emitted after the queue drains, giving clients a hook to resume microphone capture or UI prompts.
-
----
-
-## Error Handling & Observability
-
-- Most misconfigurations yield `{"type":"error","message":"..."}` and keep the socket open so you can resubmit a `config`.
-- Provider readiness is enforced with a 30 s timeout. Missing API keys, invalid models, or queue failures surface as errors before `ready` is sent.
-- LiveKit operations use oneshot channels; failures (e.g., queue overflow, RTC disconnect) are bubbled up via `error` messages.
-- Trace logging is enabled for every request, and key transitions (`ready`, LiveKit connect/disconnect, recording start/stop) are logged at `info` level for auditability.
-
----
-
-## Implementation Patterns
-
-### 1. Pure WebSocket STT/TTS
-```text
-Client --> /ws
-  config (audio=true, no livekit)
-  ready
-  [binary audio frames] --> stt_result … stt_result(is_final)
-  speak("answer", flush=true)
-  [binary TTS audio] + tts_playback_complete
+```json
+{
+  "audio": true
+}
 ```
-- Use when you want tight control over audio capture/playback inside your own application.
 
-### 2. Hybrid WebSocket + LiveKit Room
-```text
-Client --> /ws
-  config(audio=true, livekit.room_name="demo")
-  ready(livekit_room_name="demo", livekit_url="wss://lk.example.com")
+| Value | Behavior |
+|-------|----------|
+| `true` (default) | Full audio processing enabled. STT and TTS providers initialized. Can stream audio, receive transcriptions, and synthesize speech. |
+| `false` | Audio processing disabled. No STT/TTS providers started. Useful for LiveKit control-only mode where you only need data channels and room management. |
 
-Browser --> POST /livekit/token { room_name: "demo", ... }
-Browser --> LiveKit using token
+**Audio Disabled Mode:**
+When `audio=false`, you can still:
+- Connect to LiveKit rooms
+- Send/receive data channel messages
+- Manage LiveKit recordings
+- Control room state
 
-LiveKit participants speak -> Sayna streams transcripts via WebSocket and mirrors synthesized audio back into the room.
+You CANNOT:
+- Stream audio for transcription
+- Use `speak` commands
+- Receive TTS audio
+- Use `clear` commands
+
+Attempting to send audio or speak commands with `audio=false` results in an error message (connection remains open).
+
+---
+
+### STT Configuration
+
+Required when `audio=true`.
+
+```json
+{
+  "stt_config": {
+    "provider": "deepgram",
+    "language": "en-US",
+    "sample_rate": 16000,
+    "channels": 1,
+    "punctuation": true,
+    "encoding": "linear16",
+    "model": "nova-2"
+  }
+}
 ```
-- Perfect for “copilot in a meeting” scenarios. WebSocket remains your control plane while LiveKit handles distribution to browsers.
 
-### 3. LiveKit Message Bus Only
-```jsonc
-// config
+**Fields:**
+
+| Field | Type | Required | Description | Example |
+|-------|------|----------|-------------|---------|
+| `provider` | string | Yes | STT provider name. Currently supported: `"deepgram"` | `"deepgram"` |
+| `language` | string | Yes | BCP-47 language code for transcription | `"en-US"`, `"es-ES"`, `"fr-FR"` |
+| `sample_rate` | number | Yes | Audio sample rate in Hz. Must match binary audio you send. | `16000`, `24000`, `48000` |
+| `channels` | number | Yes | Number of audio channels. `1` = mono, `2` = stereo. | `1` |
+| `punctuation` | boolean | Yes | Enable automatic punctuation in transcripts | `true`, `false` |
+| `encoding` | string | Yes | Audio encoding format. Must match binary audio you send. | `"linear16"`, `"opus"` |
+| `model` | string | Yes | Provider-specific model identifier | `"nova-2"` (Deepgram) |
+
+**Critical:** The `sample_rate`, `channels`, and `encoding` must **exactly match** the binary audio frames you send. Sayna does not perform audio format conversion. Mismatches result in garbled transcriptions or errors.
+
+**Common Configurations:**
+
+**High-quality phone calls (16kHz mono):**
+```json
+{
+  "provider": "deepgram",
+  "language": "en-US",
+  "sample_rate": 16000,
+  "channels": 1,
+  "punctuation": true,
+  "encoding": "linear16",
+  "model": "nova-2"
+}
+```
+
+**High-quality web audio (48kHz stereo):**
+```json
+{
+  "provider": "deepgram",
+  "language": "en-US",
+  "sample_rate": 48000,
+  "channels": 2,
+  "punctuation": true,
+  "encoding": "linear16",
+  "model": "nova-2"
+}
+```
+
+---
+
+### TTS Configuration
+
+Required when `audio=true`.
+
+```json
+{
+  "tts_config": {
+    "provider": "deepgram",
+    "model": "aura-asteria-en",
+    "voice_id": "aura-asteria-en",
+    "speaking_rate": 1.0,
+    "audio_format": "linear16",
+    "sample_rate": 24000,
+    "connection_timeout": 30,
+    "request_timeout": 60,
+    "pronunciations": []
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description | Example |
+|-------|------|----------|-------------|---------|
+| `provider` | string | Yes | TTS provider name. Currently supported: `"deepgram"`, `"elevenlabs"` | `"deepgram"` |
+| `model` | string | Yes | Provider-specific model identifier | `"aura-asteria-en"` (Deepgram), `"eleven_multilingual_v2"` (ElevenLabs) |
+| `voice_id` | string | No | Voice identifier for synthesis. Provider-specific. | `"aura-asteria-en"`, `"21m00Tcm4TlvDq8ikWAM"` |
+| `speaking_rate` | number | No | Speech speed multiplier. Range: 0.25 to 4.0. Default: 1.0 | `0.8` (slower), `1.2` (faster) |
+| `audio_format` | string | No | Audio encoding format for output | `"linear16"`, `"mp3"`, `"opus"` |
+| `sample_rate` | number | No | Output audio sample rate in Hz | `16000`, `24000`, `48000` |
+| `connection_timeout` | number | No | Provider connection timeout in seconds | `30` |
+| `request_timeout` | number | No | TTS synthesis request timeout in seconds | `60` |
+| `pronunciations` | array | No | Custom pronunciation replacements (see below) | `[{"word": "API", "pronunciation": "A P I"}]` |
+
+**Pronunciations:**
+
+Customize how specific words are pronounced by providing replacement rules:
+
+```json
+{
+  "pronunciations": [
+    {
+      "word": "API",
+      "pronunciation": "A P I"
+    },
+    {
+      "word": "SQL",
+      "pronunciation": "sequel"
+    },
+    {
+      "word": "nginx",
+      "pronunciation": "engine X"
+    }
+  ]
+}
+```
+
+Before synthesis, Sayna replaces occurrences of `word` with `pronunciation` in the text.
+
+**Audio Caching:**
+
+Sayna automatically caches TTS audio based on a hash of:
+- Provider
+- Voice ID
+- Model
+- Audio format
+- Sample rate
+- Speaking rate
+
+When the same text is synthesized with identical configuration, cached audio is returned instantly (sub-100ms latency). Keep your TTS configuration stable across sessions to maximize cache hits.
+
+**Provider-Specific Settings:**
+
+**Deepgram:**
+```json
+{
+  "provider": "deepgram",
+  "model": "aura-asteria-en",
+  "voice_id": "aura-asteria-en",
+  "speaking_rate": 1.0,
+  "audio_format": "linear16",
+  "sample_rate": 24000
+}
+```
+
+**ElevenLabs:**
+```json
+{
+  "provider": "elevenlabs",
+  "model": "eleven_multilingual_v2",
+  "voice_id": "21m00Tcm4TlvDq8ikWAM",
+  "speaking_rate": 1.0,
+  "audio_format": "mp3_44100_128",
+  "sample_rate": 44100
+}
+```
+
+---
+
+### LiveKit Configuration
+
+Optional. Include to enable LiveKit integration for multi-party voice rooms.
+
+```json
+{
+  "livekit": {
+    "room_name": "conversation-room-123",
+    "enable_recording": false,
+    "recording_file_key": "recordings/session-123",
+    "sayna_participant_identity": "sayna-ai",
+    "sayna_participant_name": "Sayna AI",
+    "listen_participants": []
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description | Example |
+|-------|------|----------|-------------|---------|
+| `room_name` | string | Yes | Unique room identifier. Room created if doesn't exist. | `"conversation-room-123"` |
+| `enable_recording` | boolean | No | Start LiveKit cloud recording. Default: `false` | `true`, `false` |
+| `recording_file_key` | string | Conditional | S3 file key for recording. Required if `enable_recording=true` | `"recordings/session-123"` |
+| `sayna_participant_identity` | string | No | Sayna AI's participant identity. Default: `"sayna-ai"` | `"assistant-bot"` |
+| `sayna_participant_name` | string | No | Sayna AI's display name. Default: `"Sayna AI"` | `"Support Assistant"` |
+| `listen_participants` | array | No | Participant identity filter. Default: `[]` (all participants) | `["user-123", "user-456"]` |
+
+**Room Management:**
+
+When LiveKit is configured:
+1. Server creates the room (or joins if it exists)
+2. Server generates a JWT token for Sayna AI participant
+3. Server connects to the room as `sayna_participant_identity`
+4. Server publishes audio tracks for TTS output
+5. Server subscribes to audio tracks from participants (filtered by `listen_participants`)
+6. Server subscribes to data channel messages (filtered by `listen_participants`)
+7. On disconnect, server automatically deletes the room
+
+**Participant Filtering (`listen_participants`):**
+
+Control whose audio and messages Sayna processes:
+
+| Value | Behavior |
+|-------|----------|
+| `[]` (empty, default) | Process audio and messages from **all** participants |
+| `["user-123"]` | Only process audio and messages from `user-123`, ignore others |
+| `["user-123", "user-456"]` | Only process audio and messages from `user-123` and `user-456` |
+
+**Use Cases:**
+- **All participants** (default): Voice assistant in meeting hears everyone
+- **Specific participants**: AI assistant only listens to moderator or host
+- **1-on-1 conversations**: AI only processes audio from specific user
+
+**Note:** Server-generated messages (participant identity = server) are always processed regardless of filter.
+
+**Recording:**
+
+Enable cloud recording to S3-compatible storage:
+
+```json
+{
+  "livekit": {
+    "room_name": "support-call-789",
+    "enable_recording": true,
+    "recording_file_key": "recordings/support/call-789.mp4"
+  }
+}
+```
+
+**Recording behavior:**
+- Recording starts when WebSocket config is received
+- Recording includes all room participants (not just filtered ones)
+- Recording format: MP4 with audio/video tracks
+- Recording automatically stops when WebSocket disconnects
+- Requires S3 configuration in server environment
+
+**Getting Participant Tokens:**
+
+After receiving the `ready` message with LiveKit details, other participants must obtain tokens:
+
+```bash
+POST /livekit/token
+Content-Type: application/json
+
+{
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-123",
+  "participant_name": "John Doe"
+}
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-123",
+  "livekit_url": "wss://livekit.example.com"
+}
+```
+
+Use the token to connect to LiveKit room from web browsers or mobile apps using LiveKit SDKs.
+
+---
+
+## Use Case Patterns
+
+Sayna's WebSocket API supports multiple integration patterns. Choose based on your application needs.
+
+### Pattern 1: WebSocket-Only STT/TTS
+
+**Use Case:** Voice assistant within your own application. You handle audio capture/playback.
+
+**Configuration:**
+```json
+{
+  "type": "config",
+  "audio": true,
+  "stt_config": {
+    "provider": "deepgram",
+    "language": "en-US",
+    "sample_rate": 16000,
+    "channels": 1,
+    "punctuation": true,
+    "encoding": "linear16",
+    "model": "nova-2"
+  },
+  "tts_config": {
+    "provider": "deepgram",
+    "model": "aura-asteria-en",
+    "voice_id": "aura-asteria-en",
+    "speaking_rate": 1.0,
+    "audio_format": "linear16",
+    "sample_rate": 24000
+  }
+}
+```
+
+**Flow:**
+```
+1. Connect to /ws
+2. Send config (no LiveKit)
+3. Receive "ready" message
+4. Start streaming microphone audio → Sayna
+5. Receive STT results
+6. When user finishes speaking (is_speech_final), generate response
+7. Send "speak" command with response text
+8. Receive TTS audio chunks
+9. Play audio to speaker
+10. Receive "tts_playback_complete"
+11. Re-enable microphone, repeat
+```
+
+**Pros:**
+- Simple integration
+- Full control over audio capture/playback
+- Low latency
+- Works in any environment (desktop, mobile, embedded)
+
+**Cons:**
+- Must handle audio I/O yourself
+- No multi-party voice
+- No WebRTC benefits
+
+---
+
+### Pattern 2: WebSocket + LiveKit Hybrid
+
+**Use Case:** AI assistant in a multi-party meeting. WebSocket controls AI behavior, LiveKit provides WebRTC audio distribution to browsers.
+
+**Configuration:**
+```json
+{
+  "type": "config",
+  "audio": true,
+  "stt_config": { ... },
+  "tts_config": { ... },
+  "livekit": {
+    "room_name": "meeting-room-456",
+    "enable_recording": true,
+    "recording_file_key": "recordings/meeting-456",
+    "sayna_participant_identity": "meeting-assistant",
+    "sayna_participant_name": "Meeting Assistant",
+    "listen_participants": []
+  }
+}
+```
+
+**Flow:**
+```
+1. Connect to /ws
+2. Send config with LiveKit
+3. Receive "ready" with room details
+4. Browser participants call POST /livekit/token
+5. Browser participants join LiveKit room with tokens
+6. Participants speak → LiveKit → Sayna STT → WebSocket STT results
+7. Send "speak" command for AI response
+8. Sayna TTS → LiveKit room (all participants hear) + WebSocket (for logging)
+9. Receive "tts_playback_complete"
+10. Repeat
+```
+
+**Pros:**
+- Best of both worlds: WebSocket control + WebRTC distribution
+- Participants use standard browsers (no custom audio code)
+- Multi-party voice support
+- Cloud recording
+- LiveKit handles NAT traversal, quality adaptation, etc.
+
+**Cons:**
+- More complex architecture
+- Requires LiveKit server
+- Additional token management
+
+**Perfect for:**
+- Voice bots in meetings
+- Customer support AI (agent + customer)
+- Virtual receptionists
+- Collaborative voice applications
+
+---
+
+### Pattern 3: LiveKit Control-Only Mode
+
+**Use Case:** Use Sayna as LiveKit room manager without audio processing. Useful for room automation, recording control, or data channel messaging.
+
+**Configuration:**
+```json
 {
   "type": "config",
   "audio": false,
-  "livekit": { "room_name": "support-handoff" }
+  "livekit": {
+    "room_name": "automation-room",
+    "enable_recording": true,
+    "recording_file_key": "recordings/automated-session"
+  }
 }
 ```
-- Use `send_message` to push JSON to other participants and listen to `message` events for remote signals. Add LiveKit recording toggles or SIP dispatch rules as needed.
+
+**Flow:**
+```
+1. Connect to /ws
+2. Send config with audio=false, LiveKit enabled
+3. Receive "ready"
+4. Room created, recording started
+5. Use "send_message" to send data to participants
+6. Receive "message" events from participants
+7. Control recording, room state via commands
+8. Disconnect → room deleted, recording stopped
+```
+
+**Pros:**
+- No STT/TTS overhead
+- Lightweight
+- Focus on messaging and control
+
+**Cons:**
+- No voice processing
+- Must handle audio elsewhere if needed
+
+**Perfect for:**
+- Room lifecycle automation
+- Recording management
+- LiveKit integration testing
+- Data-only applications
 
 ---
 
-## Practical Tips
-- **Align audio formats:** Always match your binary audio frames to the `stt_config.sample_rate`, `channels`, and `encoding`. The server never resamples.
-- **Batch speech intelligently:** Turn detection (`turn-detect` feature flag) can mark `is_speech_final=true` sooner if you stream continuous audio rather than clipping per word.
-- **Measure latency:** Compare the `tts_playback_complete.timestamp` with the timestamp when you sent `speak`. Same for STT—the `is_final` flag denotes when providers flush.
-- **Handle LiveKit exits:** When you receive `participant_disconnected`, prepare for the socket to close and re-establish the session if you still need it.
-- **Reuse configs:** Identical `tts_config` values benefit from cache hits. Keep a stable config per conversational agent to maximize reuse.
+## Audio Processing
+
+Understanding how audio flows through Sayna helps you optimize for latency and quality.
+
+### Audio Format Requirements
+
+**Critical Rule:** Binary audio you send MUST match `stt_config` parameters exactly.
+
+**Example:**
+If your `stt_config` specifies:
+```json
+{
+  "sample_rate": 16000,
+  "channels": 1,
+  "encoding": "linear16"
+}
+```
+
+Your binary audio must be:
+- 16000 samples per second
+- Mono (1 channel)
+- 16-bit signed PCM (linear16)
+- Little-endian byte order
+
+**Calculating Chunk Sizes:**
+
+For optimal streaming, send audio in small chunks (100-200ms worth of audio):
+
+```
+Bytes per chunk = sample_rate × channels × bytes_per_sample × duration_seconds
+
+Example (16kHz mono linear16, 100ms chunks):
+= 16000 samples/sec × 1 channel × 2 bytes/sample × 0.1 sec
+= 3200 bytes per chunk
+```
+
+**Common Formats:**
+
+| Format | Sample Rate | Channels | Encoding | Bytes/Chunk (100ms) |
+|--------|-------------|----------|----------|---------------------|
+| Phone quality | 16000 | 1 | linear16 | 3200 |
+| CD quality | 44100 | 2 | linear16 | 17640 |
+| High-quality | 48000 | 2 | linear16 | 19200 |
+
+### STT Audio Flow
+
+**Without LiveKit:**
+```
+Your App → WebSocket Binary → Sayna
+                               ↓
+                         (Optional) DeepFilterNet noise reduction
+                               ↓
+                         STT Provider (e.g., Deepgram)
+                               ↓
+                         STT Results → WebSocket → Your App
+```
+
+**With LiveKit:**
+```
+Browser Participant → LiveKit Room → Sayna
+                                      ↓
+                                (Optional) DeepFilterNet
+                                      ↓
+                                STT Provider
+                                      ↓
+                                STT Results → WebSocket → Your App
+                                      ↓
+                                (Optional) Send to LiveKit data channel
+```
+
+**Noise Filtering:**
+
+If compiled with `noise-filter` feature (default), Sayna applies DeepFilterNet noise reduction:
+- Reduces background noise, keyboard typing, fan noise
+- Preserves speech quality
+- CPU-intensive, runs on thread pool (non-blocking)
+- Conservative blending to avoid over-processing
+- Automatically applied to all audio (WebSocket + LiveKit)
+
+**Turn Detection:**
+
+If compiled with `turn-detect` feature (default), Sayna uses an ONNX model to detect when speech ends:
+- Sets `is_speech_final=true` when speaker stops talking
+- More accurate than silence-only detection
+- Helps conversational AI know when to respond
+- Minimal latency impact
+
+### TTS Audio Flow
+
+**Without LiveKit:**
+```
+Your App → "speak" command → Sayna
+                              ↓
+                         TTS Provider
+                              ↓
+                         (Check cache)
+                              ↓
+                    Binary Audio → WebSocket → Your App
+                              ↓
+                    "tts_playback_complete" → Your App
+```
+
+**With LiveKit (Dual Routing):**
+```
+Your App → "speak" command → Sayna
+                              ↓
+                         TTS Provider
+                              ↓
+                         (Check cache)
+                              ↓
+                    ┌─────────┴──────────┐
+                    ↓                    ↓
+           Binary → LiveKit      Binary → WebSocket
+           (primary, all participants hear)  (fallback, logging)
+                    ↓
+           "tts_playback_complete" → Your App
+```
+
+**Audio Caching:**
+
+Sayna caches TTS audio for faster repeated synthesis:
+- Cache key: hash of (provider, voice, model, format, rate, text)
+- Cache hit: audio returned in <100ms
+- Cache miss: audio generated by provider (~500-2000ms)
+- Cache shared across all sessions with same TTS config
+- Maximize cache hits by keeping TTS config stable
+
+**Example Cache Benefit:**
+```
+First synthesis: "Hello!" → 1200ms (provider synthesis time)
+Second synthesis: "Hello!" → 80ms (cache hit)
+Third synthesis: "Hello!" → 75ms (cache hit)
+```
+
+### Interruption Handling
+
+Sayna provides intelligent audio interruption:
+
+**Interruptible Playback (default):**
+```json
+{"type": "speak", "text": "This can be interrupted", "allow_interruption": true}
+```
+
+While playing:
+- `clear` command stops playback immediately
+- New `speak` command with `flush=true` stops playback
+- User starts speaking → your app can send `clear` to stop AI
+
+**Non-Interruptible Playback:**
+```json
+{"type": "speak", "text": "Important message!", "allow_interruption": false}
+```
+
+While playing:
+- `clear` command ignored (returns silently)
+- New `speak` commands queued (do not pre-empt)
+- Playback completes fully, then queue processes
+
+**Use Cases:**
+- Interruptible: conversational responses, long descriptions
+- Non-interruptible: critical alerts, legal disclaimers, error messages
 
 ---
 
-By understanding the full WebSocket session architecture—configuration, control messages, LiveKit hooks, and the VoiceManager/TTS/STT pipeline—you can compose any realtime voice experience on top of Sayna, from simple streaming transcription to rich multiparty meetings where an AI assistant hears and speaks inside LiveKit while your application orchestrates behaviour through the same WebSocket. Let the `/ws` channel be your single source of truth for the session’s state machine, and lean on the documented message types above to keep clients and the server perfectly synchronized.
+## LiveKit Integration
+
+LiveKit integration transforms Sayna into a multi-party voice platform.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                  LiveKit Room                   │
+│                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │ Browser  │  │ Browser  │  │  Sayna   │     │
+│  │  User A  │  │  User B  │  │    AI    │     │
+│  └──────────┘  └──────────┘  └──────────┘     │
+│       ↑              ↑              ↑          │
+│       └──────────────┴──────────────┘          │
+│          WebRTC Audio + Data Channels          │
+└─────────────────────────────────────────────────┘
+                       ↕
+              WebSocket Control Plane
+                       ↕
+              ┌─────────────────┐
+              │   Your Backend  │
+              │  (Orchestrator) │
+              └─────────────────┘
+```
+
+### Dual-Transport Model
+
+Sayna uses LiveKit for audio distribution, WebSocket for control:
+
+**LiveKit (WebRTC):**
+- Participant audio tracks (STT input)
+- Sayna TTS audio tracks (output to participants)
+- Data channel messages (participant chat, events)
+- Handled by LiveKit SDK (NAT traversal, quality adaptation)
+
+**WebSocket:**
+- Control messages (speak, clear, send_message)
+- STT transcription results
+- TTS completion notifications
+- Error messages
+- Participant events
+
+**Why Both?**
+- LiveKit excels at audio distribution (WebRTC, TURN servers, quality adaptation)
+- WebSocket excels at control messages and structured data
+- Separating concerns allows optimizations for each
+
+### Room Lifecycle
+
+**Creation:**
+```
+1. WebSocket sends config with livekit block
+2. Sayna creates room (or joins existing)
+3. Sayna generates JWT token for itself
+4. Sayna joins room as sayna_participant_identity
+5. Sayna publishes audio track (for TTS output)
+6. Sayna subscribes to participant tracks (for STT input)
+7. Sayna subscribes to data channel
+8. Sayna sends "ready" with room details
+```
+
+**Active:**
+```
+- Participants join with their own tokens (from POST /livekit/token)
+- Participants speak → Sayna STT → WebSocket
+- WebSocket sends "speak" → Sayna TTS → LiveKit (all hear)
+- Participants send data → Sayna → WebSocket "message" event
+- WebSocket sends "send_message" → Sayna → LiveKit data channel
+```
+
+**Cleanup:**
+```
+1. WebSocket disconnects (client or server initiated)
+2. Sayna stops STT/TTS providers
+3. Sayna disconnects from LiveKit room (100ms timeout)
+4. Sayna stops recording (if enabled)
+5. Sayna deletes LiveKit room
+```
+
+**Room Deletion:**
+Sayna automatically deletes rooms on disconnect to prevent orphaned rooms consuming resources. If you need persistent rooms, manage room lifecycle separately using LiveKit APIs.
+
+### Participant Management
+
+**Participant Tokens:**
+
+Each participant needs their own JWT token:
+
+```bash
+# After receiving ready message with room_name
+POST /livekit/token
+{
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-456",
+  "participant_name": "Alice Smith"
+}
+```
+
+Response includes token for LiveKit SDK:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "room_name": "conversation-room-123",
+  "participant_identity": "user-456",
+  "livekit_url": "wss://livekit.example.com"
+}
+```
+
+**Participant Filtering:**
+
+Control which participants Sayna processes:
+
+```json
+{
+  "livekit": {
+    "room_name": "moderated-meeting",
+    "listen_participants": ["moderator-1", "moderator-2"]
+  }
+}
+```
+
+**Effect:**
+- Sayna only transcribes audio from `moderator-1` and `moderator-2`
+- Other participants' audio ignored (not sent to STT)
+- Only data messages from filtered participants forwarded
+- Sayna still publishes TTS audio to all participants
+
+**Use Cases:**
+- **Support Bot**: Only listen to customer (not support agents)
+- **Meeting Assistant**: Only transcribe host/moderator
+- **Voice Commands**: Only process specific user's voice
+
+**Disconnect Handling:**
+
+When a participant leaves:
+```json
+{
+  "type": "participant_disconnected",
+  "participant": {
+    "identity": "user-456",
+    "name": "Alice Smith"
+  }
+}
+```
+
+**Important:** 100ms after this message, Sayna closes the WebSocket. This ensures clean LiveKit session teardown. Re-establish connection if needed.
+
+### Data Channel Messaging
+
+LiveKit provides a data channel for custom messages between participants.
+
+**Sending Messages:**
+```json
+{
+  "type": "send_message",
+  "message": "Hello participants!",
+  "role": "assistant",
+  "topic": "chat"
+}
+```
+
+Sayna publishes to LiveKit data channel → all participants receive (via their LiveKit SDK subscriptions).
+
+**Receiving Messages:**
+```json
+{
+  "type": "message",
+  "message": {
+    "message": "Hello AI!",
+    "identity": "user-456",
+    "topic": "chat",
+    "room": "conversation-room-123",
+    "timestamp": 1700000000000
+  }
+}
+```
+
+**Message Routing by Topic:**
+
+Use `topic` field for application-level routing:
+
+```javascript
+// Participant sends with topic
+livekitRoom.localParticipant.publishData(
+  JSON.stringify({message: "typing...", topic: "status"}),
+  DataPacket_Kind.RELIABLE
+);
+
+// Your backend receives
+{
+  "type": "message",
+  "message": {
+    "message": "typing...",
+    "topic": "status",
+    "identity": "user-456",
+    ...
+  }
+}
+
+// Route based on topic
+if (message.message.topic === "status") {
+  updateParticipantStatus(message.message.identity, message.message.message);
+} else if (message.message.topic === "chat") {
+  handleChatMessage(message.message);
+}
+```
+
+**Binary Data:**
+
+Data channel supports binary data (base64-encoded in WebSocket message):
+
+```json
+{
+  "type": "message",
+  "message": {
+    "data": "SGVsbG8gd29ybGQh",
+    "identity": "user-456",
+    "topic": "file-transfer",
+    ...
+  }
+}
+```
+
+Decode base64 to get original binary data.
+
+### Recording
+
+Enable cloud recording to S3-compatible storage:
+
+```json
+{
+  "livekit": {
+    "room_name": "support-call-123",
+    "enable_recording": true,
+    "recording_file_key": "recordings/support/2024-01-15/call-123.mp4"
+  }
+}
+```
+
+**Behavior:**
+- Recording starts when config received
+- Records all room audio/video (not just Sayna)
+- Format: MP4 container
+- Storage: S3-compatible (configured in server environment)
+- Stops automatically on WebSocket disconnect
+
+**Requirements:**
+- LiveKit egress service configured
+- S3 credentials in server environment
+- `recording_file_key` must be valid S3 key
+
+**Access Recording:**
+After session ends, download from S3 bucket using `recording_file_key`.
+
+---
+
+## Error Handling
+
+Sayna communicates errors without abruptly closing connections, allowing recovery.
+
+### Error Message Format
+
+```json
+{
+  "type": "error",
+  "message": "Human-readable error description"
+}
+```
+
+### Common Errors
+
+**Configuration Errors:**
+```json
+{"type": "error", "message": "STT and TTS configurations required when audio is enabled"}
+```
+
+**Solution:** Send config with both `stt_config` and `tts_config` when `audio=true`.
+
+---
+
+**Provider Initialization Errors:**
+```json
+{"type": "error", "message": "Failed to initialize STT provider: connection timeout"}
+```
+
+**Solution:** Check provider API credentials in server environment. Retry configuration.
+
+---
+
+**Audio Processing Errors:**
+```json
+{"type": "error", "message": "Audio processing failed: invalid audio format"}
+```
+
+**Solution:** Ensure binary audio matches `stt_config` (sample rate, channels, encoding).
+
+---
+
+**LiveKit Errors:**
+```json
+{"type": "error", "message": "LiveKit not configured"}
+```
+
+**Solution:** Include `livekit` block in config message if using LiveKit features.
+
+---
+
+**TTS Synthesis Errors:**
+```json
+{"type": "error", "message": "TTS synthesis failed: provider returned error"}
+```
+
+**Solution:** Check TTS config parameters (voice_id, model). Provider may have rate limits.
+
+### Error Recovery Strategies
+
+**Non-Fatal Errors:**
+Most errors are non-fatal. Connection remains open for retry.
+
+```javascript
+websocket.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+
+  if (message.type === "error") {
+    console.error("Sayna error:", message.message);
+
+    // Retry configuration if validation failed
+    if (message.message.includes("configuration")) {
+      setTimeout(() => sendCorrectedConfig(), 1000);
+    }
+
+    // Retry speak if TTS failed
+    if (message.message.includes("TTS synthesis failed")) {
+      setTimeout(() => retrySpeakCommand(), 2000);
+    }
+  }
+};
+```
+
+**Fatal Errors:**
+Rare. Connection closes after error message.
+
+**Monitoring:**
+Log all error messages for debugging:
+
+```javascript
+const errorLog = [];
+
+if (message.type === "error") {
+  errorLog.push({
+    timestamp: Date.now(),
+    message: message.message,
+    sessionId: currentSessionId
+  });
+
+  // Send to monitoring service
+  sendToMonitoring(errorLog);
+}
+```
+
+---
+
+## Best Practices
+
+### 1. Audio Format Consistency
+
+**Always match `stt_config` exactly:**
+```javascript
+// Bad: sending 48kHz audio when config says 16kHz
+const config = {
+  stt_config: {
+    sample_rate: 16000,
+    channels: 1,
+    encoding: "linear16"
+  }
+};
+
+// Microphone captures at 48kHz...
+// Results in garbled transcripts
+
+// Good: resample audio to match config
+const config = {
+  stt_config: {
+    sample_rate: 16000,
+    channels: 1,
+    encoding: "linear16"
+  }
+};
+
+// Resample microphone from 48kHz to 16kHz before sending
+const resampled = resampleAudio(micAudio, 48000, 16000);
+websocket.send(resampled);
+```
+
+### 2. Chunk Size Optimization
+
+**Send 100-200ms chunks for best latency:**
+```javascript
+// Bad: sending 5-second chunks (high latency)
+setInterval(() => {
+  websocket.send(fiveSecondBuffer);
+}, 5000);
+
+// Good: sending 100ms chunks (low latency)
+setInterval(() => {
+  websocket.send(hundredMsBuffer);
+}, 100);
+```
+
+### 3. Handle Interim Transcripts
+
+**Use interim results for live UI updates:**
+```javascript
+let liveTranscript = "";
+let finalTranscripts = [];
+
+if (message.type === "stt_result") {
+  if (!message.is_final) {
+    // Update live display
+    liveTranscript = message.transcript;
+    updateLiveDisplay(liveTranscript);
+  } else {
+    // Save final
+    finalTranscripts.push(message.transcript);
+    liveTranscript = "";
+
+    // Respond when speech ends
+    if (message.is_speech_final) {
+      generateResponse(finalTranscripts.join(" "));
+    }
+  }
+}
+```
+
+### 4. Measure Latency
+
+**Track TTS latency:**
+```javascript
+const speakTimestamps = new Map();
+
+// When sending speak command
+const speakId = generateId();
+speakTimestamps.set(speakId, Date.now());
+websocket.send(JSON.stringify({
+  type: "speak",
+  text: "Hello!",
+  // Add custom ID in your app state
+}));
+
+// When receiving playback complete
+if (message.type === "tts_playback_complete") {
+  const latency = message.timestamp - speakTimestamps.get(currentSpeakId);
+  console.log(`TTS latency: ${latency}ms`);
+
+  // Monitor for performance issues
+  if (latency > 2000) {
+    console.warn("High TTS latency detected");
+  }
+}
+```
+
+### 5. Stable TTS Configuration
+
+**Maximize cache hits:**
+```javascript
+// Bad: changing voice parameters frequently
+{"voice_id": "voice-1", "speaking_rate": 1.0}  // Cache miss
+{"voice_id": "voice-1", "speaking_rate": 1.1}  // Cache miss (different rate)
+{"voice_id": "voice-2", "speaking_rate": 1.0}  // Cache miss (different voice)
+
+// Good: consistent configuration
+const ttsConfig = {
+  voice_id: "voice-1",
+  speaking_rate: 1.0,
+  // Keep stable across session
+};
+
+// All speak commands with same config → cache hits
+```
+
+### 6. Graceful Reconnection
+
+**Handle disconnects:**
+```javascript
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+websocket.onclose = (event) => {
+  console.log("WebSocket closed:", event.code, event.reason);
+
+  if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+
+    console.log(`Reconnecting in ${delay}ms...`);
+    setTimeout(() => {
+      connectWebSocket();
+    }, delay);
+  } else {
+    console.error("Max reconnection attempts reached");
+    showErrorToUser("Connection lost. Please refresh.");
+  }
+};
+
+websocket.onopen = () => {
+  reconnectAttempts = 0;
+  console.log("WebSocket connected");
+};
+```
+
+### 7. LiveKit Participant Tracking
+
+**Track participant state:**
+```javascript
+const participants = new Map();
+
+if (message.type === "message") {
+  // Track active participants
+  if (!participants.has(message.message.identity)) {
+    participants.set(message.message.identity, {
+      identity: message.message.identity,
+      lastSeen: message.message.timestamp,
+      messages: []
+    });
+  }
+
+  participants.get(message.message.identity).messages.push(message.message);
+  participants.get(message.message.identity).lastSeen = message.message.timestamp;
+}
+
+if (message.type === "participant_disconnected") {
+  participants.delete(message.participant.identity);
+  console.log(`Participant left: ${message.participant.name}`);
+
+  // Prepare for connection close
+  setTimeout(() => {
+    websocket.close();
+    // Reconnect if still needed
+  }, 150);
+}
+```
+
+---
+
+## Troubleshooting
+
+### No Transcription Results
+
+**Symptoms:** Sending audio, but no `stt_result` messages received.
+
+**Checks:**
+1. **Audio format mismatch:** Verify binary audio matches `stt_config` exactly.
+   ```javascript
+   console.log("Config:", config.stt_config.sample_rate);
+   console.log("Actual audio:", actualSampleRate);
+   // Must match exactly
+   ```
+
+2. **Audio not reaching server:** Check WebSocket send calls.
+   ```javascript
+   websocket.send(audioBuffer);
+   console.log("Sent audio:", audioBuffer.byteLength, "bytes");
+   ```
+
+3. **Silent audio:** Ensure audio contains speech, not silence.
+   ```javascript
+   // Check audio amplitude
+   const volume = calculateVolume(audioBuffer);
+   if (volume < 0.01) {
+     console.warn("Audio too quiet");
+   }
+   ```
+
+4. **Audio enabled:** Check `audio=true` in config.
+
+5. **Provider errors:** Look for error messages from server.
+
+---
+
+### Garbled Transcriptions
+
+**Symptoms:** Receiving transcripts, but they're nonsense.
+
+**Cause:** Audio format mismatch (most common).
+
+**Solution:**
+```javascript
+// Verify exact match
+const config = {
+  stt_config: {
+    sample_rate: 16000,
+    channels: 1,
+    encoding: "linear16"
+  }
+};
+
+// Ensure audio is:
+// - 16000 Hz sample rate
+// - Mono (1 channel)
+// - 16-bit signed PCM
+// - Little-endian byte order
+
+// Use audio processing library to ensure correctness
+const correctAudio = convertToFormat(rawAudio, {
+  sampleRate: 16000,
+  channels: 1,
+  encoding: "s16le"  // signed 16-bit little-endian
+});
+```
+
+---
+
+### No TTS Audio
+
+**Symptoms:** Sending `speak` command, but no binary audio received.
+
+**Checks:**
+1. **Audio enabled:** Verify `audio=true` in config.
+2. **TTS config present:** Ensure `tts_config` provided.
+3. **Error messages:** Check for TTS synthesis errors.
+4. **Binary message handling:** Ensure your client processes binary WebSocket messages.
+   ```javascript
+   websocket.onmessage = (event) => {
+     if (event.data instanceof Blob || event.data instanceof ArrayBuffer) {
+       // Binary TTS audio
+       playAudio(event.data);
+     } else {
+       // JSON control message
+       const message = JSON.parse(event.data);
+     }
+   };
+   ```
+
+---
+
+### Connection Drops
+
+**Symptoms:** WebSocket closes unexpectedly.
+
+**Causes:**
+1. **Inactivity timeout (10s):** Send data or ping periodically.
+   ```javascript
+   // Keep-alive
+   setInterval(() => {
+     if (websocket.readyState === WebSocket.OPEN) {
+       // Send empty binary frame as keep-alive
+       websocket.send(new ArrayBuffer(0));
+     }
+   }, 5000);
+   ```
+
+2. **Participant disconnect (LiveKit):** Expected behavior. Reconnect if needed.
+
+3. **Server error:** Check server logs for details.
+
+4. **Network issues:** Implement reconnection logic (see Best Practices).
+
+---
+
+### LiveKit Participants Can't Hear AI
+
+**Symptoms:** TTS audio sent, but LiveKit participants don't hear it.
+
+**Checks:**
+1. **LiveKit configured:** Ensure `livekit` block in config.
+2. **Participants joined:** Verify participants obtained tokens and joined room.
+3. **Audio tracks subscribed:** Check LiveKit SDK subscription logic.
+4. **Participant filtering:** Ensure AI not filtered out.
+   ```json
+   // If Sayna identity is "sayna-ai", don't filter it out
+   {
+     "livekit": {
+       "listen_participants": ["user-1", "user-2"]
+       // This is for INPUT filtering (who Sayna listens to)
+       // OUTPUT (TTS) always goes to all participants
+     }
+   }
+   ```
+
+5. **Audio track published:** Check Sayna successfully published track (server logs).
+
+---
+
+### High Latency
+
+**Symptoms:** Long delays between speak command and audio playback.
+
+**Optimizations:**
+1. **Use caching:** Keep TTS config stable for cache hits.
+2. **Reduce chunk size:** Send smaller audio chunks (100ms).
+3. **Check network:** Ensure low-latency connection to server.
+4. **Provider selection:** Some TTS providers faster than others.
+5. **Measure latency:** Use `tts_playback_complete.timestamp` to identify bottlenecks.
+
+**Typical Latencies:**
+- TTS cache hit: 50-150ms
+- TTS cache miss: 500-2000ms (provider dependent)
+- STT interim results: 100-300ms
+- STT final results: 300-800ms
+
+---
+
+### Memory Leaks
+
+**Symptoms:** Memory usage grows over time.
+
+**Checks:**
+1. **Audio buffer cleanup:** Release audio buffers after processing.
+   ```javascript
+   websocket.onmessage = (event) => {
+     if (event.data instanceof Blob) {
+       const reader = new FileReader();
+       reader.onload = () => {
+         playAudio(reader.result);
+         // reader.result automatically garbage collected
+       };
+       reader.readAsArrayBuffer(event.data);
+     }
+   };
+   ```
+
+2. **Event listener cleanup:** Remove listeners on disconnect.
+   ```javascript
+   websocket.onclose = () => {
+     // Clean up
+     stopMicrophone();
+     releaseAudioContext();
+     clearInterval(keepAliveInterval);
+   };
+   ```
+
+3. **Participant map cleanup:** Remove disconnected participants.
+   ```javascript
+   if (message.type === "participant_disconnected") {
+     participants.delete(message.participant.identity);
+   }
+   ```
+
+---
+
+## Summary
+
+The Sayna WebSocket API provides a powerful foundation for real-time voice applications. Key takeaways:
+
+**Core Concepts:**
+- WebSocket at `/ws` for bidirectional communication
+- Configuration message must be first
+- Audio streaming for STT, speak commands for TTS
+- Optional LiveKit integration for multi-party voice
+
+**Message Types:**
+- **Incoming:** config, speak, binary audio, clear, send_message
+- **Outgoing:** ready, stt_result, tts_playback_complete, message, participant_disconnected, error, binary audio
+
+**Operating Modes:**
+- WebSocket-only: Full STT/TTS control, your app handles audio I/O
+- WebSocket + LiveKit: Multi-party voice with WebRTC distribution
+- LiveKit control-only: Room management without audio processing
+
+**Best Practices:**
+- Match audio formats exactly
+- Send audio in small chunks (100-200ms)
+- Keep TTS config stable for cache hits
+- Implement graceful reconnection
+- Monitor latency and errors
+
+**LiveKit Integration:**
+- Dual transport: WebSocket for control, LiveKit for audio distribution
+- Participant filtering for selective audio processing
+- Data channel for custom messaging
+- Automatic room cleanup on disconnect
+- Cloud recording support
+
+With this foundation, you can build sophisticated voice applications ranging from simple transcription services to complex multi-party voice assistants. Explore the examples, experiment with configurations, and build amazing voice experiences with Sayna!
+
+---
+
+**Additional Resources:**
+- [Authentication Documentation](authentication.md)
+- [LiveKit Webhook Documentation](livekit_webhook.md)
+- [API Reference (REST Endpoints)](../CLAUDE.md#api-endpoints)
+- [LiveKit SDK Documentation](https://docs.livekit.io/)
+
+**Need Help?**
+- GitHub Issues: [Sayna Issues](https://github.com/yourusername/sayna/issues)
+- Community Support: [Discussions](https://github.com/yourusername/sayna/discussions)

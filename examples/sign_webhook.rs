@@ -59,7 +59,7 @@ fn main() {
     let hash = hasher.finalize();
 
     // Base64-encode the hash
-    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(&hash);
+    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(hash);
 
     // Create signed token
     let token = AccessToken::with_api_key(&api_key, &api_secret)

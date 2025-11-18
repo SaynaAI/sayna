@@ -199,28 +199,28 @@ pub async fn handle_livekit_webhook(
     // Short-circuit: Only spawn forwarding task if SIP config exists and has hooks.
     // This ensures pure non-SIP deployments don't incur unnecessary background tasks
     // or noisy debug logs about missing configuration.
-    if let Some(sip_config) = &state.config.sip {
-        if !sip_config.hooks.is_empty() {
-            // We spawn this in the background to avoid delaying the response to LiveKit
-            let state_clone = state.clone();
-            let body_str_owned = body_str.to_string();
-            let event_clone = event.clone();
-            let sip_config_clone = sip_config.clone();
-            tokio::spawn(async move {
-                if let Err(e) = forward_to_sip_hook(
-                    &state_clone,
-                    &sip_config_clone,
-                    &event_clone,
-                    &body_str_owned,
-                )
-                .await
-                {
-                    // Log with appropriate severity based on error type
-                    let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
-                    e.log_with_context(&event_clone.id, room_name);
-                }
-            });
-        }
+    if let Some(sip_config) = &state.config.sip
+        && !sip_config.hooks.is_empty()
+    {
+        // We spawn this in the background to avoid delaying the response to LiveKit
+        let state_clone = state.clone();
+        let body_str_owned = body_str.to_string();
+        let event_clone = event.clone();
+        let sip_config_clone = sip_config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = forward_to_sip_hook(
+                &state_clone,
+                &sip_config_clone,
+                &event_clone,
+                &body_str_owned,
+            )
+            .await
+            {
+                // Log with appropriate severity based on error type
+                let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
+                e.log_with_context(&event_clone.id, room_name);
+            }
+        });
     }
 
     // Step 7: Respond quickly with success

@@ -81,7 +81,7 @@ fn create_signed_webhook(api_key: &str, api_secret: &str, payload: Value) -> (St
     let hash = hasher.finalize();
 
     // Base64-encode the hash
-    let hash_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &hash);
+    let hash_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash);
 
     // Create signed token
     let token = AccessToken::with_api_key(api_key, api_secret)
