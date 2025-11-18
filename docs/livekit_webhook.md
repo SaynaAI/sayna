@@ -640,11 +640,16 @@ Webhook forwarding is **non-blocking** and **best-effort**:
 Webhook forwarding runs in a **spawned Tokio task** (`tokio::spawn`) to avoid blocking the main handler:
 
 ```rust
-tokio::spawn(async move {
-    if let Err(e) = forward_to_sip_hook(&state, &event, &body_json).await {
-        debug!("Webhook forwarding skipped or failed: {}", e);
+// Short-circuit: Only spawn forwarding task if SIP config exists and has hooks
+if let Some(sip_config) = &state.config.sip {
+    if !sip_config.hooks.is_empty() {
+        tokio::spawn(async move {
+            if let Err(e) = forward_to_sip_hook(&state, &sip_config, &event, &body_json).await {
+                debug!("Webhook forwarding failed: {}", e);
+            }
+        });
     }
-});
+}
 ```
 
 **Benefits:**
@@ -653,6 +658,15 @@ tokio::spawn(async move {
 - Downstream webhook forwarding happens asynchronously
 - Slow or failing downstream hooks don't delay LiveKit retries
 - Multiple hooks can be called concurrently if needed (future enhancement)
+
+**Short-Circuit Behavior:**
+
+When `config.sip` is `None` or the hooks list is empty, the forwarding task is **never spawned**. This ensures:
+
+- Pure non-SIP deployments don't incur unnecessary background tasks
+- No "No SIP configuration" debug logs clutter the output
+- Zero overhead for users who haven't configured SIP
+- The webhook endpoint remains fully functional for all LiveKit events
 
 ### Testing Webhook Forwarding
 

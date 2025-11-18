@@ -10,6 +10,13 @@ SIP configuration is **optional** and can be provided via YAML configuration fil
 2. **IP Filtering**: Only connections from specified IP addresses/CIDRs are allowed
 3. **Event Routing**: LiveKit webhook events are forwarded to downstream services based on host matching
 
+**Important**: SIP features are **fully opt-in**. When the `sip` configuration block is absent (`None`), all SIP-related code paths are completely skipped:
+
+- No SIP trunk/dispatch provisioning during startup
+- No webhook event forwarding to SIP hooks
+- No unnecessary background tasks or debug logs
+- The LiveKit webhook endpoint remains fully functional for non-SIP use cases
+
 ## Configuration Methods
 
 ### YAML Configuration

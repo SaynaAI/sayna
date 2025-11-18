@@ -77,15 +77,30 @@ pub async fn handle_livekit_webhook(
     log_webhook_event(&event);
 
     // Step 6: Forward event to SIP-specific webhook if applicable (non-blocking)
-    // We spawn this in the background to avoid delaying the response to LiveKit
-    let state_clone = state.clone();
-    let body_str_owned = body_str.to_string();
-    let event_clone = event.clone();
-    tokio::spawn(async move {
-        if let Err(e) = forward_to_sip_hook(&state_clone, &event_clone, &body_str_owned).await {
-            debug!("Webhook forwarding skipped or failed: {}", e);
+    // Short-circuit: Only spawn forwarding task if SIP config exists and has hooks.
+    // This ensures pure non-SIP deployments don't incur unnecessary background tasks
+    // or noisy debug logs about missing configuration.
+    if let Some(sip_config) = &state.config.sip {
+        if !sip_config.hooks.is_empty() {
+            // We spawn this in the background to avoid delaying the response to LiveKit
+            let state_clone = state.clone();
+            let body_str_owned = body_str.to_string();
+            let event_clone = event.clone();
+            let sip_config_clone = sip_config.clone();
+            tokio::spawn(async move {
+                if let Err(e) = forward_to_sip_hook(
+                    &state_clone,
+                    &sip_config_clone,
+                    &event_clone,
+                    &body_str_owned,
+                )
+                .await
+                {
+                    debug!("Webhook forwarding failed: {}", e);
+                }
+            });
         }
-    });
+    }
 
     // Step 7: Respond quickly with success
     Ok(Json(json!({
@@ -200,26 +215,27 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
 /// Does not block the main webhook handler - errors are logged but not propagated.
 ///
 /// # Arguments
-/// * `state` - Application state containing SIP configuration and ReqManager instances
+/// * `state` - Application state containing ReqManager instances
+/// * `sip_config` - SIP configuration (must contain hooks). Caller ensures this is non-empty.
 /// * `event` - The LiveKit webhook event to forward
 /// * `body_json` - The original JSON body from LiveKit (forwarded as-is)
 ///
 /// # Returns
 /// * `Ok(())` if the event was successfully forwarded or no hook was configured
 /// * `Err(String)` if forwarding failed (for logging purposes)
+///
+/// # Panics
+/// This function assumes `sip_config` is provided and non-empty by the caller.
+/// It should never be called without first checking that SIP hooks exist.
 async fn forward_to_sip_hook(
     state: &Arc<AppState>,
+    sip_config: &crate::config::SipConfig,
     event: &WebhookEvent,
     body_json: &str,
 ) -> Result<(), String> {
-    // Step 1: Check if SIP config exists
-    let sip_config = state
-        .config
-        .sip
-        .as_ref()
-        .ok_or_else(|| "No SIP configuration".to_string())?;
-
+    // Step 1: Caller guarantees sip_config has hooks, but we verify for safety
     if sip_config.hooks.is_empty() {
+        // This should never happen due to caller guard, but we handle it gracefully
         return Err("No SIP hooks configured".to_string());
     }
 

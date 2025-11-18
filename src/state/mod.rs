@@ -102,7 +102,9 @@ impl AppState {
             None
         };
 
-        // Initialize LiveKit SIP handler and provision trunk/dispatch if configured
+        // Initialize LiveKit SIP handler and provision trunk/dispatch if configured.
+        // SIP features are fully opt-in: when config.sip is None, all SIP-related
+        // code paths are skipped (provisioning, webhook forwarding, etc.).
         let livekit_sip_handler = if let Some(sip_config) = &config.sip {
             // Check if we have all required credentials for SIP provisioning
             if let (Some(api_key), Some(api_secret)) =
