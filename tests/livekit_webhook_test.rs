@@ -4,11 +4,11 @@ use axum::{
 };
 use bytes::Bytes;
 use livekit_api::access_token::AccessToken;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower::util::ServiceExt;
 
-use sayna::{routes, state::AppState, ServerConfig};
+use sayna::{ServerConfig, routes, state::AppState};
 
 /// Helper to create a minimal test configuration with LiveKit credentials
 fn create_test_config_with_livekit() -> ServerConfig {
@@ -69,11 +69,7 @@ fn create_test_config_without_livekit() -> ServerConfig {
 /// 2. Compute SHA256 hash of payload
 /// 3. Base64-encode the hash
 /// 4. Sign with AccessToken using api_key and api_secret
-fn create_signed_webhook(
-    api_key: &str,
-    api_secret: &str,
-    payload: Value,
-) -> (String, String) {
+fn create_signed_webhook(api_key: &str, api_secret: &str, payload: Value) -> (String, String) {
     // Convert payload to string
     let payload_str = payload.to_string();
 
@@ -489,9 +485,10 @@ mod unit_tests {
     fn test_extract_sip_attributes_with_sip_keys() {
         // Arrange: Create participant with SIP attributes
         let mut participant = ParticipantInfo::default();
-        participant
-            .attributes
-            .insert("sip.trunkPhoneNumber".to_string(), "+1234567890".to_string());
+        participant.attributes.insert(
+            "sip.trunkPhoneNumber".to_string(),
+            "+1234567890".to_string(),
+        );
         participant.attributes.insert(
             "sip.fromHeader".to_string(),
             "User <sip:user@example.com>".to_string(),

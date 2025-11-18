@@ -46,3 +46,15 @@ auth:
   signing_key_path: "/path/to/key.pem"        # ENV: AUTH_SIGNING_KEY_PATH
   api_secret: "your-api-secret"               # ENV: AUTH_API_SECRET
   timeout_seconds: 5                          # ENV: AUTH_TIMEOUT_SECONDS
+
+# SIP configuration (optional)
+sip:
+  room_prefix: "sip-"                         # ENV: SIP_ROOM_PREFIX
+  allowed_addresses:                          # ENV: SIP_ALLOWED_ADDRESSES (comma-separated)
+    - "192.168.1.0/24"
+    - "10.0.0.1"
+  hooks:                                      # ENV: SIP_HOOKS_JSON (JSON array)
+    - host: "example.com"
+      url: "https://webhook.example.com/events"
+    - host: "another.com"
+      url: "https://webhook2.example.com/events"

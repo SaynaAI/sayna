@@ -40,6 +40,15 @@ use std::path::PathBuf;
 ///   signing_key_path: "/path/to/key.pem"
 ///   api_secret: "your-api-secret"
 ///   timeout_seconds: 5
+///
+/// sip:
+///   room_prefix: "sip-"
+///   allowed_addresses:
+///     - "192.168.1.0/24"
+///     - "10.0.0.1"
+///   hooks:
+///     - host: "example.com"
+///       url: "https://webhook.example.com/events"
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -50,6 +59,7 @@ pub struct YamlConfig {
     pub recording: Option<RecordingYaml>,
     pub cache: Option<CacheYaml>,
     pub auth: Option<AuthYaml>,
+    pub sip: Option<SipYaml>,
 }
 
 /// Server configuration from YAML
@@ -106,6 +116,24 @@ pub struct AuthYaml {
     pub signing_key_path: Option<String>,
     pub api_secret: Option<String>,
     pub timeout_seconds: Option<u64>,
+}
+
+/// SIP configuration from YAML
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SipYaml {
+    pub room_prefix: Option<String>,
+    #[serde(default)]
+    pub allowed_addresses: Vec<String>,
+    #[serde(default)]
+    pub hooks: Vec<SipHookYaml>,
+}
+
+/// SIP webhook hook configuration from YAML
+#[derive(Debug, Clone, Deserialize)]
+pub struct SipHookYaml {
+    pub host: String,
+    pub url: String,
 }
 
 impl YamlConfig {
@@ -286,5 +314,66 @@ server:
                 .to_string()
                 .contains("Failed to parse YAML")
         );
+    }
+
+    #[test]
+    fn test_yaml_config_with_sip() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+    - "10.0.0.1"
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.example.com/events"
+    - host: "another.com"
+      url: "https://webhook2.example.com/events"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.room_prefix, Some("sip-".to_string()));
+        assert_eq!(sip.allowed_addresses.len(), 2);
+        assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
+        assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
+        assert_eq!(sip.hooks.len(), 2);
+        assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+        assert_eq!(sip.hooks[1].host, "another.com");
+        assert_eq!(sip.hooks[1].url, "https://webhook2.example.com/events");
+    }
+
+    #[test]
+    fn test_yaml_config_sip_empty_arrays() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  allowed_addresses: []
+  hooks: []
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.room_prefix, Some("sip-".to_string()));
+        assert!(sip.allowed_addresses.is_empty());
+        assert!(sip.hooks.is_empty());
+    }
+
+    #[test]
+    fn test_yaml_config_sip_missing_fields() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.room_prefix, Some("sip-".to_string()));
+        assert!(sip.allowed_addresses.is_empty()); // default to empty vec
+        assert!(sip.hooks.is_empty()); // default to empty vec
     }
 }

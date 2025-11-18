@@ -1,6 +1,6 @@
 use axum::{Router, routing::post};
-use tower_http::trace::TraceLayer;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
 
 use crate::handlers::livekit_webhook;
 use crate::state::AppState;
@@ -12,6 +12,9 @@ use crate::state::AppState;
 /// This router should be merged without the auth middleware.
 pub fn create_webhook_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/livekit/webhook", post(livekit_webhook::handle_livekit_webhook))
+        .route(
+            "/livekit/webhook",
+            post(livekit_webhook::handle_livekit_webhook),
+        )
         .layer(TraceLayer::new_for_http())
 }

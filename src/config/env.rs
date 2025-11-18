@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use super::ServerConfig;
+use super::sip::{SipConfig, SipHookConfig};
 use super::utils::parse_bool;
 use super::validation::{validate_auth_required, validate_jwt_auth};
 
@@ -80,6 +81,9 @@ impl ServerConfig {
             &auth_api_secret,
         )?;
 
+        // SIP configuration
+        let sip = parse_sip_env()?;
+
         Ok(ServerConfig {
             host,
             port,
@@ -101,8 +105,81 @@ impl ServerConfig {
             auth_api_secret,
             auth_timeout_seconds,
             auth_required,
+            sip,
         })
     }
+}
+
+/// Parse SIP configuration from environment variables
+///
+/// Reads SIP configuration from the following environment variables:
+/// - SIP_ROOM_PREFIX: Room prefix for SIP calls
+/// - SIP_ALLOWED_ADDRESSES: Comma-separated list of IP addresses/CIDRs
+/// - SIP_HOOKS_JSON: JSON array of hook objects with host/url fields
+///
+/// # Returns
+/// * `Result<Option<SipConfig>, Box<dyn std::error::Error>>` - The SIP config or None
+///
+/// # Errors
+/// Returns an error if:
+/// - SIP_HOOKS_JSON is invalid JSON
+/// - Hook objects are missing required fields
+fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
+    let room_prefix = env::var("SIP_ROOM_PREFIX").ok();
+    let allowed_addresses_str = env::var("SIP_ALLOWED_ADDRESSES").ok();
+    let hooks_json = env::var("SIP_HOOKS_JSON").ok();
+
+    // If none of the SIP env vars are set, return None
+    if room_prefix.is_none() && allowed_addresses_str.is_none() && hooks_json.is_none() {
+        return Ok(None);
+    }
+
+    // Parse allowed addresses (comma-separated)
+    let allowed_addresses = if let Some(addresses_str) = allowed_addresses_str {
+        addresses_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // Parse hooks JSON
+    let hooks = if let Some(json_str) = hooks_json {
+        parse_sip_hooks_json(&json_str)?
+    } else {
+        vec![]
+    };
+
+    // Room prefix is required if any SIP config is present
+    let room_prefix = room_prefix.ok_or(
+        "SIP_ROOM_PREFIX is required when SIP configuration is provided via environment variables",
+    )?;
+
+    Ok(Some(SipConfig::new(room_prefix, allowed_addresses, hooks)))
+}
+
+/// Parse SIP hooks from JSON string
+///
+/// Expected format: [{"host": "example.com", "url": "https://..."}]
+fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct HookJson {
+        host: String,
+        url: String,
+    }
+
+    let hooks: Vec<HookJson> = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid SIP_HOOKS_JSON format: {e}"))?;
+
+    Ok(hooks
+        .into_iter()
+        .map(|h| SipHookConfig {
+            host: h.host,
+            url: h.url,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -122,6 +199,9 @@ mod tests {
             env::remove_var("AUTH_TIMEOUT_SECONDS");
             env::remove_var("HOST");
             env::remove_var("PORT");
+            env::remove_var("SIP_ROOM_PREFIX");
+            env::remove_var("SIP_ALLOWED_ADDRESSES");
+            env::remove_var("SIP_HOOKS_JSON");
         }
     }
 
@@ -439,6 +519,135 @@ mod tests {
             Some("http://auth.example.com".to_string())
         );
         assert_eq!(config.auth_signing_key_path, Some(key_path));
+
+        cleanup_env_vars();
+    }
+
+    // SIP configuration tests
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_full_config() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24, 10.0.0.1");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events"}]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.room_prefix, "sip-");
+        assert_eq!(sip.allowed_addresses.len(), 2);
+        assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
+        assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_no_config() {
+        cleanup_env_vars();
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert!(config.sip.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_missing_room_prefix() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("SIP_ROOM_PREFIX is required")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_invalid_hooks_json() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_HOOKS_JSON", "invalid json");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid SIP_HOOKS_JSON")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_multiple_hooks() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[
+                    {"host": "example.com", "url": "https://webhook1.example.com/events"},
+                    {"host": "another.com", "url": "https://webhook2.example.com/events"}
+                ]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hooks.len(), 2);
+        assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[1].host, "another.com");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_addresses_with_whitespace() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "  192.168.1.0/24 , 10.0.0.1  ");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
+        assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
 
         cleanup_env_vars();
     }

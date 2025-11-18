@@ -33,9 +33,12 @@ use std::path::PathBuf;
 
 mod env;
 mod merge;
+mod sip;
 mod utils;
 mod validation;
 mod yaml;
+
+pub use sip::{SipConfig, SipHookConfig};
 
 /// Server configuration
 ///
@@ -46,6 +49,7 @@ mod yaml;
 /// - Recording configuration (S3)
 /// - Cache settings
 /// - Authentication settings
+/// - SIP configuration
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     // Server settings
@@ -79,6 +83,9 @@ pub struct ServerConfig {
     pub auth_api_secret: Option<String>,
     pub auth_timeout_seconds: u64,
     pub auth_required: bool,
+
+    // SIP configuration (optional)
+    pub sip: Option<SipConfig>,
 }
 
 impl ServerConfig {
@@ -141,6 +148,7 @@ impl ServerConfig {
             &config.auth_signing_key_path,
             &config.auth_api_secret,
         )?;
+        validation::validate_sip_config(&config.sip)?;
 
         Ok(config)
     }
@@ -241,6 +249,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = config.get_api_key("deepgram");
@@ -271,6 +280,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = config.get_api_key("elevenlabs");
@@ -301,6 +311,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = config.get_api_key("deepgram");
@@ -334,6 +345,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = config.get_api_key("unsupported_provider");
@@ -367,6 +379,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         // Test uppercase
@@ -406,6 +419,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         assert!(config_with_jwt.has_jwt_auth());
@@ -432,6 +446,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         assert!(!config_without_jwt.has_jwt_auth());
@@ -460,6 +475,7 @@ mod tests {
             auth_api_secret: Some("my-secret-token".to_string()),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         assert!(config_with_api_secret.has_api_secret_auth());
@@ -486,6 +502,7 @@ mod tests {
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         assert!(!config_without_api_secret.has_api_secret_auth());

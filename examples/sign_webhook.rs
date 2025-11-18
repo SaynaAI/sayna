@@ -5,8 +5,7 @@ use sha2::{Digest, Sha256};
 
 fn main() {
     let api_key = std::env::var("LIVEKIT_API_KEY").unwrap_or("test-api-key".to_string());
-    let api_secret =
-        std::env::var("LIVEKIT_API_SECRET").unwrap_or("test-api-secret".to_string());
+    let api_secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or("test-api-secret".to_string());
 
     // Sample payload with SIP attributes
     let payload = json!({

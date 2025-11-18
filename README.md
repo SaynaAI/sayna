@@ -314,6 +314,27 @@ docker run -p 3001:3001 --env-file .env sayna
 **Required when `AUTH_REQUIRED=true`
 ***Required for LiveKit webhook validation and token generation features
 
+### SIP Configuration (Optional)
+
+Sayna supports first-class SIP configuration for managing SIP-specific settings. See [docs/sip_config.md](docs/sip_config.md) for detailed documentation.
+
+**YAML Configuration:**
+```yaml
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+    - "10.0.0.1"
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.example.com/events"
+```
+
+**Environment Variables:**
+- `SIP_ROOM_PREFIX`: Room name prefix for SIP calls (required if SIP enabled)
+- `SIP_ALLOWED_ADDRESSES`: Comma-separated IP addresses/CIDRs
+- `SIP_HOOKS_JSON`: JSON array of webhook configurations
+
 ## Performance Considerations
 
 - **DeepFilterNet**: CPU-intensive processing uses thread pooling

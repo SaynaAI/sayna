@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use super::ServerConfig;
+use super::sip::{SipConfig, SipHookConfig};
 use super::utils::parse_bool;
 use super::yaml::YamlConfig;
 
@@ -168,6 +169,9 @@ pub fn merge_config(
     }
     .unwrap_or(false);
 
+    // SIP configuration (merge YAML and ENV)
+    let sip = merge_sip_config(yaml.sip.as_ref())?;
+
     Ok(ServerConfig {
         host,
         port,
@@ -189,11 +193,94 @@ pub fn merge_config(
         auth_api_secret,
         auth_timeout_seconds,
         auth_required,
+        sip,
     })
+}
+
+/// Merge SIP configuration from YAML and environment variables
+///
+/// Priority: ENV > YAML
+fn merge_sip_config(
+    yaml_sip: Option<&super::yaml::SipYaml>,
+) -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
+    // Check if any SIP env vars are set
+    let env_room_prefix = env::var("SIP_ROOM_PREFIX").ok();
+    let env_allowed_addresses = env::var("SIP_ALLOWED_ADDRESSES").ok();
+    let env_hooks_json = env::var("SIP_HOOKS_JSON").ok();
+
+    let has_env_sip =
+        env_room_prefix.is_some() || env_allowed_addresses.is_some() || env_hooks_json.is_some();
+
+    // If no YAML and no ENV, return None
+    if yaml_sip.is_none() && !has_env_sip {
+        return Ok(None);
+    }
+
+    // Merge room_prefix (ENV > YAML)
+    let room_prefix = env_room_prefix
+        .or_else(|| yaml_sip.and_then(|s| s.room_prefix.clone()))
+        .ok_or("SIP room_prefix is required when SIP configuration is present")?;
+
+    // Merge allowed_addresses (ENV > YAML)
+    let allowed_addresses = if let Some(addresses_str) = env_allowed_addresses {
+        // Parse from ENV (comma-separated)
+        addresses_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        // Use YAML addresses
+        yaml_sip
+            .map(|s| s.allowed_addresses.clone())
+            .unwrap_or_default()
+    };
+
+    // Merge hooks (ENV > YAML)
+    let hooks = if let Some(hooks_json) = env_hooks_json {
+        // Parse from ENV JSON
+        parse_sip_hooks_json(&hooks_json)?
+    } else {
+        // Convert from YAML hooks
+        yaml_sip
+            .map(|s| {
+                s.hooks
+                    .iter()
+                    .map(|h| SipHookConfig {
+                        host: h.host.clone(),
+                        url: h.url.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    Ok(Some(SipConfig::new(room_prefix, allowed_addresses, hooks)))
+}
+
+/// Parse SIP hooks from JSON string
+fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct HookJson {
+        host: String,
+        url: String,
+    }
+
+    let hooks: Vec<HookJson> = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid SIP_HOOKS_JSON format: {e}"))?;
+
+    Ok(hooks
+        .into_iter()
+        .map(|h| SipHookConfig {
+            host: h.host,
+            url: h.url,
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::yaml::SipHookYaml;
     use super::*;
     use serial_test::serial;
     use std::fs;
@@ -215,6 +302,9 @@ mod tests {
             env::remove_var("AUTH_SIGNING_KEY_PATH");
             env::remove_var("AUTH_API_SECRET");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
+            env::remove_var("SIP_ROOM_PREFIX");
+            env::remove_var("SIP_ALLOWED_ADDRESSES");
+            env::remove_var("SIP_HOOKS_JSON");
         }
     }
 
@@ -339,6 +429,130 @@ mod tests {
         ); // env overrides
         assert_eq!(config.auth_signing_key_path, Some(key_path)); // from yaml
         assert_eq!(config.auth_timeout_seconds, 10); // from yaml
+
+        cleanup_env_vars();
+    }
+
+    // SIP configuration merge tests
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_yaml_only() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![SipHookYaml {
+                    host: "example.com".to_string(),
+                    url: "https://webhook.example.com/events".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.room_prefix, "sip-");
+        assert_eq!(sip.allowed_addresses.len(), 1);
+        assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].host, "example.com");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_env_overrides_yaml() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("yaml-prefix-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "env-prefix-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "10.0.0.1, 10.0.0.2");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.room_prefix, "env-prefix-"); // ENV overrides YAML
+        assert_eq!(sip.allowed_addresses.len(), 2); // ENV overrides YAML
+        assert_eq!(sip.allowed_addresses[0], "10.0.0.1");
+        assert_eq!(sip.allowed_addresses[1], "10.0.0.2");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_env_only() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events"}]"#,
+            );
+        }
+
+        let config = merge_config(None).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.room_prefix, "sip-");
+        assert_eq!(sip.allowed_addresses.len(), 1);
+        assert_eq!(sip.hooks.len(), 1);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_no_config() {
+        cleanup_env_vars();
+
+        let config = merge_config(None).unwrap();
+        assert!(config.sip.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_partial_yaml_with_env() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec![],
+                hooks: vec![],
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_ALLOWED_ADDRESSES", "10.0.0.1");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.room_prefix, "sip-"); // from YAML
+        assert_eq!(sip.allowed_addresses.len(), 1); // from ENV
+        assert_eq!(sip.allowed_addresses[0], "10.0.0.1");
 
         cleanup_env_vars();
     }
