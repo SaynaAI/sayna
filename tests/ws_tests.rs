@@ -31,6 +31,7 @@ async fn test_websocket_voice_config() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create application state
@@ -189,6 +190,7 @@ async fn test_websocket_invalid_message() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create application state

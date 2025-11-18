@@ -34,7 +34,6 @@
 //!
 //!     let dispatch_config = DispatchConfig {
 //!         dispatch_name: "local-dispatch".to_string(),
-//!         agent_name: "ai".to_string(),
 //!         room_prefix: "call".to_string(),
 //!         max_participants: 3,
 //!     };
@@ -70,8 +69,6 @@ pub struct TrunkConfig {
 pub struct DispatchConfig {
     /// Name of the dispatch rule
     pub dispatch_name: String,
-    /// Name of the agent to dispatch
-    pub agent_name: String,
     /// Prefix for room names
     pub room_prefix: String,
     /// Maximum participants in the room
@@ -155,7 +152,6 @@ impl LiveKitSipHandler {
     ///
     /// let dispatch_config = DispatchConfig {
     ///     dispatch_name: "local-dispatch".to_string(),
-    ///     agent_name: "ai".to_string(),
     ///     room_prefix: "call".to_string(),
     ///     max_participants: 3,
     /// };
@@ -218,9 +214,9 @@ impl LiveKitSipHandler {
 
         if !rule_exists {
             // Note: The livekit-api crate doesn't currently support setting room_config
-            // through CreateSIPDispatchRuleOptions. The room configuration (max_participants
-            // and agent dispatch) needs to be set through the LiveKit server's admin API
-            // or dashboard after creating the dispatch rule.
+            // through CreateSIPDispatchRuleOptions. The max_participants setting
+            // needs to be set through the LiveKit server's admin API or dashboard
+            // after creating the dispatch rule.
             //
             // TODO: Extend the livekit-api crate to support room_config in dispatch rules,
             // or use a lower-level twirp client request to set it during creation.
@@ -247,8 +243,8 @@ impl LiveKitSipHandler {
                     ))
                 })?;
 
-            // Note: Agent dispatch (dispatch_config.agent_name and max_participants)
-            // must be configured separately through the LiveKit dashboard or API
+            // Note: max_participants must be configured separately through
+            // the LiveKit dashboard or API
         }
 
         Ok(())
@@ -344,13 +340,11 @@ mod tests {
     fn test_dispatch_config_creation() {
         let config = DispatchConfig {
             dispatch_name: "test-dispatch".to_string(),
-            agent_name: "ai".to_string(),
             room_prefix: "call".to_string(),
             max_participants: 3,
         };
 
         assert_eq!(config.dispatch_name, "test-dispatch");
-        assert_eq!(config.agent_name, "ai");
         assert_eq!(config.room_prefix, "call");
         assert_eq!(config.max_participants, 3);
     }
@@ -390,7 +384,6 @@ mod tests {
 
         let dispatch_config = DispatchConfig {
             dispatch_name: "test-dispatch".to_string(),
-            agent_name: "ai".to_string(),
             room_prefix: "call".to_string(),
             max_participants: 3,
         };

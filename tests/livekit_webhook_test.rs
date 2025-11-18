@@ -33,6 +33,7 @@ fn create_test_config_with_livekit() -> ServerConfig {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn create_test_config_without_livekit() -> ServerConfig {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     }
 }
 

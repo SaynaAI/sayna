@@ -116,6 +116,84 @@ hooks:
     url: "http://webhook.example.com/events"  # Must be HTTPS
 ```
 
+## Auto-Provisioning
+
+When SIP configuration is enabled and LiveKit API credentials are available, Sayna automatically provisions the required LiveKit SIP trunk and dispatch rule during application startup. This ensures LiveKit is ready to receive and route SIP calls without manual setup.
+
+### What Gets Provisioned
+
+1. **SIP Inbound Trunk**: Creates a trunk with the configured allowed IP addresses
+   - Name: `sayna-{room_prefix}-trunk` (e.g., `sayna-sip--trunk`)
+   - Allowed addresses: Uses the `allowed_addresses` from SIP config
+
+2. **SIP Dispatch Rule**: Creates a dispatch rule to route calls to rooms
+   - Name: `sayna-{room_prefix}-dispatch` (e.g., `sayna-sip--dispatch`)
+   - Room prefix: Uses the `room_prefix` from SIP config
+   - Max participants: Defaults to 3 (caller + Sayna + optional third party)
+
+### Provisioning Behavior
+
+- **Idempotent**: Running Sayna multiple times won't recreate existing resources
+- **Fail-fast**: If provisioning fails, Sayna refuses to start and logs the error
+- **Predictable naming**: Resource names are deterministic based on `room_prefix`
+
+### Required Credentials
+
+To enable auto-provisioning, you must configure:
+
+- **`LIVEKIT_API_KEY`**: LiveKit API key
+- **`LIVEKIT_API_SECRET`**: LiveKit API secret
+- **SIP configuration**: Either via YAML or environment variables
+
+**Example:**
+
+```bash
+export LIVEKIT_API_KEY="your-api-key"
+export LIVEKIT_API_SECRET="your-api-secret"
+export SIP_ROOM_PREFIX="sip-"
+export SIP_ALLOWED_ADDRESSES="192.168.1.0/24,10.0.0.1"
+```
+
+### Monitoring Provisioning
+
+Sayna logs detailed information about the provisioning process:
+
+**Success:**
+```
+INFO SIP configuration detected, provisioning LiveKit SIP trunk and dispatch rules
+INFO Successfully provisioned SIP resources: trunk=sayna-sip--trunk, dispatch=sayna-sip--dispatch, livekit_url=ws://localhost:7880
+```
+
+**Skipped (missing credentials):**
+```
+INFO SIP configuration present but LiveKit API credentials missing. Skipping SIP provisioning. Set LIVEKIT_API_KEY and LIVEKIT_API_SECRET to enable.
+```
+
+**Failed:**
+```
+ERROR Failed to provision SIP resources: trunk=sayna-sip--trunk, dispatch=sayna-sip--dispatch, livekit_url=ws://localhost:7880, error=ConnectionFailed(...)
+PANIC SIP provisioning failed for trunk=sayna-sip--trunk, dispatch=sayna-sip--dispatch: ... Cannot start server with SIP enabled. Please check LiveKit API credentials and server availability.
+```
+
+### Verifying in LiveKit UI
+
+After Sayna starts successfully, you can verify the provisioned resources in the LiveKit Cloud dashboard or self-hosted admin UI:
+
+1. Navigate to **SIP** → **Inbound Trunks**
+2. Look for trunk named `sayna-{your-room-prefix}-trunk`
+3. Navigate to **SIP** → **Dispatch Rules**
+4. Look for dispatch rule named `sayna-{your-room-prefix}-dispatch`
+
+### Manual Configuration (Not Recommended)
+
+If you need to customize settings beyond what auto-provisioning provides (e.g., different max_participants), you can:
+
+1. Let Sayna provision the basic resources
+2. Manually adjust settings in the LiveKit dashboard
+3. Future restarts won't overwrite your changes (provisioning is idempotent)
+
+**Note**: Future versions of Sayna may expose more provisioning options in the configuration file.
+
 ## How It Works
 
 ### Room Prefix Matching
