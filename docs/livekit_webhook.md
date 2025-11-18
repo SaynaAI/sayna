@@ -156,7 +156,7 @@ LiveKit interprets response codes as follows:
 
 5. **Successful processing**: Return `200 OK`
    ```json
-   {"status": "ok"}
+   {"status": "received"}
    ```
 
 ### Open Questions
@@ -372,36 +372,20 @@ Per `.cursor/rules/axum.mdc` and `.cursor/rules/rust.mdc`, use the `tracing` cra
 ```rust
 tracing::info!(
     event_id = %event.id,
-    event_type = %event.event,
-    room_name = ?event.room.as_ref().map(|r| &r.name),
-    participant_identity = ?event.participant.as_ref().map(|p| &p.identity),
+    event_name = %event.event,
+    room_name = event.room.as_ref().map(|r| r.name.as_str()),
+    participant_identity = event.participant.as_ref().map(|p| p.identity.as_str()),
+    participant_name = event.participant.as_ref().map(|p| p.name.as_str()),
     participant_kind = ?event.participant.as_ref().map(|p| p.kind),
-    "Received LiveKit webhook event"
+    sip_attributes = ?participant.map(extract_sip_attributes),
+    sip_domain = participant
+        .and_then(|p| p.attributes.get("sip.h.to"))
+        .and_then(|header| parse_sip_domain(header)),
+    "Received LiveKit webhook event (no side effects applied yet)"
 );
 ```
 
-**SIP Attributes (info level):**
-
-For events with `participant.kind == Kind::Sip`, log all SIP-related attributes:
-
-```rust
-if let Some(participant) = &event.participant {
-    if participant.kind == livekit_protocol::participant_info::Kind::Sip as i32 {
-        // Log SIP-specific attributes
-        for (key, value) in &participant.attributes {
-            if key.starts_with("sip.") {
-                tracing::info!(
-                    event_id = %event.id,
-                    participant_identity = %participant.identity,
-                    attribute_key = %key,
-                    attribute_value = %value,
-                    "SIP attribute"
-                );
-            }
-        }
-    }
-}
-```
+Instead of logging every SIP attribute individually, the implementation records a structured `HashMap` of keys that start with `sip.` along with the parsed SIP domain (if `sip.h.to` is present). This keeps logs readable while still preserving all SIP metadata for debugging.
 
 **Validation Failures (warn level):**
 ```rust
@@ -431,8 +415,8 @@ tracing::error!(
 - `participant.kind`: Participant type enum value (if present)
 
 #### Additionally Log for SIP Participants:
-- All `participant.attributes` entries where key starts with `sip.`
-- Common keys: `sip.callID`, `sip.trunkPhoneNumber`, `sip.phoneNumber`, `sip.fromUser`, `sip.toUser`
+- A structured map of all attributes whose key starts with `sip.` (recorded as `sip_attributes` in logs)
+- The parsed SIP domain derived from `sip.h.to` (recorded as `sip_domain`)
 
 #### Log Validation Failures:
 - Missing `Authorization` header
@@ -474,6 +458,8 @@ Sayna supports **automatic forwarding of LiveKit webhook events to downstream se
 4. **Look up hook configuration** for the extracted domain
 5. **Forward event** to the configured webhook URL asynchronously (non-blocking)
 6. **Return 200 OK** to LiveKit immediately (doesn't wait for downstream hook)
+
+> **Opt-in behavior:** if the `sip` configuration block is absent or contains zero hooks, Step 4 is skipped and no forwarding task is spawned. Non-SIP deployments therefore incur zero overhead from this feature.
 
 ### Configuration
 
@@ -595,22 +581,43 @@ INFO Successfully forwarded webhook to SIP hook
 **Failed Forwarding (warn level):**
 
 ```
-WARN Webhook forwarding returned non-2xx status
+WARN SIP forwarding failed: webhook returned non-2xx status
   event_id="evt_abc123"
-  domain="example.com"
-  hook_url="https://webhook.example.com/livekit-events"
+  room_name=Some("sip-room")
+  sip_domain="example.com"
   status=500
-  duration_ms=5003
   response_body="Internal Server Error: ..."
 ```
 
 **Skipped Forwarding (debug level):**
 
 ```
-DEBUG Webhook forwarding skipped or failed: No SIP configuration
-DEBUG Webhook forwarding skipped or failed: No participant in event
-DEBUG Webhook forwarding skipped or failed: No sip.h.to attribute
-DEBUG Webhook forwarding skipped or failed: No hook configured for domain: unknown.com
+DEBUG Skipping SIP forwarding: event has no participant
+  event_id="evt_room_finished"
+  event_type="room_finished"
+  room_name=Some("sip-room")
+
+DEBUG Skipping SIP forwarding: participant has no sip.h.to attribute
+  event_id="evt_participant_joined"
+  room_name=Some("test-room")
+```
+
+**Malformed SIP Header (info level):**
+
+```
+INFO Skipping SIP forwarding: malformed sip.h.to header (check upstream SIP gateway)
+  event_id="evt_abc123"
+  room_name=Some("sip-room")
+  sip_header="sip:broken@"
+```
+
+**Configuration Issues (warn level):**
+
+```
+WARN SIP forwarding failed: no webhook configured for domain (add to sip.hooks config)
+  event_id="evt_abc123"
+  room_name=Some("sip-room")
+  sip_domain="unknown.com"
 ```
 
 **ReqManager Creation (info level):**
@@ -634,6 +641,127 @@ Webhook forwarding is **non-blocking** and **best-effort**:
 7. **Non-2xx response**: Logged at warn level with status and body
 
 **Important**: All errors are logged but **do not affect the 200 OK response to LiveKit**. The main webhook handler always returns immediately to prevent LiveKit retries.
+
+### Troubleshooting SIP Forwarding
+
+This section helps operators diagnose and fix SIP webhook forwarding issues using log messages.
+
+#### Log Severity Levels and Actions
+
+**DEBUG Level** (expected, no action needed):
+- `Skipping SIP forwarding: event has no participant` - Normal for `room_finished` or other non-participant events
+- `Skipping SIP forwarding: participant has no sip.h.to attribute` - Normal for regular (non-SIP) participants
+
+**INFO Level** (upstream issue, not our fault):
+- `Skipping SIP forwarding: malformed sip.h.to header` - The SIP gateway sent an invalid SIP URI
+  - **Action**: Check your SIP trunk provider's configuration
+  - **Example**: Header value is logged for debugging upstream issues
+
+**WARN Level** (requires operator attention):
+- `SIP forwarding failed: no webhook configured for domain` - Missing hook configuration
+  - **Action**: Add the domain to `sip.hooks` in your config file
+  - **Example**: If you see `sip_domain="customer.example.com"`, add:
+    ```yaml
+    sip:
+      hooks:
+        - host: "customer.example.com"
+          url: "https://webhook.customer.example.com/livekit-events"
+    ```
+
+- `SIP forwarding failed: HTTP request error` - Network/connectivity issue
+  - **Action**: Check DNS, firewall rules, and webhook endpoint availability
+  - **Common causes**: Timeout, connection refused, DNS lookup failed
+  - **Debug steps**:
+    1. Verify the webhook URL is accessible: `curl -X POST <hook_url>`
+    2. Check DNS resolution: `dig <domain>`
+    3. Check firewall rules for outbound HTTPS
+
+- `SIP forwarding failed: webhook returned non-2xx status` - Downstream hook rejected the request
+  - **Action**: Check the webhook endpoint logs for errors
+  - **Example**: If `status=500`, the downstream service has an internal error
+  - **Debug steps**:
+    1. Check `response_body` field for error details
+    2. Review webhook endpoint logs
+    3. Verify the endpoint can handle LiveKit's JSON schema
+
+- `SIP forwarding failed: HTTP client error` - ReqManager pool exhaustion or configuration error
+  - **Action**: Check server resource limits and connection pool settings
+  - **Rare**: Usually indicates high load or misconfiguration
+
+#### Common Scenarios
+
+**Scenario 1: "No webhook configured for domain: unknown.example.com"**
+```
+WARN SIP forwarding failed: no webhook configured for domain (add to sip.hooks config)
+  event_id="evt_abc123"
+  sip_domain="unknown.example.com"
+```
+**Solution**: Add `unknown.example.com` to your SIP hooks configuration:
+```yaml
+sip:
+  hooks:
+    - host: "unknown.example.com"
+      url: "https://webhook.unknown.example.com/events"
+```
+
+**Scenario 2: "malformed sip.h.to header"**
+```
+INFO Skipping SIP forwarding: malformed sip.h.to header (check upstream SIP gateway)
+  sip_header="sip:broken@"
+```
+**Solution**: This indicates a bug in your SIP trunk provider's header formatting. Contact your SIP provider with the logged `sip_header` value.
+
+**Scenario 3: "HTTP request error: connection timeout"**
+```
+WARN SIP forwarding failed: HTTP request error (check network/DNS/webhook endpoint)
+  sip_domain="example.com"
+  error="connection timeout after 5s"
+```
+**Solution**: The webhook endpoint is unreachable or responding slowly:
+1. Test connectivity: `curl -m 5 https://webhook.example.com/events`
+2. Check webhook endpoint health/uptime
+3. Verify firewall rules allow outbound HTTPS from Sayna server
+
+**Scenario 4: "webhook returned non-2xx status: 503"**
+```
+WARN SIP forwarding failed: webhook returned non-2xx status
+  sip_domain="example.com"
+  status=503
+  response_body="Service temporarily unavailable"
+```
+**Solution**: The downstream webhook is having issues:
+1. Check webhook service logs for errors
+2. Verify webhook service is running and healthy
+3. Wait for webhook service to recover (Sayna will retry on next event)
+
+#### Searchable Log Patterns
+
+Use these patterns with log aggregation tools (e.g., grep, Splunk, Datadog):
+
+- **All SIP forwarding failures**: `grep "SIP forwarding failed" logs.txt`
+- **Missing hook configs**: `grep "no webhook configured for domain" logs.txt`
+- **HTTP errors by domain**: `grep "sip_domain=\"example.com\"" logs.txt | grep "WARN"`
+- **Malformed SIP headers**: `grep "malformed sip.h.to header" logs.txt`
+- **Successful forwards**: `grep "Successfully forwarded webhook to SIP hook" logs.txt`
+
+#### Metrics and Alerting Recommendations
+
+Set up alerts for these log patterns to detect issues proactively:
+
+1. **Alert on missing hook configs** (WARN level):
+   - Pattern: `"no webhook configured for domain"`
+   - Severity: Medium
+   - Action: Add missing domain to configuration
+
+2. **Alert on HTTP failures** (WARN level):
+   - Pattern: `"HTTP request error"` or `"webhook returned non-2xx"`
+   - Severity: High
+   - Action: Check webhook endpoint health
+
+3. **Monitor successful forwarding rate** (INFO level):
+   - Pattern: `"Successfully forwarded webhook to SIP hook"`
+   - Metric: Count per minute/hour
+   - Alert: If rate drops to zero for extended period
 
 ### Background Task Execution
 

@@ -547,7 +547,7 @@ mod unit_tests {
     use super::*;
     use livekit_api::webhooks::WebhookError;
     use livekit_protocol::ParticipantInfo;
-    use sayna::handlers::livekit_webhook::{extract_sip_attributes, webhook_error_to_status};
+    use sayna::handlers::livekit_webhook::{extract_sip_attributes, webhook_error_to_status, SipForwardingError};
 
     #[test]
     fn test_extract_sip_attributes_with_sip_keys() {
@@ -734,5 +734,175 @@ mod unit_tests {
         use sayna::handlers::livekit_webhook::parse_sip_domain;
 
         assert_eq!(parse_sip_domain("not-a-sip-uri"), None);
+    }
+
+    // ========================================================================
+    // Tests for SipForwardingError logging and classification
+    // ========================================================================
+
+    #[test]
+    fn test_sip_forwarding_error_display() {
+        // Test that error messages are clear and actionable
+        let err = SipForwardingError::NoParticipant {
+            event_type: "room_finished".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "No participant in event (event_type=room_finished)"
+        );
+
+        let err = SipForwardingError::MissingSipHeader;
+        assert_eq!(err.to_string(), "No sip.h.to attribute in participant");
+
+        let err = SipForwardingError::MalformedSipHeader {
+            header: "invalid-header".to_string(),
+        };
+        assert_eq!(err.to_string(), "Malformed SIP header: invalid-header");
+
+        let err = SipForwardingError::NoHookConfigured {
+            domain: "example.com".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "No hook configured for domain: example.com"
+        );
+
+        let err = SipForwardingError::HttpClientError {
+            error: "connection timeout".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Failed to acquire HTTP client: connection timeout"
+        );
+
+        let err = SipForwardingError::HttpRequestError {
+            domain: "example.com".to_string(),
+            error: "DNS lookup failed".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "HTTP request failed for domain example.com: DNS lookup failed"
+        );
+
+        let err = SipForwardingError::HookFailedResponse {
+            domain: "example.com".to_string(),
+            status: 500,
+            body: "Internal Server Error".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Hook returned status 500 for domain example.com: Internal Server Error"
+        );
+    }
+
+    #[test]
+    fn test_sip_forwarding_error_severity_classification() {
+        // This test documents the expected log severity for each error type.
+        // In a real production environment, these would be tested with a tracing subscriber
+        // that captures log events and verifies their levels.
+
+        // Debug-level errors (expected, not actionable)
+        let debug_errors = vec![
+            SipForwardingError::NoParticipant {
+                event_type: "room_finished".to_string(),
+            },
+            SipForwardingError::MissingSipHeader,
+        ];
+
+        for err in debug_errors {
+            // These errors should log at DEBUG level
+            // In production, use tracing-test or similar to verify
+            err.log_with_context("test-event-123", Some("test-room"));
+        }
+
+        // Info-level errors (upstream issues, not our fault)
+        let info_errors = vec![SipForwardingError::MalformedSipHeader {
+            header: "malformed".to_string(),
+        }];
+
+        for err in info_errors {
+            // These errors should log at INFO level
+            err.log_with_context("test-event-456", Some("test-room"));
+        }
+
+        // Warn-level errors (operator action needed)
+        let warn_errors = vec![
+            SipForwardingError::NoHookConfigured {
+                domain: "example.com".to_string(),
+            },
+            SipForwardingError::HttpClientError {
+                error: "timeout".to_string(),
+            },
+            SipForwardingError::HttpRequestError {
+                domain: "example.com".to_string(),
+                error: "connection refused".to_string(),
+            },
+            SipForwardingError::HookFailedResponse {
+                domain: "example.com".to_string(),
+                status: 500,
+                body: "error".to_string(),
+            },
+        ];
+
+        for err in warn_errors {
+            // These errors should log at WARN level
+            err.log_with_context("test-event-789", Some("test-room"));
+        }
+    }
+
+    #[test]
+    fn test_no_hook_configured_error_includes_domain() {
+        // Verify that NoHookConfigured error includes the parsed domain
+        // so operators know exactly which domain needs configuration
+        let err = SipForwardingError::NoHookConfigured {
+            domain: "unknown.example.com".to_string(),
+        };
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("unknown.example.com"));
+        assert!(err_msg.contains("No hook configured"));
+    }
+
+    #[test]
+    fn test_malformed_sip_header_error_includes_header_value() {
+        // Verify that MalformedSipHeader includes the raw header
+        // so operators can debug upstream SIP gateway issues
+        let raw_header = "sip:broken@";
+        let err = SipForwardingError::MalformedSipHeader {
+            header: raw_header.to_string(),
+        };
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains(raw_header));
+        assert!(err_msg.contains("Malformed SIP header"));
+    }
+
+    #[test]
+    fn test_http_request_error_includes_domain_and_error() {
+        // Verify that HTTP errors include both domain and underlying error
+        // for effective troubleshooting
+        let err = SipForwardingError::HttpRequestError {
+            domain: "webhook.example.com".to_string(),
+            error: "connection timeout after 5s".to_string(),
+        };
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("webhook.example.com"));
+        assert!(err_msg.contains("connection timeout after 5s"));
+    }
+
+    #[test]
+    fn test_hook_failed_response_includes_all_context() {
+        // Verify that non-2xx responses include domain, status, and response body
+        let err = SipForwardingError::HookFailedResponse {
+            domain: "webhook.example.com".to_string(),
+            status: 503,
+            body: "Service temporarily unavailable".to_string(),
+        };
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("webhook.example.com"));
+        assert!(err_msg.contains("503"));
+        assert!(err_msg.contains("Service temporarily unavailable"));
     }
 }

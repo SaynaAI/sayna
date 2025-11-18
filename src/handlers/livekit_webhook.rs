@@ -16,6 +16,125 @@ use tracing::{debug, error, info, warn};
 use crate::AppState;
 use crate::utils::req_manager::ReqManager;
 
+/// Categorizes SIP webhook forwarding failures by severity and expected action.
+///
+/// This enum enables structured, actionable logging for webhook forwarding failures.
+/// Each variant corresponds to a specific log level and troubleshooting action.
+#[derive(Debug, thiserror::Error)]
+pub enum SipForwardingError {
+    /// No participant in event (e.g., room_finished) - benign, not a SIP event
+    #[error("No participant in event (event_type={event_type})")]
+    NoParticipant { event_type: String },
+
+    /// Missing sip.h.to attribute - participant exists but isn't SIP, or malformed SIP metadata
+    #[error("No sip.h.to attribute in participant")]
+    MissingSipHeader,
+
+    /// Failed to parse SIP domain from header value - indicates upstream SIP gateway bug
+    #[error("Malformed SIP header: {header}")]
+    MalformedSipHeader { header: String },
+
+    /// No hook configured for this domain - operator needs to add webhook config
+    #[error("No hook configured for domain: {domain}")]
+    NoHookConfigured { domain: String },
+
+    /// Failed to create or acquire HTTP client from ReqManager pool
+    #[error("Failed to acquire HTTP client: {error}")]
+    HttpClientError { error: String },
+
+    /// HTTP request failed (network error, timeout, connection refused, etc.)
+    #[error("HTTP request failed for domain {domain}: {error}")]
+    HttpRequestError { domain: String, error: String },
+
+    /// Downstream hook returned non-2xx status code
+    #[error("Hook returned status {status} for domain {domain}: {body}")]
+    HookFailedResponse {
+        domain: String,
+        status: u16,
+        body: String,
+    },
+}
+
+impl SipForwardingError {
+    /// Logs this error with the appropriate severity level and structured context.
+    ///
+    /// Severity mapping:
+    /// - `debug`: NoParticipant, MissingSipHeader (expected for non-SIP events)
+    /// - `info`: MalformedSipHeader (upstream SIP gateway bug, not our fault)
+    /// - `warn`: NoHookConfigured, HttpClientError, HttpRequestError, HookFailedResponse (operator action needed)
+    pub fn log_with_context(&self, event_id: &str, room_name: Option<&str>) {
+        match self {
+            // Debug: Expected cases for non-SIP events
+            SipForwardingError::NoParticipant { event_type } => {
+                debug!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    room_name = ?room_name,
+                    "Skipping SIP forwarding: event has no participant"
+                );
+            }
+            SipForwardingError::MissingSipHeader => {
+                debug!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    "Skipping SIP forwarding: participant has no sip.h.to attribute"
+                );
+            }
+
+            // Info: Upstream SIP gateway issues (malformed data from external system)
+            SipForwardingError::MalformedSipHeader { header } => {
+                info!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    sip_header = %header,
+                    "Skipping SIP forwarding: malformed sip.h.to header (check upstream SIP gateway)"
+                );
+            }
+
+            // Warn: Configuration or operational issues requiring operator attention
+            SipForwardingError::NoHookConfigured { domain } => {
+                warn!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    sip_domain = %domain,
+                    "SIP forwarding failed: no webhook configured for domain (add to sip.hooks config)"
+                );
+            }
+            SipForwardingError::HttpClientError { error } => {
+                warn!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    error = %error,
+                    "SIP forwarding failed: HTTP client error"
+                );
+            }
+            SipForwardingError::HttpRequestError { domain, error } => {
+                warn!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    sip_domain = %domain,
+                    error = %error,
+                    "SIP forwarding failed: HTTP request error (check network/DNS/webhook endpoint)"
+                );
+            }
+            SipForwardingError::HookFailedResponse {
+                domain,
+                status,
+                body,
+            } => {
+                warn!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    sip_domain = %domain,
+                    status = %status,
+                    response_body = %body,
+                    "SIP forwarding failed: webhook returned non-2xx status"
+                );
+            }
+        }
+    }
+}
+
 /// Handler for LiveKit webhook events.
 ///
 /// This endpoint is called by LiveKit to deliver participant/room events.
@@ -96,7 +215,9 @@ pub async fn handle_livekit_webhook(
                 )
                 .await
                 {
-                    debug!("Webhook forwarding failed: {}", e);
+                    // Log with appropriate severity based on error type
+                    let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
+                    e.log_with_context(&event_clone.id, room_name);
                 }
             });
         }
@@ -221,8 +342,8 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
 /// * `body_json` - The original JSON body from LiveKit (forwarded as-is)
 ///
 /// # Returns
-/// * `Ok(())` if the event was successfully forwarded or no hook was configured
-/// * `Err(String)` if forwarding failed (for logging purposes)
+/// * `Ok(())` if the event was successfully forwarded
+/// * `Err(SipForwardingError)` with structured error context for logging
 ///
 /// # Panics
 /// This function assumes `sip_config` is provided and non-empty by the caller.
@@ -232,44 +353,49 @@ async fn forward_to_sip_hook(
     sip_config: &crate::config::SipConfig,
     event: &WebhookEvent,
     body_json: &str,
-) -> Result<(), String> {
-    // Step 1: Caller guarantees sip_config has hooks, but we verify for safety
-    if sip_config.hooks.is_empty() {
-        // This should never happen due to caller guard, but we handle it gracefully
-        return Err("No SIP hooks configured".to_string());
-    }
+) -> Result<(), SipForwardingError> {
+    // Step 1: Extract participant from event
+    let participant = event.participant.as_ref().ok_or_else(|| {
+        SipForwardingError::NoParticipant {
+            event_type: event.event.clone(),
+        }
+    })?;
 
-    // Step 2: Extract participant and sip.h.to attribute
-    let participant = event
-        .participant
-        .as_ref()
-        .ok_or_else(|| "No participant in event".to_string())?;
-
+    // Step 2: Extract sip.h.to attribute
     let sip_to_header = participant
         .attributes
         .get("sip.h.to")
-        .ok_or_else(|| "No sip.h.to attribute".to_string())?;
+        .ok_or(SipForwardingError::MissingSipHeader)?;
 
     // Step 3: Parse domain from SIP header
-    let domain = parse_sip_domain(sip_to_header)
-        .ok_or_else(|| format!("Failed to parse domain from: {}", sip_to_header))?;
+    let domain = parse_sip_domain(sip_to_header).ok_or_else(|| {
+        SipForwardingError::MalformedSipHeader {
+            header: sip_to_header.clone(),
+        }
+    })?;
 
     // Step 4: Look up hook configuration (case-insensitive)
     let hook = sip_config
         .hooks
         .iter()
         .find(|h| h.host.eq_ignore_ascii_case(&domain))
-        .ok_or_else(|| format!("No hook configured for domain: {}", domain))?;
+        .ok_or_else(|| SipForwardingError::NoHookConfigured {
+            domain: domain.clone(),
+        })?;
 
     // Step 5: Get or create ReqManager for this hook host
-    let req_manager = get_or_create_hook_manager(state, &hook.url).await?;
+    let req_manager =
+        get_or_create_hook_manager(state, &hook.url)
+            .await
+            .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
 
     // Step 6: Forward the webhook payload
     let start = Instant::now();
-    let guard = req_manager
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire HTTP client: {}", e))?;
+    let guard = req_manager.acquire().await.map_err(|e| {
+        SipForwardingError::HttpClientError {
+            error: e.to_string(),
+        }
+    })?;
 
     let response = guard
         .client()
@@ -279,7 +405,10 @@ async fn forward_to_sip_hook(
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        .map_err(|e| SipForwardingError::HttpRequestError {
+            domain: domain.clone(),
+            error: e.to_string(),
+        })?;
 
     let status = response.status();
     let elapsed = start.elapsed();
@@ -287,7 +416,7 @@ async fn forward_to_sip_hook(
     if status.is_success() {
         info!(
             event_id = %event.id,
-            domain = %domain,
+            sip_domain = %domain,
             hook_url = %hook.url,
             status = %status,
             duration_ms = elapsed.as_millis(),
@@ -305,17 +434,11 @@ async fn forward_to_sip_hook(
             body
         };
 
-        warn!(
-            event_id = %event.id,
-            domain = %domain,
-            hook_url = %hook.url,
-            status = %status,
-            duration_ms = elapsed.as_millis(),
-            response_body = %truncated_body,
-            "Webhook forwarding returned non-2xx status"
-        );
-
-        Err(format!("Hook returned status {}: {}", status, truncated_body))
+        Err(SipForwardingError::HookFailedResponse {
+            domain,
+            status: status.as_u16(),
+            body: truncated_body,
+        })
     }
 }
 

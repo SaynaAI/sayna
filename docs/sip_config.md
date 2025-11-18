@@ -221,11 +221,15 @@ The `allowed_addresses` list controls which source IPs can establish SIP connect
 
 ### Webhook Event Routing
 
-When LiveKit sends a webhook event, Sayna:
+When LiveKit sends a webhook event, Sayna routes it to downstream services based on the SIP `To` header:
 
-1. Extracts the host from the event (implementation-specific)
-2. Matches it against configured hook hosts (case-insensitive)
-3. Forwards the event to the corresponding webhook URL via HTTPS POST
+1. The webhook handler reads `participant.attributes["sip.h.to"]`, which contains the full SIP `To` header populated by LiveKit/SIP trunking.
+2. The header is parsed to extract the target domain (e.g., `sip:calls@sip1.example.com` → `sip1.example.com`).
+3. The domain is matched against the configured `hooks` list (case-insensitive).
+4. If a hook matches, the handler reuses the exact JSON payload LiveKit sent and issues an HTTPS `POST` to the hook URL using Sayna’s shared `ReqManager`. This guarantees domain-based connection pooling, concurrency limits, and warmups identical to the rest of the platform.
+5. If no hook matches or the header is missing/malformed, the event is logged but the webhook still returns `200 OK` to LiveKit.
+
+The forwarding step runs in the background so LiveKit receives an acknowledgement immediately. Only deployments that configure SIP hooks incur this work; when `config.sip` is `None` or the `hooks` list is empty, the handler short-circuits and no forwarding task is spawned.
 
 ## Use Cases
 
