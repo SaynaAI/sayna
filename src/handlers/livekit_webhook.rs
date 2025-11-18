@@ -7,7 +7,7 @@ use bytes::Bytes;
 use livekit_api::access_token::TokenVerifier;
 use livekit_api::webhooks::{WebhookError, WebhookReceiver};
 use livekit_protocol::WebhookEvent;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -28,23 +28,15 @@ pub async fn handle_livekit_webhook(
     body: Bytes,
 ) -> Result<Json<Value>, StatusCode> {
     // Step 1: Read LiveKit credentials from config
-    let livekit_api_key = state
-        .config
-        .livekit_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            error!("LiveKit API key not configured, cannot validate webhook");
-            StatusCode::SERVICE_UNAVAILABLE
-        })?;
+    let livekit_api_key = state.config.livekit_api_key.as_ref().ok_or_else(|| {
+        error!("LiveKit API key not configured, cannot validate webhook");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
 
-    let livekit_api_secret = state
-        .config
-        .livekit_api_secret
-        .as_ref()
-        .ok_or_else(|| {
-            error!("LiveKit API secret not configured, cannot validate webhook");
-            StatusCode::SERVICE_UNAVAILABLE
-        })?;
+    let livekit_api_secret = state.config.livekit_api_secret.as_ref().ok_or_else(|| {
+        error!("LiveKit API secret not configured, cannot validate webhook");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
 
     // Step 2: Extract and validate Authorization header
     let auth_token = headers
@@ -57,9 +49,7 @@ pub async fn handle_livekit_webhook(
         })?;
 
     // Strip optional "Bearer " prefix
-    let auth_token = auth_token
-        .strip_prefix("Bearer ")
-        .unwrap_or(auth_token);
+    let auth_token = auth_token.strip_prefix("Bearer ").unwrap_or(auth_token);
 
     if auth_token.is_empty() {
         warn!("Empty Authorization token in webhook request");
@@ -77,21 +67,8 @@ pub async fn handle_livekit_webhook(
     let receiver = WebhookReceiver::new(token_verifier);
 
     let event = receiver.receive(body_str, auth_token).map_err(|e| {
-        match e {
-            WebhookError::InvalidAuth(_) |
-            WebhookError::InvalidSignature => {
-                warn!("Invalid webhook signature or auth: {}", e);
-                StatusCode::UNAUTHORIZED
-            }
-            WebhookError::InvalidData(_) => {
-                warn!("Invalid JSON in webhook body: {}", e);
-                StatusCode::BAD_REQUEST
-            }
-            WebhookError::InvalidBase64(_) => {
-                warn!("Invalid base64 in webhook signature: {}", e);
-                StatusCode::UNAUTHORIZED
-            }
-        }
+        warn!("Webhook verification failed: {}", e);
+        webhook_error_to_status(&e)
     })?;
 
     // Step 5: Log the event with structured fields
@@ -101,6 +78,58 @@ pub async fn handle_livekit_webhook(
     Ok(Json(json!({
         "status": "received"
     })))
+}
+
+/// Extracts SIP-related attributes from participant metadata.
+///
+/// Returns all participant attributes with keys starting with "sip.",
+/// such as "sip.trunkPhoneNumber" or "sip.fromHeader".
+/// Non-SIP attributes are ignored.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use livekit_protocol::ParticipantInfo;
+/// use sayna::handlers::livekit_webhook::extract_sip_attributes;
+///
+/// let mut participant = ParticipantInfo::default();
+/// participant.attributes.insert("sip.trunkPhoneNumber".to_string(), "+1234567890".to_string());
+/// participant.attributes.insert("sip.fromHeader".to_string(), "User <sip:user@example.com>".to_string());
+/// participant.attributes.insert("other.attribute".to_string(), "ignored".to_string());
+///
+/// let sip_attrs = extract_sip_attributes(&participant);
+/// assert_eq!(sip_attrs.len(), 2);
+/// assert_eq!(sip_attrs.get("sip.trunkPhoneNumber"), Some(&"+1234567890".to_string()));
+/// assert_eq!(sip_attrs.get("sip.fromHeader"), Some(&"User <sip:user@example.com>".to_string()));
+/// ```
+pub fn extract_sip_attributes(
+    participant: &livekit_protocol::ParticipantInfo,
+) -> HashMap<String, String> {
+    participant
+        .attributes
+        .iter()
+        .filter(|(k, _)| k.starts_with("sip."))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Maps WebhookError to appropriate HTTP status code.
+///
+/// Returns:
+/// - 401 Unauthorized for auth/signature failures (4xx tells LiveKit not to retry)
+/// - 400 Bad Request for invalid data/base64 (4xx tells LiveKit not to retry)
+///
+/// This mapping ensures LiveKit's retry behavior works as expected:
+/// - 2xx: Success, no retry
+/// - 4xx: Client error, no retry
+/// - 5xx: Server error, LiveKit will retry
+pub fn webhook_error_to_status(error: &WebhookError) -> StatusCode {
+    match error {
+        WebhookError::InvalidAuth(_) | WebhookError::InvalidSignature => StatusCode::UNAUTHORIZED,
+        WebhookError::InvalidData(_) => StatusCode::BAD_REQUEST,
+        WebhookError::InvalidBase64(_) => StatusCode::UNAUTHORIZED,
+    }
 }
 
 /// Logs webhook event details with structured fields.
@@ -121,16 +150,9 @@ fn log_webhook_event(event: &WebhookEvent) {
     let participant_name = participant.map(|p| p.name.as_str());
     let participant_kind = participant.map(|p| p.kind);
 
-    // Extract SIP attributes (keys starting with "sip.")
-    let sip_attributes: HashMap<String, String> = participant
-        .map(|p| {
-            p.attributes
-                .iter()
-                .filter(|(k, _)| k.starts_with("sip."))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Extract SIP attributes using helper
+    let sip_attributes: HashMap<String, String> =
+        participant.map(extract_sip_attributes).unwrap_or_default();
 
     // Log with structured fields
     info!(

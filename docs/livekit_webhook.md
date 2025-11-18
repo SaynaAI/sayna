@@ -484,18 +484,304 @@ tracing::info!(
 - [x] Handle JSON parsing errors → 401
 - [x] Log all failure cases at appropriate levels (warn/error)
 
-### Phase 4: Testing
-- [ ] Unit test: Verify valid webhook with correct signature
-- [ ] Unit test: Reject webhook with invalid signature
-- [ ] Unit test: Reject webhook with tampered body
-- [ ] Unit test: Reject webhook with missing Authorization header
-- [ ] Unit test: Return 503 when LiveKit not configured
-- [ ] Integration test: End-to-end webhook delivery (may require LiveKit test server)
+### Phase 4: Testing ✅
+- [x] Unit test: Verify valid webhook with correct signature
+- [x] Unit test: Reject webhook with invalid signature
+- [x] Unit test: Reject webhook with tampered body
+- [x] Unit test: Reject webhook with missing Authorization header
+- [x] Unit test: Return 503 when LiveKit not configured
+- [x] Integration test: End-to-end webhook delivery (with mocked LiveKit signatures)
+- [x] Unit test: SIP attribute extraction
+- [x] Unit test: Error status code mapping
 
-### Phase 5: Documentation
-- [ ] Update `CLAUDE.md` with webhook endpoint documentation
-- [ ] Add example webhook payload to `docs/` or inline comments
-- [ ] Document required environment variables (`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`)
+### Phase 5: Documentation ✅
+- [x] Update `CLAUDE.md` with webhook endpoint documentation
+- [x] Add example webhook payload to `docs/` or inline comments
+- [x] Document required environment variables (`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`)
+- [x] Add developer testing tools documentation
+
+---
+
+## Developer Testing Guide
+
+### Running the Test Suite
+
+All webhook tests are located in `tests/livekit_webhook_test.rs`. Run them with:
+
+```bash
+# Run all webhook tests
+cargo test --test livekit_webhook_test
+
+# Run specific test
+cargo test --test livekit_webhook_test test_webhook_success
+
+# Run with verbose output
+cargo test --test livekit_webhook_test -- --nocapture
+```
+
+### Test Coverage
+
+The test suite covers:
+
+**Integration Tests:**
+- ✅ Valid webhook with correct signature → 200 OK
+- ✅ Valid webhook with SIP attributes → 200 OK (logs SIP data)
+- ✅ Missing Authorization header → 401 Unauthorized
+- ✅ Empty Authorization token → 401 Unauthorized
+- ✅ Invalid signature (wrong secret) → 401 Unauthorized
+- ✅ Hash mismatch (tampered body) → 401 Unauthorized
+- ✅ Missing LiveKit credentials → 503 Service Unavailable
+- ✅ Invalid UTF-8 body → 400 Bad Request
+- ✅ Bearer prefix optional (works with and without "Bearer ")
+
+**Unit Tests:**
+- ✅ SIP attribute extraction (filters keys starting with "sip.")
+- ✅ Error status code mapping (ensures correct LiveKit retry behavior)
+
+### Manual Testing with curl
+
+To test the webhook endpoint locally, you need to:
+
+1. **Generate a signed webhook payload** (see script below)
+2. **Send it via curl** with the correct Authorization header
+
+#### Testing Script
+
+Create `scripts/test_webhook.sh`:
+
+```bash
+#!/bin/bash
+
+# Configuration
+API_KEY="${LIVEKIT_API_KEY:-test-api-key}"
+API_SECRET="${LIVEKIT_API_SECRET:-test-api-secret}"
+WEBHOOK_URL="${WEBHOOK_URL:-http://localhost:3001/livekit/webhook}"
+
+# Sample webhook payload (participant_joined event)
+PAYLOAD=$(cat <<'EOF'
+{
+  "event": "participant_joined",
+  "id": "test-event-123",
+  "createdAt": 1700000000,
+  "room": {
+    "sid": "RM_test123",
+    "name": "test-room",
+    "emptyTimeout": 300,
+    "maxParticipants": 10,
+    "creationTime": 1700000000,
+    "turnPassword": "",
+    "enabledCodecs": [],
+    "metadata": "",
+    "numParticipants": 1,
+    "numPublishers": 0,
+    "activeRecording": false
+  },
+  "participant": {
+    "sid": "PA_test456",
+    "identity": "user-123",
+    "state": 0,
+    "name": "Test User",
+    "metadata": "",
+    "joinedAt": 1700000000,
+    "permission": {
+      "canSubscribe": true,
+      "canPublish": true,
+      "canPublishData": true,
+      "hidden": false,
+      "recorder": false
+    },
+    "region": "us-west-2",
+    "isPublisher": false,
+    "kind": 0,
+    "attributes": {
+      "sip.trunkPhoneNumber": "+1234567890",
+      "sip.fromHeader": "Test User <sip:user@example.com>",
+      "sip.callID": "abc123def456"
+    },
+    "tracks": []
+  }
+}
+EOF
+)
+
+echo "Payload:"
+echo "$PAYLOAD" | jq .
+
+# Compute SHA256 hash of payload
+HASH=$(echo -n "$PAYLOAD" | sha256sum | awk '{print $1}' | xxd -r -p | base64)
+
+echo ""
+echo "SHA256 Hash (base64): $HASH"
+
+# Generate signed JWT using livekit-cli (install with: cargo install livekit-cli)
+# Alternatively, use the Rust test helpers to generate the token
+TOKEN=$(livekit-cli token create \
+  --api-key "$API_KEY" \
+  --api-secret "$API_SECRET" \
+  --sha256 "$HASH")
+
+echo "JWT Token: $TOKEN"
+
+# Send webhook request
+echo ""
+echo "Sending webhook to: $WEBHOOK_URL"
+curl -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$PAYLOAD" \
+  -v
+
+echo ""
+```
+
+Make it executable:
+
+```bash
+chmod +x scripts/test_webhook.sh
+```
+
+#### Simpler Testing with Rust Helper
+
+Alternatively, create a small Rust program in `examples/sign_webhook.rs`:
+
+```rust
+use base64::Engine;
+use livekit_api::access_token::AccessToken;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+fn main() {
+    let api_key = std::env::var("LIVEKIT_API_KEY").unwrap_or("test-api-key".to_string());
+    let api_secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or("test-api-secret".to_string());
+
+    // Sample payload
+    let payload = json!({
+        "event": "participant_joined",
+        "id": "test-event-123",
+        "createdAt": 1700000000,
+        "room": {
+            "sid": "RM_test123",
+            "name": "test-room",
+            "emptyTimeout": 300,
+            "maxParticipants": 10,
+            "creationTime": 1700000000,
+            "turnPassword": "",
+            "enabledCodecs": [],
+            "metadata": "",
+            "numParticipants": 1,
+            "numPublishers": 0,
+            "activeRecording": false
+        },
+        "participant": {
+            "sid": "PA_test456",
+            "identity": "user-123",
+            "state": 0,
+            "name": "Test User",
+            "metadata": "",
+            "joinedAt": 1700000000,
+            "permission": {
+                "canSubscribe": true,
+                "canPublish": true,
+                "canPublishData": true,
+                "hidden": false,
+                "recorder": false
+            },
+            "region": "us-west-2",
+            "isPublisher": false,
+            "kind": 0,
+            "attributes": {
+                "sip.trunkPhoneNumber": "+1234567890",
+                "sip.fromHeader": "Test User <sip:user@example.com>",
+                "sip.callID": "abc123def456"
+            },
+            "tracks": []
+        }
+    });
+
+    let payload_str = payload.to_string();
+
+    // Compute SHA256 hash
+    let mut hasher = Sha256::new();
+    hasher.update(payload_str.as_bytes());
+    let hash = hasher.finalize();
+
+    // Base64-encode the hash
+    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(&hash);
+
+    // Create signed token
+    let token = AccessToken::with_api_key(&api_key, &api_secret)
+        .with_sha256(&hash_b64)
+        .to_jwt()
+        .expect("Failed to create JWT");
+
+    println!("Payload:");
+    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    println!("\nSHA256 Hash (base64): {}", hash_b64);
+    println!("\nJWT Token: {}", token);
+    println!("\ncurl command:");
+    println!("curl -X POST http://localhost:3001/livekit/webhook \\");
+    println!("  -H 'Content-Type: application/json' \\");
+    println!("  -H 'Authorization: Bearer {}' \\", token);
+    println!("  -d '{}'", payload_str);
+}
+```
+
+Run it:
+
+```bash
+cargo run --example sign_webhook
+```
+
+### Verifying Logs
+
+When you send a webhook with SIP attributes, check the logs for:
+
+```
+INFO  Received LiveKit webhook event (no side effects applied yet)
+  event_id="test-event-123"
+  event_name="participant_joined"
+  room_name=Some("test-room")
+  participant_identity=Some("user-123")
+  participant_name=Some("Test User")
+  participant_kind=Some(0)
+  sip_attributes={"sip.callID": "abc123def456", "sip.fromHeader": "Test User <sip:user@example.com>", "sip.trunkPhoneNumber": "+1234567890"}
+```
+
+### Common Testing Mistakes
+
+1. **Hash Mismatch**: If you modify the payload after computing the hash, the signature won't verify
+   - Solution: Always compute hash from the exact payload you send
+
+2. **Wrong API Secret**: Using different secrets for signing and verification
+   - Solution: Ensure `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` match in both client and server
+
+3. **Bearer Prefix**: Some tools add "Bearer " automatically, others don't
+   - Solution: Our handler strips the prefix if present, so both work
+
+4. **Whitespace in JSON**: Extra whitespace changes the hash
+   - Solution: Use compact JSON (no pretty-printing) for production webhooks
+
+### Testing Against Real LiveKit
+
+To test with a real LiveKit server:
+
+1. **Configure LiveKit to send webhooks** to your Sayna instance:
+   ```yaml
+   # livekit.yaml
+   webhook:
+     urls:
+       - http://your-sayna-server:3001/livekit/webhook
+     api_key: your-api-key
+   ```
+
+2. **Start Sayna with matching credentials**:
+   ```bash
+   export LIVEKIT_API_KEY=your-api-key
+   export LIVEKIT_API_SECRET=your-api-secret
+   cargo run
+   ```
+
+3. **Trigger events** by joining a room, and watch Sayna logs for webhook deliveries
 
 ---
 
