@@ -117,12 +117,16 @@ async fn main() -> anyhow::Result<()> {
     // Create WebSocket routes (no auth for now, see action plan task 8)
     let ws_routes = routes::ws::create_ws_router();
 
+    // Create webhook routes (no auth - uses LiveKit signature verification)
+    let webhook_routes = routes::webhooks::create_webhook_router();
+
     // Create public health check route (no auth)
     let public_routes =
         Router::new().route("/", axum::routing::get(sayna::handlers::api::health_check));
 
-    // Combine all routes: public + protected + websocket
+    // Combine all routes: public + webhook + protected + websocket
     let app = public_routes
+        .merge(webhook_routes)
         .merge(protected_routes)
         .merge(ws_routes)
         .with_state(app_state);

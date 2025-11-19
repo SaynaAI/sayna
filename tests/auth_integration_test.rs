@@ -32,6 +32,7 @@ async fn create_test_state_auth_disabled() -> Arc<AppState> {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false, // Auth disabled
+        sip: None,
     };
 
     AppState::new(config).await
@@ -163,6 +164,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_api_secret: None,
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         let state = AppState::new(config).await;
@@ -426,6 +428,7 @@ mod with_api_secret {
             auth_api_secret: Some(api_secret.to_string()),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         AppState::new(config).await

@@ -239,6 +239,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(PathBuf::from("/tmp/key.pem")),
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = AuthClient::from_config(&config).await;
@@ -269,6 +270,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: None,
             auth_timeout_seconds: 5,
             auth_required: false,
+            sip: None,
         };
 
         let result = AuthClient::from_config(&config).await;
@@ -312,6 +314,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         let client = AuthClient::from_config(&config).await.unwrap();
@@ -364,6 +367,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         let client = AuthClient::from_config(&config).await.unwrap();
@@ -417,6 +421,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         let client = AuthClient::from_config(&config).await.unwrap();
@@ -472,6 +477,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 1, // 1 second timeout
             auth_required: true,
+            sip: None,
         };
 
         let client = AuthClient::from_config(&config).await.unwrap();
@@ -528,6 +534,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
             auth_required: true,
+            sip: None,
         };
 
         let client = AuthClient::from_config(&config).await.unwrap();

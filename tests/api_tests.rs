@@ -31,6 +31,7 @@ async fn test_health_check() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create app state
@@ -84,6 +85,7 @@ async fn test_speak_endpoint_missing_api_key() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create app state
@@ -145,6 +147,7 @@ async fn test_speak_endpoint_empty_text() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create app state
@@ -213,6 +216,7 @@ async fn test_speak_endpoint_with_pronunciations() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create app state
@@ -283,6 +287,7 @@ async fn test_speak_endpoint_invalid_provider() {
         auth_api_secret: None,
         auth_timeout_seconds: 5,
         auth_required: false,
+        sip: None,
     };
 
     // Create app state
