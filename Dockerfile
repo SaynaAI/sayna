@@ -4,7 +4,7 @@ FROM debian:bookworm-slim AS builder
 # ——— Build dependencies for a static musl release ———
 RUN apt-get update && \
     apt-get install -y \
-    clang cmake pkg-config libssl-dev ca-certificates curl && \
+    clang cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -60,4 +60,4 @@ ENV RUST_LOG=info \
 
 EXPOSE 3001
 RUN mkdir -p "$CACHE_PATH" && /app/sayna init
-CMD ["/app/sayna"]
+ENTRYPOINT ["/app/sayna"]
