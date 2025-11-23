@@ -48,10 +48,11 @@
 //! ```
 
 use livekit_api::services::sip::{
-    CreateSIPDispatchRuleOptions, CreateSIPInboundTrunkOptions, ListSIPDispatchRuleFilter,
-    ListSIPInboundTrunkFilter, SIPClient,
+    CreateSIPDispatchRuleOptions, ListSIPDispatchRuleFilter, ListSIPInboundTrunkFilter, SIPClient,
 };
 use livekit_protocol as proto;
+
+use crate::utils::sip_api_client::{SIPApiClient, SIPInboundTrunkOptions};
 
 use super::types::LiveKitError;
 
@@ -179,13 +180,20 @@ impl LiveKitSipHandler {
             .any(|trunk| trunk.name == trunk_config.trunk_name);
 
         if !trunk_exists {
-            // Create trunk using the API signature: name, numbers, options
-            let trunk_options = CreateSIPInboundTrunkOptions {
+            // Use a raw SIP API client to set include_headers (not yet exposed in livekit-api).
+            let sip_api_client = SIPApiClient::new(
+                self.url.clone(),
+                self.api_key.clone(),
+                self.api_secret.clone(),
+            );
+
+            let trunk_options = SIPInboundTrunkOptions {
                 allowed_addresses: Some(trunk_config.allowed_addresses.clone()),
+                include_headers: Some(proto::SipHeaderOptions::SipAllHeaders),
                 ..Default::default()
             };
 
-            self.sip_client
+            sip_api_client
                 .create_sip_inbound_trunk(
                     trunk_config.trunk_name.clone(),
                     vec![], // empty numbers list

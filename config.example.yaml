@@ -48,13 +48,29 @@ auth:
   timeout_seconds: 5                          # ENV: AUTH_TIMEOUT_SECONDS
 
 # SIP configuration (optional)
+# Used for SIP trunk integration and webhook forwarding
 sip:
   room_prefix: "sip-"                         # ENV: SIP_ROOM_PREFIX
   allowed_addresses:                          # ENV: SIP_ALLOWED_ADDRESSES (comma-separated)
     - "192.168.1.0/24"
     - "10.0.0.1"
-  hooks:                                      # ENV: SIP_HOOKS_JSON (JSON array)
-    - host: "example.com"
-      url: "https://webhook.example.com/events"
+
+  # REQUIRED if hooks are configured: Global signing secret for webhook authentication
+  # All outbound SIP webhooks are signed with HMAC-SHA256 for security
+  # Generate with: openssl rand -hex 32
+  # See docs/livekit_webhook.md#webhook-signing for details
+  hook_secret: "your-global-signing-secret"   # ENV: SIP_HOOK_SECRET (min 16 chars, 32+ recommended)
+
+  # Downstream webhook endpoints for SIP event forwarding
+  # Each hook receives participant_joined events for matching SIP domains
+  # All requests include X-Sayna-Signature header for verification
+  hooks:                                      # ENV: SIP_HOOKS_JSON (JSON array with optional "secret" field)
+    - host: "example.com"                     # SIP domain to match (case-insensitive)
+      url: "https://webhook.example.com/events"  # HTTPS strongly recommended
+      # Optional: per-hook secret override (omit to use global hook_secret)
+      # Use for multi-tenant deployments or zero-trust architectures
+      # secret: "per-hook-override-secret"
+
     - host: "another.com"
       url: "https://webhook2.example.com/events"
+      secret: "another-hook-specific-secret"  # Example: per-hook override for independent rotation

@@ -9,15 +9,15 @@ use super::yaml::YamlConfig;
 /// Merge YAML configuration with environment variables
 ///
 /// Priority order (highest to lowest):
-/// 1. Environment variables
-/// 2. YAML configuration values
+/// 1. YAML configuration values
+/// 2. Environment variables
 /// 3. Default values
 ///
-/// This allows YAML to provide base configuration while environment variables
+/// This allows environment variables to provide base configuration while YAML
 /// can override specific values for different deployment environments.
 ///
 /// # Arguments
-/// * `yaml_config` - Optional YAML configuration to use as base
+/// * `yaml_config` - Optional YAML configuration to use as overrides
 ///
 /// # Returns
 /// * `Result<ServerConfig, Box<dyn std::error::Error>>` - The merged configuration or an error
@@ -26,20 +26,19 @@ pub fn merge_config(
 ) -> Result<ServerConfig, Box<dyn std::error::Error>> {
     let yaml = yaml_config.unwrap_or_default();
 
-    // Helper macro to get value with priority: ENV > YAML > Default
+    // Helper macro to get value with priority: YAML > ENV > Default
     macro_rules! get_value {
         ($env_var:expr, $yaml_value:expr, $default:expr) => {
-            env::var($env_var)
-                .ok()
-                .or($yaml_value)
+            $yaml_value
+                .or_else(|| env::var($env_var).ok())
                 .unwrap_or_else(|| $default.to_string())
         };
     }
 
-    // Helper macro for optional values: ENV > YAML
+    // Helper macro for optional values: YAML > ENV
     macro_rules! get_optional {
         ($env_var:expr, $yaml_value:expr) => {
-            env::var($env_var).ok().or($yaml_value)
+            $yaml_value.or_else(|| env::var($env_var).ok())
         };
     }
 
@@ -50,12 +49,14 @@ pub fn merge_config(
         "0.0.0.0"
     );
 
-    let port = if let Ok(port_str) = env::var("PORT") {
+    let port = if let Some(yaml_port) = yaml.server.as_ref().and_then(|s| s.port) {
+        yaml_port
+    } else if let Ok(port_str) = env::var("PORT") {
         port_str
             .parse::<u16>()
             .map_err(|e| format!("Invalid PORT environment variable: {e}"))?
     } else {
-        yaml.server.as_ref().and_then(|s| s.port).unwrap_or(3001)
+        3001
     };
 
     // LiveKit configuration
@@ -127,17 +128,23 @@ pub fn merge_config(
     );
 
     // Cache configuration
-    let cache_path = env::var("CACHE_PATH")
-        .ok()
-        .or_else(|| yaml.cache.as_ref().and_then(|c| c.path.clone()))
+    let cache_path = yaml
+        .cache
+        .as_ref()
+        .and_then(|c| c.path.clone())
+        .or_else(|| env::var("CACHE_PATH").ok())
         .map(PathBuf::from);
 
-    let cache_ttl_seconds = if let Ok(ttl_str) = env::var("CACHE_TTL_SECONDS") {
-        ttl_str.parse::<u64>().ok()
-    } else {
-        yaml.cache.as_ref().and_then(|c| c.ttl_seconds)
-    }
-    .or(Some(30 * 24 * 60 * 60)); // Default to 30 days
+    let cache_ttl_seconds = yaml
+        .cache
+        .as_ref()
+        .and_then(|c| c.ttl_seconds)
+        .or_else(|| {
+            env::var("CACHE_TTL_SECONDS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .or(Some(30 * 24 * 60 * 60)); // Default to 30 days
 
     // Authentication configuration
     let auth_service_url = get_optional!(
@@ -145,9 +152,11 @@ pub fn merge_config(
         yaml.auth.as_ref().and_then(|a| a.service_url.clone())
     );
 
-    let auth_signing_key_path = env::var("AUTH_SIGNING_KEY_PATH")
-        .ok()
-        .or_else(|| yaml.auth.as_ref().and_then(|a| a.signing_key_path.clone()))
+    let auth_signing_key_path = yaml
+        .auth
+        .as_ref()
+        .and_then(|a| a.signing_key_path.clone())
+        .or_else(|| env::var("AUTH_SIGNING_KEY_PATH").ok())
         .map(PathBuf::from);
 
     let auth_api_secret = get_optional!(
@@ -155,19 +164,23 @@ pub fn merge_config(
         yaml.auth.as_ref().and_then(|a| a.api_secret.clone())
     );
 
-    let auth_timeout_seconds = if let Ok(timeout_str) = env::var("AUTH_TIMEOUT_SECONDS") {
-        timeout_str.parse::<u64>().ok()
-    } else {
-        yaml.auth.as_ref().and_then(|a| a.timeout_seconds)
-    }
-    .unwrap_or(5);
+    let auth_timeout_seconds = yaml
+        .auth
+        .as_ref()
+        .and_then(|a| a.timeout_seconds)
+        .or_else(|| {
+            env::var("AUTH_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(5);
 
-    let auth_required = if let Ok(required_str) = env::var("AUTH_REQUIRED") {
-        parse_bool(&required_str)
-    } else {
-        yaml.auth.as_ref().and_then(|a| a.required)
-    }
-    .unwrap_or(false);
+    let auth_required = yaml
+        .auth
+        .as_ref()
+        .and_then(|a| a.required)
+        .or_else(|| env::var("AUTH_REQUIRED").ok().and_then(|s| parse_bool(&s)))
+        .unwrap_or(false);
 
     // SIP configuration (merge YAML and ENV)
     let sip = merge_sip_config(yaml.sip.as_ref())?;
@@ -199,7 +212,8 @@ pub fn merge_config(
 
 /// Merge SIP configuration from YAML and environment variables
 ///
-/// Priority: ENV > YAML
+/// Priority: YAML > ENV
+/// For hook secrets: per-hook secret > global hook_secret (YAML > ENV)
 fn merge_sip_config(
     yaml_sip: Option<&super::yaml::SipYaml>,
 ) -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
@@ -207,22 +221,31 @@ fn merge_sip_config(
     let env_room_prefix = env::var("SIP_ROOM_PREFIX").ok();
     let env_allowed_addresses = env::var("SIP_ALLOWED_ADDRESSES").ok();
     let env_hooks_json = env::var("SIP_HOOKS_JSON").ok();
+    let env_hook_secret = env::var("SIP_HOOK_SECRET").ok();
 
-    let has_env_sip =
-        env_room_prefix.is_some() || env_allowed_addresses.is_some() || env_hooks_json.is_some();
+    let has_env_sip = env_room_prefix.is_some()
+        || env_allowed_addresses.is_some()
+        || env_hooks_json.is_some()
+        || env_hook_secret.is_some();
 
     // If no YAML and no ENV, return None
     if yaml_sip.is_none() && !has_env_sip {
         return Ok(None);
     }
 
-    // Merge room_prefix (ENV > YAML)
-    let room_prefix = env_room_prefix
-        .or_else(|| yaml_sip.and_then(|s| s.room_prefix.clone()))
+    // Merge room_prefix (YAML > ENV)
+    let room_prefix = yaml_sip
+        .and_then(|s| s.room_prefix.clone())
+        .or(env_room_prefix)
         .ok_or("SIP room_prefix is required when SIP configuration is present")?;
 
-    // Merge allowed_addresses (ENV > YAML)
-    let allowed_addresses = if let Some(addresses_str) = env_allowed_addresses {
+    // Merge allowed_addresses (YAML > ENV)
+    let allowed_addresses = if let Some(yaml_sip) = yaml_sip
+        && !yaml_sip.allowed_addresses.is_empty()
+    {
+        // Use YAML addresses if present
+        yaml_sip.allowed_addresses.clone()
+    } else if let Some(addresses_str) = env_allowed_addresses {
         // Parse from ENV (comma-separated)
         addresses_str
             .split(',')
@@ -230,32 +253,41 @@ fn merge_sip_config(
             .filter(|s| !s.is_empty())
             .collect()
     } else {
-        // Use YAML addresses
-        yaml_sip
-            .map(|s| s.allowed_addresses.clone())
-            .unwrap_or_default()
+        vec![]
     };
 
-    // Merge hooks (ENV > YAML)
-    let hooks = if let Some(hooks_json) = env_hooks_json {
+    // Merge hooks (YAML > ENV)
+    let hooks = if let Some(yaml_sip) = yaml_sip
+        && !yaml_sip.hooks.is_empty()
+    {
+        // Convert from YAML hooks if present
+        yaml_sip
+            .hooks
+            .iter()
+            .map(|h| SipHookConfig {
+                host: h.host.clone(),
+                url: h.url.clone(),
+                secret: h.secret.clone(),
+            })
+            .collect()
+    } else if let Some(hooks_json) = env_hooks_json {
         // Parse from ENV JSON
         parse_sip_hooks_json(&hooks_json)?
     } else {
-        // Convert from YAML hooks
-        yaml_sip
-            .map(|s| {
-                s.hooks
-                    .iter()
-                    .map(|h| SipHookConfig {
-                        host: h.host.clone(),
-                        url: h.url.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        vec![]
     };
 
-    Ok(Some(SipConfig::new(room_prefix, allowed_addresses, hooks)))
+    // Merge hook_secret (YAML > ENV)
+    let hook_secret = yaml_sip
+        .and_then(|s| s.hook_secret.clone())
+        .or(env_hook_secret);
+
+    Ok(Some(SipConfig::new(
+        room_prefix,
+        allowed_addresses,
+        hooks,
+        hook_secret,
+    )))
 }
 
 /// Parse SIP hooks from JSON string
@@ -264,6 +296,8 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
     struct HookJson {
         host: String,
         url: String,
+        #[serde(default)]
+        secret: Option<String>,
     }
 
     let hooks: Vec<HookJson> = serde_json::from_str(json_str)
@@ -274,6 +308,7 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
         .map(|h| SipHookConfig {
             host: h.host,
             url: h.url,
+            secret: h.secret,
         })
         .collect())
 }
@@ -305,6 +340,7 @@ mod tests {
             env::remove_var("SIP_ROOM_PREFIX");
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
+            env::remove_var("SIP_HOOK_SECRET");
         }
     }
 
@@ -337,7 +373,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_merge_env_overrides_yaml() {
+    fn test_merge_yaml_overrides_env() {
         cleanup_env_vars();
 
         let yaml = YamlConfig {
@@ -355,8 +391,9 @@ mod tests {
 
         let config = merge_config(Some(yaml)).unwrap();
 
-        assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.port, 9000);
+        // YAML overrides ENV
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
 
         cleanup_env_vars();
     }
@@ -425,10 +462,10 @@ mod tests {
         assert!(config.auth_required);
         assert_eq!(
             config.auth_service_url,
-            Some("https://auth.env.com".to_string())
-        ); // env overrides
-        assert_eq!(config.auth_signing_key_path, Some(key_path)); // from yaml
-        assert_eq!(config.auth_timeout_seconds, 10); // from yaml
+            Some("https://auth.yaml.com".to_string())
+        ); // YAML overrides ENV
+        assert_eq!(config.auth_signing_key_path, Some(key_path)); // from YAML
+        assert_eq!(config.auth_timeout_seconds, 10); // from YAML
 
         cleanup_env_vars();
     }
@@ -447,7 +484,9 @@ mod tests {
                 hooks: vec![SipHookYaml {
                     host: "example.com".to_string(),
                     url: "https://webhook.example.com/events".to_string(),
+                    secret: None,
                 }],
+                hook_secret: Some("global-secret".to_string()),
             }),
             ..Default::default()
         };
@@ -460,13 +499,14 @@ mod tests {
         assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(sip.hooks.len(), 1);
         assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
 
         cleanup_env_vars();
     }
 
     #[test]
     #[serial]
-    fn test_merge_sip_env_overrides_yaml() {
+    fn test_merge_sip_yaml_overrides_env() {
         cleanup_env_vars();
 
         let yaml = YamlConfig {
@@ -474,6 +514,7 @@ mod tests {
                 room_prefix: Some("yaml-prefix-".to_string()),
                 allowed_addresses: vec!["192.168.1.0/24".to_string()],
                 hooks: vec![],
+                hook_secret: Some("yaml-secret".to_string()),
             }),
             ..Default::default()
         };
@@ -481,15 +522,16 @@ mod tests {
         unsafe {
             env::set_var("SIP_ROOM_PREFIX", "env-prefix-");
             env::set_var("SIP_ALLOWED_ADDRESSES", "10.0.0.1, 10.0.0.2");
+            env::set_var("SIP_HOOK_SECRET", "env-secret");
         }
 
         let config = merge_config(Some(yaml)).unwrap();
         let sip = config.sip.expect("SIP config should be present");
 
-        assert_eq!(sip.room_prefix, "env-prefix-"); // ENV overrides YAML
-        assert_eq!(sip.allowed_addresses.len(), 2); // ENV overrides YAML
-        assert_eq!(sip.allowed_addresses[0], "10.0.0.1");
-        assert_eq!(sip.allowed_addresses[1], "10.0.0.2");
+        assert_eq!(sip.room_prefix, "yaml-prefix-"); // YAML overrides ENV
+        assert_eq!(sip.allowed_addresses.len(), 1); // YAML overrides ENV
+        assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
+        assert_eq!(sip.hook_secret, Some("yaml-secret".to_string())); // YAML overrides ENV
 
         cleanup_env_vars();
     }
@@ -539,20 +581,61 @@ mod tests {
                 room_prefix: Some("sip-".to_string()),
                 allowed_addresses: vec![],
                 hooks: vec![],
+                hook_secret: None,
             }),
             ..Default::default()
         };
 
         unsafe {
             env::set_var("SIP_ALLOWED_ADDRESSES", "10.0.0.1");
+            env::set_var("SIP_HOOK_SECRET", "env-secret");
         }
 
         let config = merge_config(Some(yaml)).unwrap();
         let sip = config.sip.expect("SIP config should be present");
 
         assert_eq!(sip.room_prefix, "sip-"); // from YAML
-        assert_eq!(sip.allowed_addresses.len(), 1); // from ENV
+        // YAML has empty array, so ENV is used as fallback
+        assert_eq!(sip.allowed_addresses.len(), 1); // from ENV (YAML is empty)
         assert_eq!(sip.allowed_addresses[0], "10.0.0.1");
+        assert_eq!(sip.hook_secret, Some("env-secret".to_string())); // from ENV (YAML is None)
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_per_hook_secret_precedence() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![
+                    SipHookYaml {
+                        host: "example.com".to_string(),
+                        url: "https://webhook.example.com/events".to_string(),
+                        secret: None, // uses global
+                    },
+                    SipHookYaml {
+                        host: "override.com".to_string(),
+                        url: "https://webhook.override.com/events".to_string(),
+                        secret: Some("per-hook-override".to_string()), // overrides global
+                    },
+                ],
+                hook_secret: Some("global-secret".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
+        assert_eq!(sip.hooks.len(), 2);
+        assert_eq!(sip.hooks[0].secret, None); // will use global
+        assert_eq!(sip.hooks[1].secret, Some("per-hook-override".to_string())); // overrides global
 
         cleanup_env_vars();
     }

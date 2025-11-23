@@ -46,9 +46,13 @@ use std::path::PathBuf;
 ///   allowed_addresses:
 ///     - "192.168.1.0/24"
 ///     - "10.0.0.1"
+///   hook_secret: "global-signing-secret"
 ///   hooks:
 ///     - host: "example.com"
 ///       url: "https://webhook.example.com/events"
+///     - host: "other.com"
+///       url: "https://webhook.other.com/events"
+///       secret: "per-hook-override-secret"
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -127,6 +131,7 @@ pub struct SipYaml {
     pub allowed_addresses: Vec<String>,
     #[serde(default)]
     pub hooks: Vec<SipHookYaml>,
+    pub hook_secret: Option<String>,
 }
 
 /// SIP webhook hook configuration from YAML
@@ -134,6 +139,8 @@ pub struct SipYaml {
 pub struct SipHookYaml {
     pub host: String,
     pub url: String,
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 impl YamlConfig {
@@ -324,11 +331,13 @@ sip:
   allowed_addresses:
     - "192.168.1.0/24"
     - "10.0.0.1"
+  hook_secret: "global-secret"
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
     - host: "another.com"
       url: "https://webhook2.example.com/events"
+      secret: "per-hook-secret"
 "#;
 
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
@@ -338,11 +347,14 @@ sip:
         assert_eq!(sip.allowed_addresses.len(), 2);
         assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
+        assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].host, "example.com");
         assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+        assert_eq!(sip.hooks[0].secret, None);
         assert_eq!(sip.hooks[1].host, "another.com");
         assert_eq!(sip.hooks[1].url, "https://webhook2.example.com/events");
+        assert_eq!(sip.hooks[1].secret, Some("per-hook-secret".to_string()));
     }
 
     #[test]

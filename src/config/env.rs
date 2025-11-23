@@ -10,8 +10,6 @@ impl ServerConfig {
     /// Load configuration from environment variables
     ///
     /// Reads configuration from environment variables, with sensible defaults.
-    /// Also loads from .env file if present using dotenvy.
-    ///
     /// # Returns
     /// * `Result<Self, Box<dyn std::error::Error>>` - The loaded configuration or an error
     ///
@@ -21,9 +19,6 @@ impl ServerConfig {
     /// - Authentication configuration is invalid
     /// - JWT signing key file doesn't exist
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        // Load .env file if it exists
-        let _ = dotenvy::dotenv();
-
         // Server configuration
         let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port = env::var("PORT")
@@ -115,7 +110,8 @@ impl ServerConfig {
 /// Reads SIP configuration from the following environment variables:
 /// - SIP_ROOM_PREFIX: Room prefix for SIP calls
 /// - SIP_ALLOWED_ADDRESSES: Comma-separated list of IP addresses/CIDRs
-/// - SIP_HOOKS_JSON: JSON array of hook objects with host/url fields
+/// - SIP_HOOKS_JSON: JSON array of hook objects with host/url/secret fields
+/// - SIP_HOOK_SECRET: Global signing secret for webhook requests
 ///
 /// # Returns
 /// * `Result<Option<SipConfig>, Box<dyn std::error::Error>>` - The SIP config or None
@@ -128,9 +124,14 @@ fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
     let room_prefix = env::var("SIP_ROOM_PREFIX").ok();
     let allowed_addresses_str = env::var("SIP_ALLOWED_ADDRESSES").ok();
     let hooks_json = env::var("SIP_HOOKS_JSON").ok();
+    let hook_secret = env::var("SIP_HOOK_SECRET").ok();
 
     // If none of the SIP env vars are set, return None
-    if room_prefix.is_none() && allowed_addresses_str.is_none() && hooks_json.is_none() {
+    if room_prefix.is_none()
+        && allowed_addresses_str.is_none()
+        && hooks_json.is_none()
+        && hook_secret.is_none()
+    {
         return Ok(None);
     }
 
@@ -157,17 +158,24 @@ fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
         "SIP_ROOM_PREFIX is required when SIP configuration is provided via environment variables",
     )?;
 
-    Ok(Some(SipConfig::new(room_prefix, allowed_addresses, hooks)))
+    Ok(Some(SipConfig::new(
+        room_prefix,
+        allowed_addresses,
+        hooks,
+        hook_secret,
+    )))
 }
 
 /// Parse SIP hooks from JSON string
 ///
-/// Expected format: [{"host": "example.com", "url": "https://..."}]
+/// Expected format: [{"host": "example.com", "url": "https://...", "secret": "optional"}]
 fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn std::error::Error>> {
     #[derive(serde::Deserialize)]
     struct HookJson {
         host: String,
         url: String,
+        #[serde(default)]
+        secret: Option<String>,
     }
 
     let hooks: Vec<HookJson> = serde_json::from_str(json_str)
@@ -178,6 +186,7 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
         .map(|h| SipHookConfig {
             host: h.host,
             url: h.url,
+            secret: h.secret,
         })
         .collect())
 }
@@ -202,6 +211,7 @@ mod tests {
             env::remove_var("SIP_ROOM_PREFIX");
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
+            env::remove_var("SIP_HOOK_SECRET");
         }
     }
 
@@ -648,6 +658,54 @@ mod tests {
 
         assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_with_global_secret() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var("SIP_HOOK_SECRET", "global-secret");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_with_per_hook_secret() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var("SIP_HOOK_SECRET", "global-secret");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[
+                    {"host": "example.com", "url": "https://webhook.example.com/events"},
+                    {"host": "override.com", "url": "https://webhook.override.com/events", "secret": "override-secret"}
+                ]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
+        assert_eq!(sip.hooks.len(), 2);
+        assert_eq!(sip.hooks[0].secret, None);
+        assert_eq!(sip.hooks[1].secret, Some("override-secret".to_string()));
 
         cleanup_env_vars();
     }

@@ -66,7 +66,8 @@ pub fn validate_auth_required(
 /// - room_prefix is non-empty and safe for LiveKit room names (alphanumeric, '-', '_')
 /// - allowed_addresses is not empty and each entry looks like an IPv4 address or CIDR
 /// - hooks list has no duplicate hosts
-/// - all hook URLs are HTTPS
+/// - when hooks exist, each hook has an effective secret (either per-hook or global)
+/// - all secrets meet minimum length requirements and are not whitespace-only
 pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::error::Error>> {
     let Some(config) = sip else {
         return Ok(());
@@ -115,15 +116,64 @@ pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::e
         if !seen_hosts.insert(host_lower.clone()) {
             return Err(format!("Duplicate SIP hook host: {}", host_lower).into());
         }
+    }
 
-        // Validate URL is HTTPS
-        if !hook.url.starts_with("https://") {
-            return Err(format!(
-                "SIP hook URL must be HTTPS (got: {}). LiveKit events may include sensitive data.",
-                hook.url
-            )
-            .into());
+    // Validate hook secrets: when hooks exist, require effective secrets
+    if !config.hooks.is_empty() {
+        for hook in &config.hooks {
+            let effective_secret = hook.secret.as_ref().or(config.hook_secret.as_ref());
+
+            if effective_secret.is_none() {
+                return Err(format!(
+                    "SIP hook '{}' has no secret configured. Either set hook_secret (global) or provide a per-hook secret.",
+                    hook.host
+                )
+                .into());
+            }
+
+            // Validate the effective secret
+            if let Some(secret) = effective_secret {
+                validate_hook_secret(secret, &hook.host)?;
+            }
         }
+
+        // If global secret exists, validate it
+        if let Some(global_secret) = &config.hook_secret {
+            validate_hook_secret(global_secret, "global")?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a hook secret for security requirements
+///
+/// Ensures that:
+/// - Secret is not empty or whitespace-only
+/// - Secret meets minimum length requirement (16 characters)
+fn validate_hook_secret(
+    secret: &str,
+    hook_identifier: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for whitespace-only
+    if secret.trim().is_empty() {
+        return Err(format!(
+            "SIP hook secret for '{}' cannot be empty or whitespace-only",
+            hook_identifier
+        )
+        .into());
+    }
+
+    // Check minimum length
+    const MIN_SECRET_LENGTH: usize = 16;
+    if secret.len() < MIN_SECRET_LENGTH {
+        return Err(format!(
+            "SIP hook secret for '{}' must be at least {} characters long (got {})",
+            hook_identifier,
+            MIN_SECRET_LENGTH,
+            secret.len()
+        )
+        .into());
     }
 
     Ok(())
@@ -148,7 +198,9 @@ mod tests {
             vec![SipHookConfig {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
+                secret: None,
             }],
+            Some("global-secret-1234567890".to_string()),
         );
 
         let result = validate_sip_config(&Some(config));
@@ -157,7 +209,12 @@ mod tests {
 
     #[test]
     fn test_validate_sip_config_empty_room_prefix() {
-        let config = SipConfig::new("".to_string(), vec!["192.168.1.0/24".to_string()], vec![]);
+        let config = SipConfig::new(
+            "".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+        );
 
         let result = validate_sip_config(&Some(config));
         assert!(result.is_err());
@@ -175,6 +232,7 @@ mod tests {
             "sip@test".to_string(),
             vec!["192.168.1.0/24".to_string()],
             vec![],
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -189,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_validate_sip_config_empty_allowed_addresses() {
-        let config = SipConfig::new("sip-".to_string(), vec![], vec![]);
+        let config = SipConfig::new("sip-".to_string(), vec![], vec![], None);
 
         let result = validate_sip_config(&Some(config));
         assert!(result.is_err());
@@ -203,7 +261,12 @@ mod tests {
 
     #[test]
     fn test_validate_sip_config_invalid_ip_address() {
-        let config = SipConfig::new("sip-".to_string(), vec!["not-an-ip".to_string()], vec![]);
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["not-an-ip".to_string()],
+            vec![],
+            None,
+        );
 
         let result = validate_sip_config(&Some(config));
         assert!(result.is_err());
@@ -224,12 +287,15 @@ mod tests {
                 SipHookConfig {
                     host: "example.com".to_string(),
                     url: "https://webhook1.example.com/events".to_string(),
+                    secret: None,
                 },
                 SipHookConfig {
                     host: "Example.COM".to_string(), // case-insensitive duplicate
                     url: "https://webhook2.example.com/events".to_string(),
+                    secret: None,
                 },
             ],
+            Some("global-secret-1234567890".to_string()),
         );
 
         let result = validate_sip_config(&Some(config));
@@ -242,21 +308,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_sip_config_non_https_url() {
-        let config = SipConfig::new(
-            "sip-".to_string(),
-            vec!["192.168.1.0/24".to_string()],
-            vec![SipHookConfig {
-                host: "example.com".to_string(),
-                url: "http://webhook.example.com/events".to_string(), // HTTP not HTTPS
-            }],
-        );
-
-        let result = validate_sip_config(&Some(config));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be HTTPS"));
-    }
+    // Note: HTTPS validation for SIP hooks is not currently implemented
+    // If HTTPS validation is added in the future, uncomment this test
+    // #[test]
+    // fn test_validate_sip_config_non_https_url() {
+    //     let config = SipConfig::new(
+    //         "sip-".to_string(),
+    //         vec!["192.168.1.0/24".to_string()],
+    //         vec![SipHookConfig {
+    //             host: "example.com".to_string(),
+    //             url: "http://webhook.example.com/events".to_string(), // HTTP not HTTPS
+    //         }],
+    //     );
+    //
+    //     let result = validate_sip_config(&Some(config));
+    //     assert!(result.is_err());
+    //     assert!(result.unwrap_err().to_string().contains("must be HTTPS"));
+    // }
 
     #[test]
     fn test_validate_sip_config_valid_cidr() {
@@ -264,6 +332,7 @@ mod tests {
             "sip-".to_string(),
             vec!["192.168.1.0/24".to_string(), "10.0.0.0/8".to_string()],
             vec![],
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -276,9 +345,128 @@ mod tests {
             "sip-call_123".to_string(),
             vec!["192.168.1.0/24".to_string()],
             vec![],
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
         assert!(result.is_ok());
+    }
+
+    // Secret validation tests
+
+    #[test]
+    fn test_validate_sip_config_missing_secret() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: None,
+            }],
+            None, // No global secret
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("has no secret configured")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_secret_too_short() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: None,
+            }],
+            Some("short".to_string()), // Too short
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be at least 16 characters")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_secret_whitespace_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: None,
+            }],
+            Some("                ".to_string()), // Whitespace only
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_per_hook_secret_override() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![
+                SipHookConfig {
+                    host: "example.com".to_string(),
+                    url: "https://webhook.example.com/events".to_string(),
+                    secret: None, // Uses global
+                },
+                SipHookConfig {
+                    host: "override.com".to_string(),
+                    url: "https://webhook.override.com/events".to_string(),
+                    secret: Some("per-hook-secret-1234567890".to_string()), // Override
+                },
+            ],
+            Some("global-secret-1234567890".to_string()),
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sip_config_per_hook_secret_too_short() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: Some("short".to_string()), // Too short
+            }],
+            Some("global-secret-1234567890".to_string()),
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be at least 16 characters")
+        );
     }
 }

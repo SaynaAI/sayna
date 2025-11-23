@@ -1,25 +1,16 @@
 use anyhow::{Context, Result};
-use ndarray::{Array2, ArrayView2, CowArray};
-use once_cell::sync::Lazy;
-use ort::{Environment, Session, SessionBuilder, Value};
+use ndarray::{Array2, ArrayView2};
+use ort::session::Session;
+use ort::session::builder::SessionBuilder;
+use ort::value::Value;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::core::turn_detect::{assets, config::TurnDetectorConfig};
 
-// Global shared ONNX Environment to avoid expensive bootstrap per detector
-static GLOBAL_ONNX_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
-    Arc::new(
-        Environment::builder()
-            .with_name("turn_detect")
-            .build()
-            .expect("Failed to create ONNX environment"),
-    )
-});
-
 pub struct ModelManager {
-    session: Arc<Session>,
+    session: Arc<Mutex<Session>>,
     config: TurnDetectorConfig,
     // Cached input names to avoid repeated allocations
     input_names: Vec<String>,
@@ -53,7 +44,7 @@ impl ModelManager {
         debug!("Cached model input names: {:?}", input_names);
 
         Ok(Self {
-            session: Arc::new(session),
+            session: Arc::new(Mutex::new(session)),
             config,
             input_names,
             cached_attention_mask: None,
@@ -61,16 +52,16 @@ impl ModelManager {
     }
 
     fn create_session(model_path: &Path, config: &TurnDetectorConfig) -> Result<Session> {
-        let mut builder = SessionBuilder::new(&GLOBAL_ONNX_ENV)?
+        let mut builder = SessionBuilder::new()?
             .with_optimization_level(config.graph_optimization_level.to_ort_level())?;
 
         if let Some(num_threads) = config.num_threads {
             builder = builder
-                .with_intra_threads(num_threads as i16)?
+                .with_intra_threads(num_threads)?
                 .with_inter_threads(1)?;
         }
 
-        let session = builder.with_model_from_file(model_path)?;
+        let session = builder.commit_from_file(model_path)?;
 
         Self::validate_model_inputs(&session)?;
 
@@ -118,78 +109,91 @@ impl ModelManager {
 
         debug!("Using cached input names: {:?}", self.input_names);
 
-        // Convert ndarray to ONNX values
-        let allocator = self.session.allocator();
-
-        // Prepare arrays - need to keep them alive for the whole inference
-        let input_array = CowArray::from(input_ids.to_owned()).into_dyn();
+        // Prepare arrays as owned Array2 for ort 2.0
+        let input_array = input_ids.to_owned();
         let mask_array = if let Some(mask) = attention_mask {
-            CowArray::from(mask.to_owned()).into_dyn()
+            mask.to_owned()
         } else {
             // Reuse cached attention mask if dimensions match, otherwise create new
             let needs_new_mask = self
                 .cached_attention_mask
                 .as_ref()
-                .is_none_or(|cached| cached.shape() != [batch_size, sequence_length]);
+                .is_none_or(|cached| cached.dim() != (batch_size, sequence_length));
 
             if needs_new_mask {
                 self.cached_attention_mask =
                     Some(Array2::<i64>::ones((batch_size, sequence_length)));
             }
 
-            CowArray::from(self.cached_attention_mask.as_ref().unwrap().clone()).into_dyn()
+            self.cached_attention_mask.as_ref().unwrap().clone()
         };
 
-        // Build input values in the correct order
-        let mut input_values = Vec::new();
+        // Build input values with names - ort 2.0 uses Vec<(&str, Value)>
+        let input_name_0 = &self.input_names[0];
+        let input_name_1 = if self.input_names.len() > 1 {
+            &self.input_names[1]
+        } else {
+            input_name_0
+        };
 
-        for (i, input_info) in self.session.inputs.iter().enumerate() {
-            let name = &input_info.name;
-            debug!("Processing input {}: {}", i, name);
+        debug!(
+            "Creating input tensors for: {} and {}",
+            input_name_0, input_name_1
+        );
 
-            if i == 0 || name.contains("input_ids") {
-                input_values.push(Value::from_array(allocator, &input_array)?);
-            } else if name.contains("attention_mask") {
-                input_values.push(Value::from_array(allocator, &mask_array)?);
-            } else {
-                // Try to use the first array as a fallback
-                input_values.push(Value::from_array(allocator, &input_array)?);
-            }
-        }
+        // Convert ndarray 0.15.6 arrays to format compatible with ort 2.0
+        // ort expects ([shape...], Vec<data>) tuples for OwnedTensorArrayData
+        let input_dim = input_array.dim();
+        let input_data: Vec<i64> = input_array.iter().copied().collect();
+        let input_value = Value::from_array(([input_dim.0, input_dim.1], input_data))?.into();
 
-        let outputs = self.session.run(input_values)?;
+        let mask_dim = mask_array.dim();
+        let mask_data: Vec<i64> = mask_array.iter().copied().collect();
+        let mask_value = Value::from_array(([mask_dim.0, mask_dim.1], mask_data))?.into();
 
-        let logits = outputs
-            .first()
+        let inputs: Vec<(&str, Value)> = vec![
+            (input_name_0.as_str(), input_value),
+            (input_name_1.as_str(), mask_value),
+        ];
+
+        // Lock the session mutex for inference
+        let mut session = self.session.lock().unwrap();
+
+        // Get output name before running to avoid borrow conflicts
+        let output_name = session.outputs[0].name.clone();
+
+        let outputs = session.run(inputs)?;
+
+        let logits_tensor = outputs
+            .get(output_name.as_str())
             .context("No output from model")?
-            .try_extract::<f32>()
+            .try_extract_tensor::<f32>()
             .context("Failed to extract tensor")?;
 
-        let logits_view = logits.view();
-        let shape = logits_view.shape();
+        // Extract shape and data from tensor tuple
+        let (shape, data) = logits_tensor;
 
         debug!("Model output shape: {:?}", shape);
 
         // Log some sample values to understand the output range
-        if !shape.is_empty() && shape[0] > 0 {
-            let first_values: Vec<f32> = (0..10.min(logits_view.len()))
-                .map(|i| logits_view.as_slice().unwrap()[i])
-                .collect();
+        if !data.is_empty() {
+            let first_values: Vec<f32> = data.iter().take(10).copied().collect();
             debug!("First 10 output values: {:?}", first_values);
         }
 
-        // Handle different output formats
-        let end_prob = if shape.len() == 2 && shape[1] == 2 {
+        // Handle different output formats based on shape dimensions
+        let shape_dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+        let end_prob = if shape_dims.len() == 2 && shape_dims[1] == 2 {
             // Binary classification output [batch_size, 2]
             // Index 0: probability of continuing
             // Index 1: probability of turn completion
-            let end_logit = logits_view[[0, 1]];
-            let continue_logit = logits_view[[0, 0]];
+            let end_logit = data[1];
+            let continue_logit = data[0];
             Self::softmax(end_logit, continue_logit)
-        } else if shape.len() == 2 && shape[1] == 1 {
+        } else if shape_dims.len() == 2 && shape_dims[1] == 1 {
             // Single probability output [batch_size, 1]
             // Direct probability of turn completion
-            let prob = logits_view[[0, 0]];
+            let prob = data[0];
             // If it's already a probability (0-1), use it directly
             // If it's a logit, apply sigmoid
             if (0.0..=1.0).contains(&prob) {
@@ -198,9 +202,9 @@ impl ModelManager {
                 // Apply sigmoid to convert logit to probability
                 1.0 / (1.0 + (-prob).exp())
             }
-        } else if shape.len() == 1 {
+        } else if shape_dims.len() == 1 {
             // Single value output
-            let prob = logits_view[[0]];
+            let prob = data[0];
             // If it's already a probability (0-1), use it directly
             // If it's a logit, apply sigmoid
             if (0.0..=1.0).contains(&prob) {
@@ -209,12 +213,12 @@ impl ModelManager {
                 // Apply sigmoid to convert logit to probability
                 1.0 / (1.0 + (-prob).exp())
             }
-        } else if shape.len() == 3 && shape[0] == 1 {
+        } else if shape_dims.len() == 3 && shape_dims[0] == 1 {
             // LiveKit turn detector output format: [batch_size=1, sequence_length, num_classes]
             // The model outputs LOGITS that need to be converted to probabilities
 
-            let seq_len = shape[1];
-            let num_classes = shape[2];
+            let seq_len = shape_dims[1];
+            let num_classes = shape_dims[2];
 
             debug!(
                 "Turn detector output: seq_len={}, num_classes={}",
@@ -223,11 +227,6 @@ impl ModelManager {
 
             // Get all logits at the last sequence position
             let last_position_start = (seq_len - 1) * num_classes;
-
-            // Let's examine what tokens have high probability at the last position
-            let slice = logits_view
-                .as_slice()
-                .ok_or_else(|| anyhow::anyhow!("Failed to get slice from logits view"))?;
 
             // Get the logits for key tokens at the last position
             // Token 2 is </s> (standard end-of-sequence)
@@ -243,17 +242,17 @@ impl ModelManager {
                 return Ok(0.3); // Conservative fallback
             }
 
-            let eos_logit = slice[last_position_start + eos_token_id];
+            let eos_logit = data[last_position_start + eos_token_id];
 
             // Find the maximum logit for numerical stability in softmax
-            let max_logit = slice[last_position_start..(last_position_start + num_classes)]
+            let max_logit = data[last_position_start..(last_position_start + num_classes)]
                 .iter()
                 .cloned()
                 .fold(f32::NEG_INFINITY, f32::max);
 
             // Apply softmax to get probability
             let exp_sum: f32 = (0..num_classes)
-                .map(|i| (slice[last_position_start + i] - max_logit).exp())
+                .map(|i| (data[last_position_start + i] - max_logit).exp())
                 .sum();
 
             let eos_prob = (eos_logit - max_logit).exp() / exp_sum;
@@ -269,7 +268,7 @@ impl ModelManager {
         } else {
             warn!(
                 "Unexpected output shape: {:?}. Using conservative estimate.",
-                shape
+                shape_dims
             );
             0.3 // Conservative estimate
         };

@@ -325,15 +325,19 @@ sip:
   allowed_addresses:
     - "192.168.1.0/24"
     - "10.0.0.1"
+  hook_secret: "your-signing-secret"  # Required if hooks configured
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
 ```
 
+**Important:** All SIP webhook forwarding requests are signed with HMAC-SHA256. You **must** configure `hook_secret` (or per-hook `secret` overrides) if using `sip.hooks`. See [docs/livekit_webhook.md#webhook-signing](docs/livekit_webhook.md#webhook-signing) for signature verification examples.
+
 **Environment Variables:**
 - `SIP_ROOM_PREFIX`: Room name prefix for SIP calls (required if SIP enabled)
 - `SIP_ALLOWED_ADDRESSES`: Comma-separated IP addresses/CIDRs
-- `SIP_HOOKS_JSON`: JSON array of webhook configurations
+- `SIP_HOOK_SECRET`: Global signing secret for webhook authentication (min 16 chars)
+- `SIP_HOOKS_JSON`: JSON array of webhook configurations (with optional per-hook `secret` field)
 
 ## Performance Considerations
 

@@ -136,9 +136,9 @@ See [config.example.yaml](config.example.yaml) for all available options. The fi
 - `cache`: Cache settings
 - `auth`: Authentication configuration
 
-### Environment Variables
+### Environment Variables and .env File
 
-All configuration options can also be set via environment variables. When using a YAML file, environment variables **override** YAML values, allowing flexible deployment configurations.
+All configuration options can also be set via environment variables or a `.env` file. The `.env` file is always loaded if present (in both YAML and ENV-only modes). When using a YAML file, YAML values **override** environment variables, allowing flexible deployment configurations with environment variables and .env providing the base configuration.
 
 Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
@@ -154,7 +154,7 @@ Optional authentication:
 - `AUTH_API_SECRET`: API secret for simple token-based auth (alternative to JWT)
 - `AUTH_TIMEOUT_SECONDS`: Auth request timeout in seconds (default: 5)
 
-**Configuration Priority**: Environment Variables > YAML File > Defaults
+**Configuration Priority**: YAML File > Environment Variables > .env File > Defaults
 
 ## Testing Strategy
 

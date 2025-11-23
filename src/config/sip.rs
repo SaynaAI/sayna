@@ -13,6 +13,8 @@ pub struct SipHookConfig {
     pub host: String,
     /// HTTPS URL to forward webhook events to
     pub url: String,
+    /// Optional per-hook signing secret (overrides global hook_secret)
+    pub secret: Option<String>,
 }
 
 /// SIP configuration
@@ -21,6 +23,7 @@ pub struct SipHookConfig {
 /// - Room name prefix for SIP calls
 /// - Allowed IP addresses/CIDRs for SIP connections
 /// - Downstream webhook targets for event forwarding
+/// - Global signing secret for webhook requests
 #[derive(Debug, Clone)]
 pub struct SipConfig {
     /// Prefix for SIP room names (alphanumeric, '-', '_')
@@ -29,17 +32,21 @@ pub struct SipConfig {
     pub allowed_addresses: Vec<String>,
     /// Downstream webhook configurations (host -> URL)
     pub hooks: Vec<SipHookConfig>,
+    /// Global signing secret for webhook requests (can be overridden per hook)
+    pub hook_secret: Option<String>,
 }
 
 impl SipConfig {
     /// Create a new SIP configuration with normalized values
     ///
-    /// This normalizes hostnames to lowercase for consistent matching
-    /// and trims whitespace from addresses.
+    /// This normalizes hostnames to lowercase for consistent matching,
+    /// trims whitespace from addresses, and normalizes secrets (trim only,
+    /// without logging them).
     pub fn new(
         room_prefix: String,
         allowed_addresses: Vec<String>,
         hooks: Vec<SipHookConfig>,
+        hook_secret: Option<String>,
     ) -> Self {
         // Normalize addresses (trim whitespace)
         let allowed_addresses = allowed_addresses
@@ -47,19 +54,24 @@ impl SipConfig {
             .map(|addr| addr.trim().to_string())
             .collect();
 
-        // Normalize hook hostnames to lowercase
+        // Normalize hook hostnames to lowercase and trim secrets
         let hooks = hooks
             .into_iter()
             .map(|hook| SipHookConfig {
-                host: hook.host.to_lowercase(),
+                host: hook.host.trim().to_lowercase(),
                 url: hook.url,
+                secret: hook.secret.map(|s| s.trim().to_string()),
             })
             .collect();
+
+        // Normalize global secret (trim only, no logging)
+        let hook_secret = hook_secret.map(|s| s.trim().to_string());
 
         Self {
             room_prefix,
             allowed_addresses,
             hooks,
+            hook_secret,
         }
     }
 }
@@ -73,10 +85,12 @@ mod tests {
         let hook = SipHookConfig {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
+            secret: Some("test-secret".to_string()),
         };
 
         assert_eq!(hook.host, "example.com");
         assert_eq!(hook.url, "https://webhook.example.com/events");
+        assert_eq!(hook.secret, Some("test-secret".to_string()));
     }
 
     #[test]
@@ -84,12 +98,14 @@ mod tests {
         let hooks = vec![SipHookConfig {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
+            secret: None,
         }];
 
         let config = SipConfig::new(
             "sip-".to_string(),
             vec!["192.168.1.0/24".to_string(), " 10.0.0.1 ".to_string()],
             hooks,
+            Some("global-secret".to_string()),
         );
 
         assert_eq!(config.room_prefix, "sip-");
@@ -98,6 +114,7 @@ mod tests {
         assert_eq!(config.allowed_addresses[1], "10.0.0.1"); // trimmed
         assert_eq!(config.hooks.len(), 1);
         assert_eq!(config.hooks[0].host, "example.com");
+        assert_eq!(config.hook_secret, Some("global-secret".to_string()));
     }
 
     #[test]
@@ -106,14 +123,16 @@ mod tests {
             SipHookConfig {
                 host: "Example.COM".to_string(),
                 url: "https://webhook1.example.com/events".to_string(),
+                secret: None,
             },
             SipHookConfig {
                 host: "Another.HOST".to_string(),
                 url: "https://webhook2.example.com/events".to_string(),
+                secret: None,
             },
         ];
 
-        let config = SipConfig::new("sip-".to_string(), vec![], hooks);
+        let config = SipConfig::new("sip-".to_string(), vec![], hooks, None);
 
         assert_eq!(config.hooks[0].host, "example.com"); // normalized to lowercase
         assert_eq!(config.hooks[1].host, "another.host"); // normalized to lowercase
@@ -125,9 +144,29 @@ mod tests {
             "sip-".to_string(),
             vec!["  192.168.1.0/24  ".to_string(), "\t10.0.0.1\n".to_string()],
             vec![],
+            None,
         );
 
         assert_eq!(config.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(config.allowed_addresses[1], "10.0.0.1");
+    }
+
+    #[test]
+    fn test_sip_config_normalizes_secrets() {
+        let hooks = vec![SipHookConfig {
+            host: "example.com".to_string(),
+            url: "https://webhook.example.com/events".to_string(),
+            secret: Some("  hook-secret  ".to_string()),
+        }];
+
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec![],
+            hooks,
+            Some("  global-secret  ".to_string()),
+        );
+
+        assert_eq!(config.hook_secret, Some("global-secret".to_string())); // trimmed
+        assert_eq!(config.hooks[0].secret, Some("hook-secret".to_string())); // trimmed
     }
 }

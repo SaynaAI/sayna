@@ -271,6 +271,7 @@ mod tests {
                 room_prefix: "sip-".to_string(),
                 allowed_addresses: vec!["192.168.1.0/24".to_string()],
                 hooks: vec![],
+                hook_secret: None,
             }),
         };
 

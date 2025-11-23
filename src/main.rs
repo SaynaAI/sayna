@@ -45,6 +45,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if it exists (must be done before config loading)
+    let _ = dotenvy::dotenv();
+
     // Initialize tracing
     tracing_subscriber::fmt::init();
 

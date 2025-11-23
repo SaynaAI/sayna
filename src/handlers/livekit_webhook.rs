@@ -4,17 +4,67 @@ use axum::{
     response::Json,
 };
 use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use livekit_api::access_token::TokenVerifier;
 use livekit_api::webhooks::{WebhookError, WebhookReceiver};
 use livekit_protocol::WebhookEvent;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 use crate::utils::req_manager::ReqManager;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Participant information for SIP webhook events.
+///
+/// Contains minimal participant metadata forwarded to downstream webhooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SIPHookParticipant {
+    /// Participant's display name
+    pub name: String,
+    /// Participant's unique identity
+    pub identity: String,
+    /// Participant's session ID
+    pub sid: String,
+}
+
+/// Room information for SIP webhook events.
+///
+/// Contains minimal room metadata forwarded to downstream webhooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SIPHookRoom {
+    /// Room name
+    pub name: String,
+    /// Room session ID
+    pub sid: String,
+}
+
+/// SIP webhook event payload.
+///
+/// This is the filtered, minimal payload sent to downstream SIP webhooks
+/// for `participant_joined` events. Contains only essential information
+/// needed for SIP call handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SIPHookEvent {
+    /// Participant information (name, identity, sid)
+    pub participant: SIPHookParticipant,
+    /// Room information (name, sid)
+    pub room: SIPHookRoom,
+    /// Phone number that initiated the call (from sip.phoneNumber, e.g., "+1234567890")
+    pub from_phone_number: String,
+    /// Phone number that received the call (from sip.trunkPhoneNumber, e.g., "+0987654321")
+    pub to_phone_number: String,
+    /// Room prefix from SIP configuration
+    pub room_prefix: String,
+    /// SIP host/domain that matched the webhook configuration
+    pub sip_host: String,
+}
 
 /// Categorizes SIP webhook forwarding failures by severity and expected action.
 ///
@@ -29,6 +79,14 @@ pub enum SipForwardingError {
     /// Missing sip.h.to attribute - participant exists but isn't SIP, or malformed SIP metadata
     #[error("No sip.h.to attribute in participant")]
     MissingSipHeader,
+
+    /// Missing sip.phoneNumber attribute - SIP participant without caller phone number
+    #[error("No sip.phoneNumber attribute in participant")]
+    MissingFromPhoneNumber,
+
+    /// Missing sip.trunkPhoneNumber attribute - SIP participant without trunk phone number
+    #[error("No sip.trunkPhoneNumber attribute in participant")]
+    MissingToPhoneNumber,
 
     /// Failed to parse SIP domain from header value - indicates upstream SIP gateway bug
     #[error("Malformed SIP header: {header}")]
@@ -53,6 +111,10 @@ pub enum SipForwardingError {
         status: u16,
         body: String,
     },
+
+    /// Missing signing secret for webhook forwarding
+    #[error("No signing secret configured for domain: {domain}")]
+    MissingSigningSecret { domain: String },
 }
 
 impl SipForwardingError {
@@ -78,6 +140,20 @@ impl SipForwardingError {
                     event_id = %event_id,
                     room_name = ?room_name,
                     "Skipping SIP forwarding: participant has no sip.h.to attribute"
+                );
+            }
+            SipForwardingError::MissingFromPhoneNumber => {
+                debug!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    "Skipping SIP forwarding: participant has no sip.phoneNumber attribute"
+                );
+            }
+            SipForwardingError::MissingToPhoneNumber => {
+                debug!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    "Skipping SIP forwarding: participant has no sip.trunkPhoneNumber attribute"
                 );
             }
 
@@ -129,6 +205,14 @@ impl SipForwardingError {
                     status = %status,
                     response_body = %body,
                     "SIP forwarding failed: webhook returned non-2xx status"
+                );
+            }
+            SipForwardingError::MissingSigningSecret { domain } => {
+                error!(
+                    event_id = %event_id,
+                    room_name = ?room_name,
+                    sip_domain = %domain,
+                    "SIP forwarding failed: no signing secret configured (set global hook_secret or per-hook secret)"
                 );
             }
         }
@@ -192,29 +276,23 @@ pub async fn handle_livekit_webhook(
         webhook_error_to_status(&e)
     })?;
 
-    // Step 5: Log the event with structured fields and forward to SIP hooks
-    log_webhook_event(&event);
-
     // Step 6: Forward event to SIP-specific webhook if applicable (non-blocking)
     // Short-circuit: Only spawn forwarding task if SIP config exists and has hooks.
     // This ensures pure non-SIP deployments don't incur unnecessary background tasks
     // or noisy debug logs about missing configuration.
     if let Some(sip_config) = &state.config.sip
         && !sip_config.hooks.is_empty()
+        && event.event == "participant_joined"
     {
+        // Step 5: Log the event with structured fields
+        log_webhook_event(&event);
+
         // We spawn this in the background to avoid delaying the response to LiveKit
         let state_clone = state.clone();
-        let body_str_owned = body_str.to_string();
         let event_clone = event.clone();
         let sip_config_clone = sip_config.clone();
         tokio::spawn(async move {
-            if let Err(e) = forward_to_sip_hook(
-                &state_clone,
-                &sip_config_clone,
-                &event_clone,
-                &body_str_owned,
-            )
-            .await
+            if let Err(e) = forward_to_sip_hook(&state_clone, &sip_config_clone, &event_clone).await
             {
                 // Log with appropriate severity based on error type
                 let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
@@ -329,10 +407,64 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
     None
 }
 
+/// Generates an HMAC-SHA256 signature for webhook payload authentication.
+///
+/// Creates a canonical string `v1:{timestamp}:{event_id}:{payload}` and signs it
+/// with HMAC-SHA256. Returns signing headers for inclusion in webhook requests.
+///
+/// # Arguments
+/// * `secret` - The signing secret (hook-level or global)
+/// * `timestamp` - Unix timestamp in seconds
+/// * `event_id` - The LiveKit event ID
+/// * `payload` - The JSON payload string
+///
+/// # Returns
+/// * `Ok(headers)` - Map of signing headers (X-Sayna-Signature, X-Sayna-Timestamp, etc.)
+/// * `Err(String)` - If HMAC initialization fails
+///
+/// # Security
+/// - Uses HMAC-SHA256 for signature generation
+/// - Canonical string format prevents replay attacks when combined with timestamp validation
+/// - Secrets are never logged or exposed in error messages
+fn generate_webhook_signature(
+    secret: &str,
+    timestamp: u64,
+    event_id: &str,
+    payload: &str,
+) -> Result<HashMap<String, String>, String> {
+    // Build canonical string: v1:{timestamp}:{event_id}:{payload}
+    let canonical_string = format!("v1:{}:{}:{}", timestamp, event_id, payload);
+
+    // Initialize HMAC-SHA256
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("HMAC initialization failed: {}", e))?;
+
+    // Compute signature
+    mac.update(canonical_string.as_bytes());
+    let result = mac.finalize();
+    let signature_bytes = result.into_bytes();
+
+    // Encode as hex
+    let signature_hex = hex::encode(signature_bytes);
+
+    // Build signing headers
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Sayna-Signature".to_string(),
+        format!("v1={}", signature_hex),
+    );
+    headers.insert("X-Sayna-Timestamp".to_string(), timestamp.to_string());
+    headers.insert("X-Sayna-Event-Id".to_string(), event_id.to_string());
+    headers.insert("X-Sayna-Signature-Version".to_string(), "v1".to_string());
+
+    Ok(headers)
+}
+
 /// Forwards a LiveKit webhook event to a SIP-specific downstream webhook.
 ///
-/// Extracts the SIP domain from the participant's `sip.h.to` attribute,
-/// looks up the corresponding hook configuration, and forwards the event.
+/// Only forwards `participant_joined` events. Extracts the SIP domain from the
+/// participant's `sip.h.to` attribute, looks up the corresponding hook configuration,
+/// and forwards a filtered SIPHookEvent payload with HMAC-SHA256 signing headers.
 ///
 /// Uses ReqManager for connection pooling and concurrency control.
 /// Does not block the main webhook handler - errors are logged but not propagated.
@@ -341,11 +473,15 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
 /// * `state` - Application state containing ReqManager instances
 /// * `sip_config` - SIP configuration (must contain hooks). Caller ensures this is non-empty.
 /// * `event` - The LiveKit webhook event to forward
-/// * `body_json` - The original JSON body from LiveKit (forwarded as-is)
 ///
 /// # Returns
 /// * `Ok(())` if the event was successfully forwarded
 /// * `Err(SipForwardingError)` with structured error context for logging
+///
+/// # Security
+/// - All outbound webhooks are signed with HMAC-SHA256
+/// - Requires either per-hook `secret` or global `hook_secret` in configuration
+/// - Secrets are never logged; only timing and status information is recorded
 ///
 /// # Panics
 /// This function assumes `sip_config` is provided and non-empty by the caller.
@@ -354,8 +490,14 @@ async fn forward_to_sip_hook(
     state: &Arc<AppState>,
     sip_config: &crate::config::SipConfig,
     event: &WebhookEvent,
-    body_json: &str,
 ) -> Result<(), SipForwardingError> {
+    // Step 0: Only process participant_joined events, ignore all others
+    if event.event != "participant_joined" {
+        return Err(SipForwardingError::NoParticipant {
+            event_type: event.event.clone(),
+        });
+    }
+
     // Step 1: Extract participant from event
     let participant =
         event
@@ -365,19 +507,39 @@ async fn forward_to_sip_hook(
                 event_type: event.event.clone(),
             })?;
 
-    // Step 2: Extract sip.h.to attribute
+    // Step 2: Extract room from event
+    let room = event
+        .room
+        .as_ref()
+        .ok_or_else(|| SipForwardingError::NoParticipant {
+            event_type: event.event.clone(),
+        })?;
+
+    // Step 3: Extract sip.h.to attribute
     let sip_to_header = participant
         .attributes
         .get("sip.h.to")
         .ok_or(SipForwardingError::MissingSipHeader)?;
 
-    // Step 3: Parse domain from SIP header
+    // Step 4: Extract caller phone number from sip.phoneNumber
+    let from_phone_number = participant
+        .attributes
+        .get("sip.phoneNumber")
+        .ok_or(SipForwardingError::MissingFromPhoneNumber)?;
+
+    // Step 5: Extract trunk phone number from sip.trunkPhoneNumber
+    let to_phone_number = participant
+        .attributes
+        .get("sip.trunkPhoneNumber")
+        .ok_or(SipForwardingError::MissingToPhoneNumber)?;
+
+    // Step 6: Parse domain from SIP header
     let domain =
         parse_sip_domain(sip_to_header).ok_or_else(|| SipForwardingError::MalformedSipHeader {
             header: sip_to_header.clone(),
         })?;
 
-    // Step 4: Look up hook configuration (case-insensitive)
+    // Step 7: Look up hook configuration (case-insensitive)
     let hook = sip_config
         .hooks
         .iter()
@@ -386,12 +548,56 @@ async fn forward_to_sip_hook(
             domain: domain.clone(),
         })?;
 
-    // Step 5: Get or create ReqManager for this hook host
+    // Step 8: Fetch effective signing secret (hook-level override or global)
+    let signing_secret = hook
+        .secret
+        .as_ref()
+        .or(sip_config.hook_secret.as_ref())
+        .ok_or_else(|| SipForwardingError::MissingSigningSecret {
+            domain: domain.clone(),
+        })?;
+
+    // Step 9: Build SIPHookEvent payload
+    let sip_event = SIPHookEvent {
+        participant: SIPHookParticipant {
+            name: participant.name.clone(),
+            identity: participant.identity.clone(),
+            sid: participant.sid.clone(),
+        },
+        room: SIPHookRoom {
+            name: room.name.clone(),
+            sid: room.sid.clone(),
+        },
+        from_phone_number: from_phone_number.clone(),
+        to_phone_number: to_phone_number.clone(),
+        room_prefix: sip_config.room_prefix.clone(),
+        sip_host: domain.clone(),
+    };
+
+    // Step 10: Serialize payload
+    let payload =
+        serde_json::to_string(&sip_event).map_err(|e| SipForwardingError::HttpClientError {
+            error: format!("Failed to serialize SIPHookEvent: {}", e),
+        })?;
+
+    // Step 11: Generate HMAC signature and headers
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| SipForwardingError::HttpClientError {
+            error: format!("System time error: {}", e),
+        })?
+        .as_secs();
+
+    let signing_headers =
+        generate_webhook_signature(signing_secret, timestamp, &event.id, &payload)
+            .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
+
+    // Step 12: Get or create ReqManager for this hook host
     let req_manager = get_or_create_hook_manager(state, &hook.url)
         .await
         .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
 
-    // Step 6: Forward the webhook payload
+    // Step 13: Forward the webhook payload with signing headers
     let start = Instant::now();
     let guard = req_manager
         .acquire()
@@ -400,11 +606,18 @@ async fn forward_to_sip_hook(
             error: e.to_string(),
         })?;
 
-    let response = guard
+    let mut request = guard
         .client()
         .post(&hook.url)
-        .header("Content-Type", "application/json")
-        .body(body_json.to_string())
+        .header("Content-Type", "application/json");
+
+    // Add signing headers
+    for (key, value) in signing_headers {
+        request = request.header(key, value);
+    }
+
+    let response = request
+        .body(payload)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
@@ -544,4 +757,269 @@ fn log_webhook_event(event: &WebhookEvent) {
         sip_attributes = ?sip_attributes,
         "Received LiveKit webhook event"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sip_hook_event_serialization() {
+        // Create a SIPHookEvent
+        let event = SIPHookEvent {
+            participant: SIPHookParticipant {
+                name: "SIP User".to_string(),
+                identity: "sip-user-123".to_string(),
+                sid: "PA_abc123".to_string(),
+            },
+            room: SIPHookRoom {
+                name: "sip-room-456".to_string(),
+                sid: "RM_xyz789".to_string(),
+            },
+            from_phone_number: "+1234567890".to_string(),
+            to_phone_number: "+0987654321".to_string(),
+            room_prefix: "sip-".to_string(),
+            sip_host: "example.com".to_string(),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&event).expect("Failed to serialize SIPHookEvent");
+
+        // Parse back to verify structure
+        let parsed: Value = serde_json::from_str(&json).expect("Failed to parse JSON");
+
+        // Verify participant fields
+        assert_eq!(parsed["participant"]["name"], "SIP User");
+        assert_eq!(parsed["participant"]["identity"], "sip-user-123");
+        assert_eq!(parsed["participant"]["sid"], "PA_abc123");
+
+        // Verify room fields
+        assert_eq!(parsed["room"]["name"], "sip-room-456");
+        assert_eq!(parsed["room"]["sid"], "RM_xyz789");
+
+        // Verify other fields
+        assert_eq!(parsed["from_phone_number"], "+1234567890");
+        assert_eq!(parsed["to_phone_number"], "+0987654321");
+        assert_eq!(parsed["room_prefix"], "sip-");
+        assert_eq!(parsed["sip_host"], "example.com");
+
+        // Verify no extra fields (6 total: participant, room, from_phone_number, to_phone_number, room_prefix, sip_host)
+        assert_eq!(parsed.as_object().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn test_sip_hook_event_deserialization() {
+        // Create JSON payload
+        let json = r#"{
+            "participant": {
+                "name": "Test Caller",
+                "identity": "caller-789",
+                "sid": "PA_test456"
+            },
+            "room": {
+                "name": "test-room",
+                "sid": "RM_test123"
+            },
+            "from_phone_number": "+9876543210",
+            "to_phone_number": "+1234567890",
+            "room_prefix": "call-",
+            "sip_host": "test.example.org"
+        }"#;
+
+        // Deserialize
+        let event: SIPHookEvent =
+            serde_json::from_str(json).expect("Failed to deserialize SIPHookEvent");
+
+        // Verify fields
+        assert_eq!(event.participant.name, "Test Caller");
+        assert_eq!(event.participant.identity, "caller-789");
+        assert_eq!(event.participant.sid, "PA_test456");
+        assert_eq!(event.room.name, "test-room");
+        assert_eq!(event.room.sid, "RM_test123");
+        assert_eq!(event.from_phone_number, "+9876543210");
+        assert_eq!(event.to_phone_number, "+1234567890");
+        assert_eq!(event.room_prefix, "call-");
+        assert_eq!(event.sip_host, "test.example.org");
+    }
+
+    #[test]
+    fn test_sip_hook_participant_serialization() {
+        let participant = SIPHookParticipant {
+            name: "Alice".to_string(),
+            identity: "alice-123".to_string(),
+            sid: "PA_alice".to_string(),
+        };
+
+        let json = serde_json::to_string(&participant).expect("Failed to serialize");
+        let parsed: Value = serde_json::from_str(&json).expect("Failed to parse");
+
+        assert_eq!(parsed["name"], "Alice");
+        assert_eq!(parsed["identity"], "alice-123");
+        assert_eq!(parsed["sid"], "PA_alice");
+        assert_eq!(parsed.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_sip_hook_room_serialization() {
+        let room = SIPHookRoom {
+            name: "conference-room".to_string(),
+            sid: "RM_conf123".to_string(),
+        };
+
+        let json = serde_json::to_string(&room).expect("Failed to serialize");
+        let parsed: Value = serde_json::from_str(&json).expect("Failed to parse");
+
+        assert_eq!(parsed["name"], "conference-room");
+        assert_eq!(parsed["sid"], "RM_conf123");
+        assert_eq!(parsed.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_deterministic() {
+        // Test deterministic signature generation with fixed inputs
+        let secret = "test-secret-key";
+        let timestamp = 1700000000u64;
+        let event_id = "EVT_test123";
+        let payload = r#"{"test":"data"}"#;
+
+        let result = super::generate_webhook_signature(secret, timestamp, event_id, payload);
+        assert!(result.is_ok());
+
+        let headers = result.unwrap();
+
+        // Verify all expected headers are present
+        assert!(headers.contains_key("X-Sayna-Signature"));
+        assert!(headers.contains_key("X-Sayna-Timestamp"));
+        assert!(headers.contains_key("X-Sayna-Event-Id"));
+        assert!(headers.contains_key("X-Sayna-Signature-Version"));
+
+        // Verify header values
+        assert_eq!(headers.get("X-Sayna-Timestamp").unwrap(), "1700000000");
+        assert_eq!(headers.get("X-Sayna-Event-Id").unwrap(), "EVT_test123");
+        assert_eq!(headers.get("X-Sayna-Signature-Version").unwrap(), "v1");
+
+        // Verify signature format (should be v1=<hex>)
+        let signature = headers.get("X-Sayna-Signature").unwrap();
+        assert!(signature.starts_with("v1="));
+        assert_eq!(signature.len(), 3 + 64); // "v1=" + 64 hex chars (SHA256)
+
+        // Verify determinism: same inputs should produce same signature
+        let result2 = super::generate_webhook_signature(secret, timestamp, event_id, payload);
+        assert!(result2.is_ok());
+        let headers2 = result2.unwrap();
+        assert_eq!(
+            headers.get("X-Sayna-Signature"),
+            headers2.get("X-Sayna-Signature")
+        );
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_different_secrets() {
+        // Different secrets should produce different signatures
+        let timestamp = 1700000000u64;
+        let event_id = "EVT_test123";
+        let payload = r#"{"test":"data"}"#;
+
+        let headers1 =
+            super::generate_webhook_signature("secret1", timestamp, event_id, payload).unwrap();
+        let headers2 =
+            super::generate_webhook_signature("secret2", timestamp, event_id, payload).unwrap();
+
+        assert_ne!(
+            headers1.get("X-Sayna-Signature"),
+            headers2.get("X-Sayna-Signature")
+        );
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_different_timestamps() {
+        // Different timestamps should produce different signatures
+        let secret = "test-secret";
+        let event_id = "EVT_test123";
+        let payload = r#"{"test":"data"}"#;
+
+        let headers1 =
+            super::generate_webhook_signature(secret, 1700000000, event_id, payload).unwrap();
+        let headers2 =
+            super::generate_webhook_signature(secret, 1700000001, event_id, payload).unwrap();
+
+        assert_ne!(
+            headers1.get("X-Sayna-Signature"),
+            headers2.get("X-Sayna-Signature")
+        );
+        assert_eq!(headers1.get("X-Sayna-Timestamp").unwrap(), "1700000000");
+        assert_eq!(headers2.get("X-Sayna-Timestamp").unwrap(), "1700000001");
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_different_event_ids() {
+        // Different event IDs should produce different signatures
+        let secret = "test-secret";
+        let timestamp = 1700000000u64;
+        let payload = r#"{"test":"data"}"#;
+
+        let headers1 =
+            super::generate_webhook_signature(secret, timestamp, "EVT_123", payload).unwrap();
+        let headers2 =
+            super::generate_webhook_signature(secret, timestamp, "EVT_456", payload).unwrap();
+
+        assert_ne!(
+            headers1.get("X-Sayna-Signature"),
+            headers2.get("X-Sayna-Signature")
+        );
+        assert_eq!(headers1.get("X-Sayna-Event-Id").unwrap(), "EVT_123");
+        assert_eq!(headers2.get("X-Sayna-Event-Id").unwrap(), "EVT_456");
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_different_payloads() {
+        // Different payloads should produce different signatures
+        let secret = "test-secret";
+        let timestamp = 1700000000u64;
+        let event_id = "EVT_test123";
+
+        let headers1 =
+            super::generate_webhook_signature(secret, timestamp, event_id, r#"{"a":"1"}"#).unwrap();
+        let headers2 =
+            super::generate_webhook_signature(secret, timestamp, event_id, r#"{"a":"2"}"#).unwrap();
+
+        assert_ne!(
+            headers1.get("X-Sayna-Signature"),
+            headers2.get("X-Sayna-Signature")
+        );
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_empty_secret() {
+        // Empty secret should still work (though not recommended)
+        let result =
+            super::generate_webhook_signature("", 1700000000, "EVT_123", r#"{"test":"data"}"#);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_webhook_signature_special_characters() {
+        // Test with special characters in payload
+        let secret = "test-secret!@#$%";
+        let timestamp = 1700000000u64;
+        let event_id = "EVT_test123";
+        let payload = r#"{"special":"chars: 你好, émoji: 🚀"}"#;
+
+        let result = super::generate_webhook_signature(secret, timestamp, event_id, payload);
+        assert!(result.is_ok());
+
+        let headers = result.unwrap();
+        assert!(headers.get("X-Sayna-Signature").unwrap().starts_with("v1="));
+    }
+
+    #[test]
+    fn test_sip_forwarding_error_missing_signing_secret() {
+        let error = SipForwardingError::MissingSigningSecret {
+            domain: "example.com".to_string(),
+        };
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains("example.com"));
+        assert!(error_msg.contains("signing secret"));
+    }
 }

@@ -1,7 +1,7 @@
 //! Configuration module for Sayna server
 //!
-//! This module handles server configuration from various sources: YAML files and
-//! environment variables. Environment variables always override YAML values.
+//! This module handles server configuration from various sources: .env files, YAML files,
+//! and environment variables. Priority: YAML > ENV vars > .env values > defaults.
 //! The configuration is split into logical submodules for maintainability and extensibility.
 //!
 //! # Modules
@@ -89,16 +89,17 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Load configuration from a YAML file with environment variable overrides
+    /// Load configuration from a YAML file with environment variable base
     ///
-    /// Loads configuration from the specified YAML file, then applies environment
-    /// variable overrides. This allows YAML to provide base configuration while
-    /// environment variables can override specific values.
+    /// Loads .env file (if present), then merges environment variables (with defaults),
+    /// and finally applies YAML overrides. This allows .env and environment variables
+    /// to provide base configuration while YAML can override specific values.
     ///
     /// Priority order (highest to lowest):
-    /// 1. Environment variables
-    /// 2. YAML file values
-    /// 3. Default values
+    /// 1. YAML file values
+    /// 2. Environment variables (actual ENV vars override .env values)
+    /// 3. .env file values
+    /// 4. Default values
     ///
     /// After loading and merging, performs validation on the final configuration.
     ///
@@ -127,17 +128,17 @@ impl ServerConfig {
     /// # }
     /// ```
     pub fn from_file(path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        // Note: We do NOT load .env file here since the user explicitly specified a YAML config file.
-        // If they want .env values, they should either:
-        // 1. Set actual environment variables, or
-        // 2. Include values in the YAML file
-        // This gives more predictable behavior - YAML file is the source of truth, and
-        // only actual environment variables (not .env) override it.
+        // The configuration priority is: YAML > Environment Variables (.env + actual ENV) > Defaults
+        // Note: .env file is loaded in main.rs at application startup
+        // This gives predictable behavior where:
+        // 1. .env file values are loaded as environment variables (in main.rs)
+        // 2. Actual environment variables override .env values
+        // 3. YAML file overrides all environment variables
 
         // Load YAML configuration
         let yaml_config = yaml::YamlConfig::from_file(path)?;
 
-        // Merge with environment variables
+        // Merge environment variables (base) with YAML overrides
         let config = merge::merge_config(Some(yaml_config))?;
 
         // Validate configuration
@@ -565,7 +566,7 @@ cache:
 
     #[test]
     #[serial]
-    fn test_from_file_env_overrides_yaml() {
+    fn test_from_file_yaml_overrides_env() {
         cleanup_env_vars();
 
         let temp_dir = TempDir::new().unwrap();
@@ -589,10 +590,10 @@ providers:
 
         let config = ServerConfig::from_file(&config_path).unwrap();
 
-        // ENV overrides YAML
-        assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.deepgram_api_key, Some("env-key".to_string()));
-        // YAML value used when no ENV
+        // YAML overrides ENV
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.deepgram_api_key, Some("yaml-key".to_string()));
+        // YAML value
         assert_eq!(config.port, 8080);
 
         cleanup_env_vars();
@@ -694,13 +695,19 @@ cache:
 
         fs::write(&config_path, yaml_content).unwrap();
 
+        // Ensure we get default values by setting them explicitly
+        // (in case there's a .env file in the project directory)
+        unsafe {
+            env::set_var("LIVEKIT_URL", "ws://localhost:7880");
+        }
+
         let config = ServerConfig::from_file(&config_path).unwrap();
 
         // YAML values
         assert_eq!(config.port, 9000);
         assert_eq!(config.cache_ttl_seconds, Some(1800));
 
-        // Default values
+        // Values from ENV (which we set to defaults)
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.livekit_url, "ws://localhost:7880");
         assert!(!config.auth_required);
