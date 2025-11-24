@@ -284,21 +284,39 @@ pub async fn handle_livekit_webhook(
         && !sip_config.hooks.is_empty()
         && event.event == "participant_joined"
     {
-        // Step 5: Log the event with structured fields
-        log_webhook_event(&event);
+        // Optimization: Check if the SIP domain matches a configured hook BEFORE spawning.
+        // We only care about events that map to a configured SIP hook.
+        let should_forward = event
+            .participant
+            .as_ref()
+            .and_then(|p| p.attributes.get("sip.h.to"))
+            .and_then(|sip_to| parse_sip_domain(sip_to))
+            .map(|domain| {
+                sip_config
+                    .hooks
+                    .iter()
+                    .any(|h| h.host.eq_ignore_ascii_case(&domain))
+            })
+            .unwrap_or(false);
 
-        // We spawn this in the background to avoid delaying the response to LiveKit
-        let state_clone = state.clone();
-        let event_clone = event.clone();
-        let sip_config_clone = sip_config.clone();
-        tokio::spawn(async move {
-            if let Err(e) = forward_to_sip_hook(&state_clone, &sip_config_clone, &event_clone).await
-            {
-                // Log with appropriate severity based on error type
-                let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
-                e.log_with_context(&event_clone.id, room_name);
-            }
-        });
+        if should_forward {
+            // Step 5: Log the event with structured fields
+            log_webhook_event(&event);
+
+            // We spawn this in the background to avoid delaying the response to LiveKit
+            let state_clone = state.clone();
+            let event_clone = event.clone();
+            let sip_config_clone = sip_config.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    forward_to_sip_hook(&state_clone, &sip_config_clone, &event_clone).await
+                {
+                    // Log with appropriate severity based on error type
+                    let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
+                    e.log_with_context(&event_clone.id, room_name);
+                }
+            });
+        }
     }
 
     // Step 7: Respond quickly with success

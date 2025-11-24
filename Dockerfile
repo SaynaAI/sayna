@@ -18,6 +18,13 @@ ENV CARGO_PROFILE_RELEASE_LTO=thin
 
 WORKDIR /app
 
+# Download ONNX Runtime
+ARG ONNX_VERSION=1.23.2
+RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz -o onnxruntime.tgz && \
+    tar -xzf onnxruntime.tgz && \
+    mv onnxruntime-linux-x64-${ONNX_VERSION} onnxruntime && \
+    rm onnxruntime.tgz
+
 # ---------- 1a. Cache dependencies ----------
 # Create a dummy src so `cargo build` only fetches & compile deps.
 COPY Cargo.toml Cargo.lock ./
@@ -52,6 +59,7 @@ COPY --from=builder /app/target/release/*.so /app/
 COPY --from=builder /app/target/release/*.so.* /app/
 COPY --from=builder /app/target/release/*.d /app/
 COPY --from=builder /app/target/release/*.rlib /app/
+COPY --from=builder /app/onnxruntime/lib/libonnxruntime.so* /app/
 
 # Default logging level & port (override with -e if needed)
 ENV RUST_LOG=info \
