@@ -1,6 +1,7 @@
 /target
 node_modules
 .env
+config.yaml
 tmp/
 sayna-deploy/
 todo/
