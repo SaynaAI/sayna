@@ -72,7 +72,11 @@ impl KeepaliveTracker {
     /// Generate keep-alive silence audio.
     #[inline]
     pub fn generate_keepalive(&self) -> Bytes {
-        generate_silence_audio(self.sample_rate, self.channels, KEEPALIVE_SILENCE_DURATION_MS)
+        generate_silence_audio(
+            self.sample_rate,
+            self.channels,
+            KEEPALIVE_SILENCE_DURATION_MS,
+        )
     }
 }
 

@@ -12,7 +12,10 @@ use tracing::debug;
 use crate::core::cache::store::CacheStore;
 use crate::core::{
     create_stt_provider, create_tts_provider,
-    stt::{BaseSTT, STTError, STTErrorCallback as ProviderSTTErrorCallback, STTResult, STTResultCallback},
+    stt::{
+        BaseSTT, STTError, STTErrorCallback as ProviderSTTErrorCallback, STTResult,
+        STTResultCallback,
+    },
     tts::{AudioData, BaseTTS, TTSError},
     turn_detect::TurnDetector,
 };

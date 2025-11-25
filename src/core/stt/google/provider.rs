@@ -204,8 +204,9 @@ impl GoogleSTT {
             let auth_metadata_value: tonic::metadata::MetadataValue<_> = match auth_header.parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    let stt_error =
-                        STTError::AuthenticationFailed("Failed to parse authorization header".to_string());
+                    let stt_error = STTError::AuthenticationFailed(
+                        "Failed to parse authorization header".to_string(),
+                    );
                     error!("{}", stt_error);
                     let _ = error_tx.send(stt_error);
                     return;
@@ -419,9 +420,7 @@ impl BaseSTT for GoogleSTT {
             (parts[0].to_string(), parts[1].to_string())
         } else {
             // Try to extract project_id from credentials (service account JSON has project_id field)
-            let project_id = credential_source
-                .extract_project_id()
-                .unwrap_or_default();
+            let project_id = credential_source.extract_project_id().unwrap_or_default();
             (project_id, config.model.clone())
         };
 
@@ -566,9 +565,7 @@ impl BaseSTT for GoogleSTT {
             (parts[0].to_string(), parts[1].to_string())
         } else {
             // Try to extract project_id from credentials (service account JSON has project_id field)
-            let project_id = credential_source
-                .extract_project_id()
-                .unwrap_or_default();
+            let project_id = credential_source.extract_project_id().unwrap_or_default();
             (project_id, config.model.clone())
         };
 

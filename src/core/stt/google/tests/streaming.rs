@@ -1001,6 +1001,9 @@ async fn test_keepalive_tracker_needs_keepalive_after_interval() {
     assert!(!tracker.needs_keepalive());
 
     // After waiting longer than KEEPALIVE_INTERVAL_SECS, should need keepalive
-    tokio::time::sleep(tokio::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS + 1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        KEEPALIVE_INTERVAL_SECS + 1,
+    ))
+    .await;
     assert!(tracker.needs_keepalive());
 }

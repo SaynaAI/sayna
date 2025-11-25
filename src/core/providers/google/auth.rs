@@ -170,26 +170,9 @@ impl CredentialSource {
         match self {
             CredentialSource::ApplicationDefault => {
                 // Try to read project_id from GOOGLE_APPLICATION_CREDENTIALS file
-                if let Ok(path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                            return json
-                                .get("project_id")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
-                    }
-                }
-                None
-            }
-            CredentialSource::JsonContent(json) => {
-                serde_json::from_str::<serde_json::Value>(json)
+                std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
                     .ok()
-                    .and_then(|v| v.get("project_id").and_then(|p| p.as_str()).map(|s| s.to_string()))
-            }
-            CredentialSource::FilePath(path) => {
-                std::fs::read_to_string(path)
-                    .ok()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
                     .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
                     .and_then(|json| {
                         json.get("project_id")
@@ -197,6 +180,21 @@ impl CredentialSource {
                             .map(|s| s.to_string())
                     })
             }
+            CredentialSource::JsonContent(json) => serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|v| {
+                    v.get("project_id")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string())
+                }),
+            CredentialSource::FilePath(path) => std::fs::read_to_string(path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|json| {
+                    json.get("project_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                }),
         }
     }
 }
