@@ -288,8 +288,13 @@ async fn initialize_voice_manager(
         return None;
     }
 
-    // Set up STT callback
+    // Set up STT result callback
     if !register_stt_callback(&voice_manager, message_tx).await {
+        return None;
+    }
+
+    // Set up STT error callback - critical for propagating streaming errors
+    if !register_stt_error_callback(&voice_manager, message_tx).await {
         return None;
     }
 
@@ -336,6 +341,35 @@ async fn register_stt_callback(
         let _ = message_tx
             .send(MessageRoute::Outgoing(OutgoingMessage::Error {
                 message: format!("Failed to set up STT callback: {e}"),
+            }))
+            .await;
+        return false;
+    }
+    true
+}
+
+/// Register STT error callback to propagate streaming errors to clients
+async fn register_stt_error_callback(
+    voice_manager: &Arc<VoiceManager>,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) -> bool {
+    let message_tx_clone = message_tx.clone();
+    if let Err(e) = voice_manager
+        .on_stt_error(move |error| {
+            let message_tx = message_tx_clone.clone();
+            Box::pin(async move {
+                let msg = OutgoingMessage::Error {
+                    message: format!("STT streaming error: {error}"),
+                };
+                let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;
+            })
+        })
+        .await
+    {
+        error!("Failed to set up STT error callback: {}", e);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                message: format!("Failed to set up STT error callback: {e}"),
             }))
             .await;
         return false;

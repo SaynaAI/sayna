@@ -37,6 +37,11 @@ impl ServerConfig {
         // Provider API keys
         let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let elevenlabs_api_key = env::var("ELEVENLABS_API_KEY").ok();
+        // Google credentials can be:
+        // - Path to service account JSON file (GOOGLE_APPLICATION_CREDENTIALS)
+        // - Inline JSON content (for secrets management systems)
+        // - Empty/None to use Application Default Credentials
+        let google_credentials = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok();
 
         // LiveKit recording S3 configuration
         let recording_s3_bucket = env::var("RECORDING_S3_BUCKET").ok();
@@ -88,6 +93,7 @@ impl ServerConfig {
             livekit_api_secret,
             deepgram_api_key,
             elevenlabs_api_key,
+            google_credentials,
             recording_s3_bucket,
             recording_s3_region,
             recording_s3_endpoint,

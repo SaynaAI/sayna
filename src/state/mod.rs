@@ -220,6 +220,7 @@ mod tests {
             livekit_api_secret: Some("test_secret".to_string()),
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -255,6 +256,7 @@ mod tests {
             livekit_api_secret: None, // Missing API secret
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,

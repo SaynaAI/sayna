@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod providers;
 pub mod state;
 pub mod stt;
 pub mod tts;

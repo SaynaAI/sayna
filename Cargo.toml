@@ -108,6 +108,15 @@ hmac = "0.12"
 hex = "0.4"
 anyhow = "1.0"
 
+# Google Cloud STT
+# Using google-api-proto 1.678.0 for prost 0.12 compatibility with LiveKit
+# (newer versions use prost 0.13 which conflicts with livekit's prost 0.12)
+google-api-proto = { version = "=1.678.0", features = ["google-cloud-speech-v2"] }
+google-cloud-auth = "1.2.0"
+tonic = { version = "0.11", features = ["tls-roots", "prost", "channel"] }
+prost-types = "0.12"
+async-stream = "0.3"
+
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 tempfile = "3.8"

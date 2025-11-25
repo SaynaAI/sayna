@@ -65,6 +65,11 @@ pub struct ServerConfig {
     // Provider API keys
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
+    /// Google Cloud credentials - can be:
+    /// - Empty string: Use Application Default Credentials (ADC)
+    /// - JSON string starting with '{': Service account credentials inline
+    /// - File path: Path to service account JSON file
+    pub google_credentials: Option<String>,
 
     // LiveKit recording configuration
     pub recording_s3_bucket: Option<String>,
@@ -214,6 +219,17 @@ impl ServerConfig {
             "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
                 "ElevenLabs API key not configured in server environment".to_string()
             }),
+            "google" => {
+                // Google uses credentials that can be:
+                // - Empty string: Use Application Default Credentials (ADC)
+                // - JSON content: Service account credentials inline
+                // - File path: Path to service account JSON file
+                //
+                // If google_credentials is None, return empty string to trigger ADC.
+                // This allows Google STT to work with GOOGLE_APPLICATION_CREDENTIALS
+                // environment variable or gcloud auth.
+                Ok(self.google_credentials.clone().unwrap_or_default())
+            }
             _ => Err(format!("Unsupported provider: {provider}")),
         }
     }
@@ -238,6 +254,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -269,6 +286,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -300,6 +318,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -334,6 +353,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -368,6 +388,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -408,6 +429,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -435,6 +457,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -464,6 +487,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -491,6 +515,7 @@ mod tests {
             livekit_api_secret: None,
             deepgram_api_key: None,
             elevenlabs_api_key: None,
+            google_credentials: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -507,6 +532,144 @@ mod tests {
         };
 
         assert!(!config_without_api_secret.has_api_secret_auth());
+    }
+
+    #[test]
+    fn test_get_api_key_google_with_credentials() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: Some("/path/to/service-account.json".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        // Google returns the credentials path/content when configured
+        let result = config.get_api_key("google");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/path/to/service-account.json");
+    }
+
+    #[test]
+    fn test_get_api_key_google_with_json_content() {
+        let json_credentials = r#"{"type": "service_account", "project_id": "test-project"}"#;
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: Some(json_credentials.to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        // Google returns the inline JSON credentials when configured
+        let result = config.get_api_key("google");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json_credentials);
+    }
+
+    #[test]
+    fn test_get_api_key_google_none_returns_empty_for_adc() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None, // Not configured - will use ADC
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        // Google returns empty string when not configured, allowing ADC to be used
+        let result = config.get_api_key("google");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_get_api_key_google_case_insensitive() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: Some("/path/to/creds.json".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        // Test uppercase
+        let result1 = config.get_api_key("GOOGLE");
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), "/path/to/creds.json");
+
+        // Test mixed case
+        let result2 = config.get_api_key("Google");
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), "/path/to/creds.json");
     }
 
     // Helper to clean up environment variables

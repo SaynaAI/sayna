@@ -11,11 +11,18 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
-use super::base::{BaseSTT, STTConfig, STTError, STTResult, STTResultCallback};
+use super::base::{BaseSTT, STTConfig, STTError, STTErrorCallback, STTResult, STTResultCallback};
 
 /// Type alias for the complex callback function type
 type AsyncSTTCallback = Box<
     dyn Fn(STTResult) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Type alias for the error callback function type
+type AsyncErrorCallback = Box<
+    dyn Fn(STTError) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + Sync,
 >;
@@ -158,12 +165,18 @@ pub struct DeepgramSTT {
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Result channel sender
     result_tx: Option<mpsc::UnboundedSender<STTResult>>,
+    /// Error channel sender for streaming errors
+    error_tx: Option<mpsc::UnboundedSender<STTError>>,
     /// Connection handle
     connection_handle: Option<tokio::task::JoinHandle<()>>,
     /// Result forwarding task handle
     result_forward_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Error forwarding task handle
+    error_forward_handle: Option<tokio::task::JoinHandle<()>>,
     /// Shared callback storage for async access
     result_callback: Arc<Mutex<Option<AsyncSTTCallback>>>,
+    /// Error callback storage for streaming errors
+    error_callback: Arc<Mutex<Option<AsyncErrorCallback>>>,
 }
 
 impl DeepgramSTT {
@@ -291,12 +304,14 @@ impl DeepgramSTT {
         let (ws_tx, mut ws_rx) = mpsc::channel::<Bytes>(32);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let (result_tx, mut result_rx) = mpsc::unbounded_channel::<STTResult>();
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel::<STTError>();
         let (connected_tx, connected_rx) = oneshot::channel::<()>();
 
         // Store channels
         self.ws_sender = Some(ws_tx);
         self.shutdown_tx = Some(shutdown_tx);
         self.result_tx = Some(result_tx.clone());
+        self.error_tx = Some(error_tx.clone());
 
         // Clone necessary data for the connection task
         let api_key = config.base.api_key.clone();
@@ -321,7 +336,11 @@ impl DeepgramSTT {
             {
                 Ok(request) => request,
                 Err(e) => {
-                    error!("Failed to create WebSocket request: {}", e);
+                    let stt_error = STTError::ConnectionFailed(format!(
+                        "Failed to create WebSocket request: {e}"
+                    ));
+                    error!("{}", stt_error);
+                    let _ = error_tx.send(stt_error);
                     return;
                 }
             };
@@ -329,7 +348,10 @@ impl DeepgramSTT {
             let (ws_stream, _) = match connect_async(request).await {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("Failed to connect to Deepgram: {}", e);
+                    let stt_error =
+                        STTError::ConnectionFailed(format!("Failed to connect to Deepgram: {e}"));
+                    error!("{}", stt_error);
+                    let _ = error_tx.send(stt_error);
                     return;
                 }
             };
@@ -354,7 +376,11 @@ impl DeepgramSTT {
                     Some(audio_data) = ws_rx.recv() => {
                         let message = Message::Binary(audio_data);
                         if let Err(e) = ws_sink.send(message).await {
-                            error!("Failed to send WebSocket message: {}", e);
+                            let stt_error = STTError::NetworkError(format!(
+                                "Failed to send WebSocket message: {e}"
+                            ));
+                            error!("{}", stt_error);
+                            let _ = error_tx.send(stt_error);
                             break;
                         }
                         // Update last activity time when audio is sent
@@ -366,12 +392,17 @@ impl DeepgramSTT {
                         match message {
                             Some(Ok(msg)) => {
                                 if let Err(e) = Self::handle_websocket_message(msg, &result_tx) {
-                                    error!("Failed to handle WebSocket message: {}", e);
+                                    error!("Streaming error from Deepgram: {}", e);
+                                    let _ = error_tx.send(e);
                                     break;
                                 }
                             }
                             Some(Err(e)) => {
-                                error!("WebSocket error: {}", e);
+                                let stt_error = STTError::NetworkError(format!(
+                                    "WebSocket error: {e}"
+                                ));
+                                error!("{}", stt_error);
+                                let _ = error_tx.send(stt_error);
                                 break;
                             }
                             None => {
@@ -388,7 +419,11 @@ impl DeepgramSTT {
                         if last_activity.elapsed() >= Duration::from_secs(1) {
                             let keepalive_message = Message::Text(r#"{"type":"KeepAlive"}"#.into());
                             if let Err(e) = ws_sink.send(keepalive_message).await {
-                                error!("Failed to send keep-alive message: {}", e);
+                                let stt_error = STTError::NetworkError(format!(
+                                    "Failed to send keep-alive message: {e}"
+                                ));
+                                error!("{}", stt_error);
+                                let _ = error_tx.send(stt_error);
                                 break;
                             }
                             debug!("Sent keep-alive message to Deepgram");
@@ -427,6 +462,25 @@ impl DeepgramSTT {
         // Store the result forwarding handle for cleanup
         self.result_forward_handle = Some(result_forwarding_handle);
 
+        // Start error forwarding task with shared callback
+        let error_callback_ref = self.error_callback.clone();
+        let error_forwarding_handle = tokio::spawn(async move {
+            while let Some(error) = error_rx.recv().await {
+                if let Some(callback) = error_callback_ref.lock().await.as_ref() {
+                    callback(error).await;
+                } else {
+                    // Log the error if no callback is set
+                    error!(
+                        "STT streaming error but no error callback registered: {}",
+                        error
+                    );
+                }
+            }
+        });
+
+        // Store the error forwarding handle for cleanup
+        self.error_forward_handle = Some(error_forwarding_handle);
+
         // Update state and wait for connection
         self.state = ConnectionState::Connecting;
 
@@ -461,9 +515,12 @@ impl Default for DeepgramSTT {
             ws_sender: None,
             shutdown_tx: None,
             result_tx: None,
+            error_tx: None,
             connection_handle: None,
             result_forward_handle: None,
+            error_forward_handle: None,
             result_callback: Arc::new(Mutex::new(None)),
+            error_callback: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -501,9 +558,12 @@ impl BaseSTT for DeepgramSTT {
             ws_sender: None,
             shutdown_tx: None,
             result_tx: None,
+            error_tx: None,
             connection_handle: None,
             result_forward_handle: None,
+            error_forward_handle: None,
             result_callback: Arc::new(Mutex::new(None)),
+            error_callback: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -534,10 +594,18 @@ impl BaseSTT for DeepgramSTT {
             let _ = handle.await;
         }
 
-        // Clean up channels and callback
+        // Clean up error forwarding task
+        if let Some(handle) = self.error_forward_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // Clean up channels and callbacks
         self.ws_sender = None;
         self.result_tx = None;
+        self.error_tx = None;
         *self.result_callback.lock().await = None;
+        *self.error_callback.lock().await = None;
 
         // Update state
         self.state = ConnectionState::Disconnected;
@@ -579,6 +647,16 @@ impl BaseSTT for DeepgramSTT {
             let cb = callback.clone();
             Box::pin(async move {
                 cb(result).await;
+            })
+        }));
+        Ok(())
+    }
+
+    async fn on_error(&mut self, callback: STTErrorCallback) -> Result<(), STTError> {
+        *self.error_callback.lock().await = Some(Box::new(move |error| {
+            let cb = callback.clone();
+            Box::pin(async move {
+                cb(error).await;
             })
         }));
         Ok(())

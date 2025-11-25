@@ -300,7 +300,9 @@ pub mod stt_result;
 mod tests;
 
 // Re-export commonly used items
-pub use callbacks::{AudioClearCallback, STTCallback, TTSAudioCallback, TTSErrorCallback};
+pub use callbacks::{
+    AudioClearCallback, STTCallback, STTErrorCallback, TTSAudioCallback, TTSErrorCallback,
+};
 pub use config::{SpeechFinalConfig, VoiceManagerConfig};
 pub use errors::{VoiceManagerError, VoiceManagerResult};
 pub use manager::VoiceManager;

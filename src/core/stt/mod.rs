@@ -1,26 +1,33 @@
 mod base;
 pub mod deepgram;
+pub mod google;
 
 // Re-export public types and traits
 pub use base::{
-    BaseSTT, STTConfig, STTConnectionState, STTError, STTFactory, STTHelper, STTResult,
-    STTResultCallback, STTStats,
+    BaseSTT, STTConfig, STTConnectionState, STTError, STTErrorCallback, STTFactory, STTHelper,
+    STTResult, STTResultCallback, STTStats,
 };
 
 // Re-export Deepgram implementation
 pub use deepgram::{DeepgramSTT, DeepgramSTTConfig};
+
+// Re-export Google implementation
+pub use google::{GoogleSTT, GoogleSTTConfig, STTGoogleAuthClient};
 
 /// Supported STT providers
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum STTProvider {
     /// Deepgram STT WebSocket API
     Deepgram,
+    /// Google Speech-to-Text v2 API
+    Google,
 }
 
 impl std::fmt::Display for STTProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             STTProvider::Deepgram => write!(f, "deepgram"),
+            STTProvider::Google => write!(f, "google"),
         }
     }
 }
@@ -31,8 +38,9 @@ impl std::str::FromStr for STTProvider {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "deepgram" => Ok(STTProvider::Deepgram),
+            "google" => Ok(STTProvider::Google),
             _ => Err(STTError::ConfigurationError(format!(
-                "Unsupported STT provider: {s}. Supported providers: deepgram"
+                "Unsupported STT provider: {s}. Supported providers: deepgram, google"
             ))),
         }
     }
@@ -87,6 +95,10 @@ pub fn create_stt_provider(
             let deepgram_stt = <DeepgramSTT as BaseSTT>::new(config)?;
             Ok(Box::new(deepgram_stt))
         }
+        STTProvider::Google => {
+            let google_stt = <GoogleSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(google_stt))
+        }
     }
 }
 
@@ -130,6 +142,10 @@ pub fn create_stt_provider_from_enum(
             let deepgram_stt = <DeepgramSTT as BaseSTT>::new(config)?;
             Ok(Box::new(deepgram_stt))
         }
+        STTProvider::Google => {
+            let google_stt = <GoogleSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(google_stt))
+        }
     }
 }
 
@@ -144,10 +160,10 @@ pub fn create_stt_provider_from_enum(
 ///
 /// let providers = get_supported_stt_providers();
 /// println!("Supported STT providers: {:?}", providers);
-/// // Output: ["deepgram"]
+/// // Output: ["deepgram", "google"]
 /// ```
 pub fn get_supported_stt_providers() -> Vec<&'static str> {
-    vec!["deepgram"]
+    vec!["deepgram", "google"]
 }
 
 #[cfg(test)]
@@ -156,7 +172,7 @@ mod factory_tests {
 
     #[test]
     fn test_stt_provider_enum_from_string() {
-        // Test valid provider names
+        // Test valid provider names - Deepgram
         assert_eq!(
             "deepgram".parse::<STTProvider>().unwrap(),
             STTProvider::Deepgram
@@ -170,6 +186,20 @@ mod factory_tests {
             STTProvider::Deepgram
         );
 
+        // Test valid provider names - Google
+        assert_eq!(
+            "google".parse::<STTProvider>().unwrap(),
+            STTProvider::Google
+        );
+        assert_eq!(
+            "Google".parse::<STTProvider>().unwrap(),
+            STTProvider::Google
+        );
+        assert_eq!(
+            "GOOGLE".parse::<STTProvider>().unwrap(),
+            STTProvider::Google
+        );
+
         // Test invalid provider name
         let result = "invalid".parse::<STTProvider>();
         assert!(result.is_err());
@@ -181,13 +211,15 @@ mod factory_tests {
     #[test]
     fn test_stt_provider_enum_display() {
         assert_eq!(STTProvider::Deepgram.to_string(), "deepgram");
+        assert_eq!(STTProvider::Google.to_string(), "google");
     }
 
     #[test]
     fn test_get_supported_stt_providers() {
         let providers = get_supported_stt_providers();
-        assert_eq!(providers, vec!["deepgram"]);
+        assert_eq!(providers, vec!["deepgram", "google"]);
         assert!(providers.contains(&"deepgram"));
+        assert!(providers.contains(&"google"));
     }
 
     #[tokio::test]

@@ -12,15 +12,15 @@ use tracing::debug;
 use crate::core::cache::store::CacheStore;
 use crate::core::{
     create_stt_provider, create_tts_provider,
-    stt::{BaseSTT, STTResult, STTResultCallback},
+    stt::{BaseSTT, STTError, STTErrorCallback as ProviderSTTErrorCallback, STTResult, STTResultCallback},
     tts::{AudioData, BaseTTS, TTSError},
     turn_detect::TurnDetector,
 };
 
 use super::{
     callbacks::{
-        AudioClearCallback, STTCallback, TTSAudioCallback, TTSCompleteCallback, TTSErrorCallback,
-        VoiceManagerTTSCallback,
+        AudioClearCallback, STTCallback, STTErrorCallback, TTSAudioCallback, TTSCompleteCallback,
+        TTSErrorCallback, VoiceManagerTTSCallback,
     },
     config::VoiceManagerConfig,
     errors::{VoiceManagerError, VoiceManagerResult},
@@ -36,6 +36,7 @@ pub struct VoiceManager {
 
     // Callbacks - using parking_lot RwLock for faster synchronization
     stt_callback: Arc<SyncRwLock<Option<STTCallback>>>,
+    stt_error_callback: Arc<SyncRwLock<Option<STTErrorCallback>>>,
     tts_audio_callback: Arc<SyncRwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<SyncRwLock<Option<TTSErrorCallback>>>,
     audio_clear_callback: Arc<SyncRwLock<Option<AudioClearCallback>>>,
@@ -106,6 +107,7 @@ impl VoiceManager {
             tts: Arc::new(RwLock::new(tts)),
             stt: Arc::new(RwLock::new(stt)),
             stt_callback: Arc::new(SyncRwLock::new(None)),
+            stt_error_callback: Arc::new(SyncRwLock::new(None)),
             tts_audio_callback: Arc::new(SyncRwLock::new(None)),
             tts_error_callback: Arc::new(SyncRwLock::new(None)),
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
@@ -581,6 +583,68 @@ impl VoiceManager {
         {
             let mut stt = self.stt.write().await;
             stt.on_result(wrapper_callback)
+                .await
+                .map_err(VoiceManagerError::STTError)?;
+        }
+
+        Ok(())
+    }
+
+    /// Register a callback for STT streaming errors
+    ///
+    /// This callback is triggered when errors occur during STT streaming,
+    /// such as permission errors, network failures, or API errors that happen
+    /// after the initial connection is established.
+    ///
+    /// # Arguments
+    /// * `callback` - Callback function to handle STT errors
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<()>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+    /// # use sayna::core::stt::STTConfig;
+    /// # use sayna::core::tts::TTSConfig;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let voice_manager = VoiceManager::new(
+    /// #     VoiceManagerConfig::new(STTConfig::default(), TTSConfig::default()),
+    /// #     None
+    /// # )?;
+    /// voice_manager.on_stt_error(|error| {
+    ///     Box::pin(async move {
+    ///         eprintln!("STT streaming error: {}", error);
+    ///         // Handle error: notify user, reconnect, etc.
+    ///     })
+    /// }).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn on_stt_error<F>(&self, callback: F) -> VoiceManagerResult<()>
+    where
+        F: Fn(STTError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+    {
+        let callback = Arc::new(callback);
+
+        // Store the callback for later use
+        {
+            let mut stt_error_callback = self.stt_error_callback.write();
+            *stt_error_callback = Some(callback.clone());
+        }
+
+        // Create wrapper callback for the provider
+        let wrapper_callback: ProviderSTTErrorCallback = Arc::new(move |error| {
+            let callback = callback.clone();
+            Box::pin(async move {
+                callback(error).await;
+            })
+        });
+
+        // Register callback with STT provider
+        {
+            let mut stt = self.stt.write().await;
+            stt.on_error(wrapper_callback)
                 .await
                 .map_err(VoiceManagerError::STTError)?;
         }

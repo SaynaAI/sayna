@@ -90,6 +90,11 @@ pub struct LiveKitYaml {
 pub struct ProvidersYaml {
     pub deepgram_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
+    /// Google Cloud credentials - can be:
+    /// - Path to service account JSON file
+    /// - Inline JSON content (for secrets management)
+    /// - Empty string to use Application Default Credentials
+    pub google_credentials: Option<String>,
 }
 
 /// Recording S3 configuration from YAML

@@ -69,7 +69,8 @@ Always consult these rule files when implementing new features or modifying exis
 2. **Provider System** (`src/core/stt/` and `src/core/tts/`):
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
-   - Current providers: Deepgram (STT/TTS), ElevenLabs (TTS)
+   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC)
+   - Current TTS providers: Deepgram, ElevenLabs
    - Providers implement `STTProvider` or `TTSProvider` traits
 
 3. **WebSocket Handler** (`src/handlers/ws.rs`):
@@ -143,6 +144,7 @@ All configuration options can also be set via environment variables or a `.env` 
 Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
 - `ELEVENLABS_API_KEY`: ElevenLabs API authentication
+- `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
 - `PORT`: Server port (default: 3001)
@@ -188,11 +190,32 @@ When adding new features:
 
 ## Adding New Providers
 
-1. Implement the `STTProvider` or `TTSProvider` trait in `src/core/stt/` or `src/core/tts/`
-2. Add factory function following existing pattern (e.g., `create_deepgram_stt`)
+### STT Providers
+
+1. Implement the `BaseSTT` trait in `src/core/stt/`
+2. Create provider-specific configuration struct (e.g., `GoogleSTTConfig`)
+3. Add factory function following existing pattern
+4. Register in `src/core/stt/mod.rs`:
+   - Add to `STTProvider` enum
+   - Update `create_stt_provider` factory function
+   - Add re-exports for public types
+5. Update WebSocket handler if needed
+6. Add tests to cover new provider functionality
+
+### TTS Providers
+
+1. Implement the `TTSProvider` trait in `src/core/tts/`
+2. Add factory function following existing pattern
 3. Update `VoiceManager` to support the new provider in configuration
 4. Add provider-specific configuration to `WebSocketMessage::Config`
 5. Update tests to cover new provider functionality
+
+### Current STT Provider Implementations
+
+- **Deepgram** (`deepgram.rs`): WebSocket-based streaming, uses `tokio-tungstenite`
+- **Google** (`google.rs`): gRPC bidirectional streaming, uses `tonic` with Google Cloud protos
+
+See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
 
 ## API Endpoints
 

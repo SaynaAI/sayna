@@ -97,6 +97,14 @@ pub fn merge_config(
             .and_then(|p| p.elevenlabs_api_key.clone())
     );
 
+    // Google Cloud credentials (can be path, JSON content, or empty for ADC)
+    let google_credentials = get_optional!(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        yaml.providers
+            .as_ref()
+            .and_then(|p| p.google_credentials.clone())
+    );
+
     // Recording S3 configuration
     let recording_s3_bucket = get_optional!(
         "RECORDING_S3_BUCKET",
@@ -194,6 +202,7 @@ pub fn merge_config(
         livekit_api_secret,
         deepgram_api_key,
         elevenlabs_api_key,
+        google_credentials,
         recording_s3_bucket,
         recording_s3_region,
         recording_s3_endpoint,

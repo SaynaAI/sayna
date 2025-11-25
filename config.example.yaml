@@ -26,6 +26,23 @@ providers:
   deepgram_api_key: "your-deepgram-api-key"     # ENV: DEEPGRAM_API_KEY
   elevenlabs_api_key: "your-elevenlabs-api-key" # ENV: ELEVENLABS_API_KEY
 
+  # Google Cloud Speech-to-Text settings
+  # Authentication options (in order of precedence):
+  # 1. Path to service account JSON file
+  # 2. JSON content string (starts with '{')
+  # 3. Empty string to use Application Default Credentials (ADC)
+  # Note: project_id is automatically extracted from the credentials JSON
+  google_credentials: ""                         # ENV: GOOGLE_APPLICATION_CREDENTIALS
+
+# STT Provider Configuration (optional - can also be set via WebSocket config)
+# stt:
+#   provider: deepgram  # Options: "deepgram", "google"
+#   # Google-specific settings (only used when provider is "google")
+#   google:
+#     location: global           # Options: global, us, eu, asia-southeast1, etc.
+#     recognizer_id: ""          # Optional: pre-configured recognizer ID
+#     model: latest_long         # Options: latest_long, latest_short, chirp_2, telephony
+
 # LiveKit recording configuration (S3)
 recording:
   s3_bucket: "my-recordings"              # ENV: RECORDING_S3_BUCKET

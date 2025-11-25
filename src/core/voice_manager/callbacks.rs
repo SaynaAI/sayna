@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::core::{
-    stt::STTResult,
+    stt::{STTError, STTResult},
     tts::{AudioCallback, AudioData, TTSError},
 };
 
@@ -14,6 +14,10 @@ use super::state::InterruptionState;
 /// Callback type for STT results
 pub type STTCallback =
     Arc<dyn Fn(STTResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Callback type for STT streaming errors
+pub type STTErrorCallback =
+    Arc<dyn Fn(STTError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Callback type for TTS audio data
 pub type TTSAudioCallback =

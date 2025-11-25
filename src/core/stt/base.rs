@@ -63,7 +63,7 @@ impl Default for STTConfig {
 }
 
 /// Error types for STT operations
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum STTError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
@@ -84,6 +84,10 @@ pub enum STTError {
 /// Type alias for STT result callback
 pub type STTResultCallback =
     Arc<dyn Fn(STTResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Type alias for STT error callback
+pub type STTErrorCallback =
+    Arc<dyn Fn(STTError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Base trait for Speech-to-Text providers
 #[async_trait::async_trait]
@@ -134,6 +138,18 @@ pub trait BaseSTT: Send + Sync {
     /// # Returns
     /// * `Result<(), STTError>` - Success or error
     async fn on_result(&mut self, callback: STTResultCallback) -> Result<(), STTError>;
+
+    /// Register a callback function that gets triggered when errors occur during streaming
+    ///
+    /// This is critical for propagating streaming errors (e.g., permission denied, rate limits)
+    /// that occur after the initial connection is established.
+    ///
+    /// # Arguments
+    /// * `callback` - Callback function to handle STT errors
+    ///
+    /// # Returns
+    /// * `Result<(), STTError>` - Success or error
+    async fn on_error(&mut self, callback: STTErrorCallback) -> Result<(), STTError>;
 
     /// Get the current configuration
     fn get_config(&self) -> Option<&STTConfig>;
@@ -270,6 +286,11 @@ mod tests {
 
         async fn on_result(&mut self, callback: STTResultCallback) -> Result<(), STTError> {
             self.callback = Some(callback);
+            Ok(())
+        }
+
+        async fn on_error(&mut self, _callback: STTErrorCallback) -> Result<(), STTError> {
+            // Mock implementation - errors not simulated
             Ok(())
         }
 

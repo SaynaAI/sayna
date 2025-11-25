@@ -845,19 +845,28 @@ Required when `audio=true`.
 
 | Field | Type | Required | Description | Example |
 |-------|------|----------|-------------|---------|
-| `provider` | string | Yes | STT provider name. Currently supported: `"deepgram"` | `"deepgram"` |
+| `provider` | string | Yes | STT provider name. Supported: `"deepgram"`, `"google"` | `"deepgram"` |
+| `api_key` | string | No | Provider credentials (see below for Google) | `""` |
 | `language` | string | Yes | BCP-47 language code for transcription | `"en-US"`, `"es-ES"`, `"fr-FR"` |
 | `sample_rate` | number | Yes | Audio sample rate in Hz. Must match binary audio you send. | `16000`, `24000`, `48000` |
 | `channels` | number | Yes | Number of audio channels. `1` = mono, `2` = stereo. | `1` |
 | `punctuation` | boolean | Yes | Enable automatic punctuation in transcripts | `true`, `false` |
 | `encoding` | string | Yes | Audio encoding format. Must match binary audio you send. | `"linear16"`, `"opus"` |
-| `model` | string | Yes | Provider-specific model identifier | `"nova-2"` (Deepgram) |
+| `model` | string | Yes | Provider-specific model identifier | `"nova-2"` (Deepgram), `"latest_long"` (Google) |
+
+**Provider-specific notes:**
+
+- **Deepgram**: API key injected from server environment (`DEEPGRAM_API_KEY`). Clients should not include `api_key` field.
+- **Google**: Supports three credential modes via `api_key` field:
+  - Empty string (`""`): Uses Application Default Credentials
+  - File path: Path to service account JSON file
+  - JSON content: Raw JSON string (starts with `{`)
 
 **Critical:** The `sample_rate`, `channels`, and `encoding` must **exactly match** the binary audio frames you send. Sayna does not perform audio format conversion. Mismatches result in garbled transcriptions or errors.
 
 **Common Configurations:**
 
-**High-quality phone calls (16kHz mono):**
+**Deepgram - High-quality phone calls (16kHz mono):**
 ```json
 {
   "provider": "deepgram",
@@ -870,7 +879,7 @@ Required when `audio=true`.
 }
 ```
 
-**High-quality web audio (48kHz stereo):**
+**Deepgram - High-quality web audio (48kHz stereo):**
 ```json
 {
   "provider": "deepgram",
@@ -882,6 +891,36 @@ Required when `audio=true`.
   "model": "nova-2"
 }
 ```
+
+**Google Cloud STT - Standard configuration:**
+```json
+{
+  "provider": "google",
+  "api_key": "",
+  "language": "en-US",
+  "sample_rate": 16000,
+  "channels": 1,
+  "punctuation": true,
+  "encoding": "linear16",
+  "model": "latest_long"
+}
+```
+
+**Google Cloud STT - Telephony optimized:**
+```json
+{
+  "provider": "google",
+  "api_key": "",
+  "language": "en-US",
+  "sample_rate": 8000,
+  "channels": 1,
+  "punctuation": true,
+  "encoding": "mulaw",
+  "model": "telephony"
+}
+```
+
+See [Google STT documentation](google-stt.md) for detailed configuration options and model selection.
 
 ---
 
@@ -2197,6 +2236,7 @@ With this foundation, you can build sophisticated voice applications ranging fro
 ---
 
 **Additional Resources:**
+- [Google STT Integration](google-stt.md)
 - [Authentication Documentation](authentication.md)
 - [LiveKit Webhook Documentation](livekit_webhook.md)
 - [API Reference (REST Endpoints)](../CLAUDE.md#api-endpoints)
