@@ -1,5 +1,6 @@
 mod base;
 pub mod deepgram;
+pub mod elevenlabs;
 pub mod google;
 
 // Re-export public types and traits
@@ -11,6 +12,12 @@ pub use base::{
 // Re-export Deepgram implementation
 pub use deepgram::{DeepgramSTT, DeepgramSTTConfig};
 
+// Re-export ElevenLabs implementation
+pub use elevenlabs::{
+    CommitStrategy, ElevenLabsAudioFormat, ElevenLabsMessage, ElevenLabsRegion, ElevenLabsSTT,
+    ElevenLabsSTTConfig,
+};
+
 // Re-export Google implementation
 pub use google::{GoogleSTT, GoogleSTTConfig, STTGoogleAuthClient};
 
@@ -21,6 +28,8 @@ pub enum STTProvider {
     Deepgram,
     /// Google Speech-to-Text v2 API
     Google,
+    /// ElevenLabs STT Real-Time WebSocket API
+    ElevenLabs,
 }
 
 impl std::fmt::Display for STTProvider {
@@ -28,6 +37,7 @@ impl std::fmt::Display for STTProvider {
         match self {
             STTProvider::Deepgram => write!(f, "deepgram"),
             STTProvider::Google => write!(f, "google"),
+            STTProvider::ElevenLabs => write!(f, "elevenlabs"),
         }
     }
 }
@@ -39,8 +49,9 @@ impl std::str::FromStr for STTProvider {
         match s.to_lowercase().as_str() {
             "deepgram" => Ok(STTProvider::Deepgram),
             "google" => Ok(STTProvider::Google),
+            "elevenlabs" => Ok(STTProvider::ElevenLabs),
             _ => Err(STTError::ConfigurationError(format!(
-                "Unsupported STT provider: {s}. Supported providers: deepgram, google"
+                "Unsupported STT provider: {s}. Supported providers: deepgram, google, elevenlabs"
             ))),
         }
     }
@@ -99,6 +110,10 @@ pub fn create_stt_provider(
             let google_stt = <GoogleSTT as BaseSTT>::new(config)?;
             Ok(Box::new(google_stt))
         }
+        STTProvider::ElevenLabs => {
+            let elevenlabs_stt = <ElevenLabsSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(elevenlabs_stt))
+        }
     }
 }
 
@@ -146,6 +161,10 @@ pub fn create_stt_provider_from_enum(
             let google_stt = <GoogleSTT as BaseSTT>::new(config)?;
             Ok(Box::new(google_stt))
         }
+        STTProvider::ElevenLabs => {
+            let elevenlabs_stt = <ElevenLabsSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(elevenlabs_stt))
+        }
     }
 }
 
@@ -160,10 +179,10 @@ pub fn create_stt_provider_from_enum(
 ///
 /// let providers = get_supported_stt_providers();
 /// println!("Supported STT providers: {:?}", providers);
-/// // Output: ["deepgram", "google"]
+/// // Output: ["deepgram", "google", "elevenlabs"]
 /// ```
 pub fn get_supported_stt_providers() -> Vec<&'static str> {
-    vec!["deepgram", "google"]
+    vec!["deepgram", "google", "elevenlabs"]
 }
 
 #[cfg(test)]
@@ -200,6 +219,20 @@ mod factory_tests {
             STTProvider::Google
         );
 
+        // Test valid provider names - ElevenLabs
+        assert_eq!(
+            "elevenlabs".parse::<STTProvider>().unwrap(),
+            STTProvider::ElevenLabs
+        );
+        assert_eq!(
+            "ElevenLabs".parse::<STTProvider>().unwrap(),
+            STTProvider::ElevenLabs
+        );
+        assert_eq!(
+            "ELEVENLABS".parse::<STTProvider>().unwrap(),
+            STTProvider::ElevenLabs
+        );
+
         // Test invalid provider name
         let result = "invalid".parse::<STTProvider>();
         assert!(result.is_err());
@@ -212,14 +245,16 @@ mod factory_tests {
     fn test_stt_provider_enum_display() {
         assert_eq!(STTProvider::Deepgram.to_string(), "deepgram");
         assert_eq!(STTProvider::Google.to_string(), "google");
+        assert_eq!(STTProvider::ElevenLabs.to_string(), "elevenlabs");
     }
 
     #[test]
     fn test_get_supported_stt_providers() {
         let providers = get_supported_stt_providers();
-        assert_eq!(providers, vec!["deepgram", "google"]);
+        assert_eq!(providers, vec!["deepgram", "google", "elevenlabs"]);
         assert!(providers.contains(&"deepgram"));
         assert!(providers.contains(&"google"));
+        assert!(providers.contains(&"elevenlabs"));
     }
 
     #[tokio::test]
@@ -258,6 +293,78 @@ mod factory_tests {
         let result = create_stt_provider_from_enum(STTProvider::Deepgram, config);
         assert!(result.is_err());
         // Should fail because of empty API key
+    }
+
+    #[test]
+    fn test_create_stt_provider_elevenlabs_valid() {
+        let config = STTConfig {
+            provider: "elevenlabs".to_string(),
+            api_key: "test_key".to_string(),
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "".to_string(),
+        };
+
+        let result = create_stt_provider("elevenlabs", config);
+        assert!(result.is_ok());
+
+        let stt = result.unwrap();
+        assert_eq!(
+            stt.get_provider_info(),
+            "ElevenLabs STT Real-Time WebSocket"
+        );
+    }
+
+    #[test]
+    fn test_create_stt_provider_elevenlabs_empty_api_key() {
+        let config = STTConfig {
+            provider: "elevenlabs".to_string(),
+            api_key: String::new(), // Empty API key should fail
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "".to_string(),
+        };
+
+        let result = create_stt_provider("elevenlabs", config);
+        assert!(result.is_err());
+
+        if let Err(STTError::AuthenticationFailed(msg)) = result {
+            assert!(msg.contains("API key is required"));
+        } else {
+            panic!("Expected AuthenticationFailed error");
+        }
+    }
+
+    #[test]
+    fn test_create_stt_provider_from_enum_elevenlabs() {
+        let config = STTConfig {
+            provider: "elevenlabs".to_string(),
+            api_key: "test_key".to_string(),
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "".to_string(),
+        };
+
+        let result = create_stt_provider_from_enum(STTProvider::ElevenLabs, config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_error_message_includes_elevenlabs() {
+        let result = "invalid".parse::<STTProvider>();
+        assert!(result.is_err());
+        if let Err(STTError::ConfigurationError(msg)) = result {
+            assert!(msg.contains("elevenlabs"));
+        }
     }
 }
 

@@ -69,7 +69,7 @@ Always consult these rule files when implementing new features or modifying exis
 2. **Provider System** (`src/core/stt/` and `src/core/tts/`):
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
-   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC)
+   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket)
    - Current TTS providers: Deepgram, ElevenLabs
    - Providers implement `STTProvider` or `TTSProvider` traits
 
@@ -143,7 +143,7 @@ All configuration options can also be set via environment variables or a `.env` 
 
 Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
-- `ELEVENLABS_API_KEY`: ElevenLabs API authentication
+- `ELEVENLABS_API_KEY`: ElevenLabs API authentication (used for both STT and TTS)
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
@@ -215,8 +215,50 @@ When adding new features:
 
 - **Deepgram** (`deepgram.rs`): WebSocket-based streaming, uses `tokio-tungstenite`
 - **Google** (`google.rs`): gRPC bidirectional streaming, uses `tonic` with Google Cloud protos
+- **ElevenLabs** (`elevenlabs.rs`): WebSocket-based streaming with JSON messages, uses `tokio-tungstenite`
 
 See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
+
+### ElevenLabs STT Integration
+
+ElevenLabs Speech-to-Text is integrated using their Real-Time WebSocket API for streaming transcription.
+
+**Key Features:**
+- Real-time streaming transcription
+- Multiple regional endpoints (US, EU, India)
+- VAD-based automatic or manual commit strategies
+- Word-level timestamps support
+- Multiple audio format support (PCM, μ-law)
+
+**Configuration:**
+```rust
+let config = STTConfig {
+    provider: "elevenlabs".to_string(),
+    api_key: "your-elevenlabs-api-key".to_string(),
+    language: "en".to_string(),
+    sample_rate: 16000,
+    ..Default::default()
+};
+```
+
+**API Key:** Uses the same `ELEVENLABS_API_KEY` environment variable as TTS.
+
+**Supported Audio Formats:**
+- `pcm_8000` - 8kHz PCM
+- `pcm_16000` - 16kHz PCM (recommended for voice)
+- `pcm_22050` - 22.05kHz PCM
+- `pcm_24000` - 24kHz PCM
+- `pcm_44100` - 44.1kHz PCM
+- `pcm_48000` - 48kHz PCM
+- `ulaw_8000` - 8kHz μ-law (telephony)
+
+**Regional Endpoints:**
+- Default: `wss://api.elevenlabs.io`
+- US: `wss://api.us.elevenlabs.io`
+- EU: `wss://api.eu.residency.elevenlabs.io`
+- India: `wss://api.in.residency.elevenlabs.io`
+
+See [ElevenLabs STT API Documentation](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime) for detailed API reference.
 
 ## API Endpoints
 
