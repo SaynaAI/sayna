@@ -630,8 +630,10 @@ mod client_tests {
     #[test]
     fn test_url_building_us_region() {
         let stt = ElevenLabsSTT::default();
-        let mut config = ElevenLabsSTTConfig::default();
-        config.region = ElevenLabsRegion::Us;
+        let config = ElevenLabsSTTConfig {
+            region: ElevenLabsRegion::Us,
+            ..Default::default()
+        };
 
         let url = stt.build_websocket_url(&config).unwrap();
 
@@ -641,8 +643,10 @@ mod client_tests {
     #[test]
     fn test_url_building_eu_region() {
         let stt = ElevenLabsSTT::default();
-        let mut config = ElevenLabsSTTConfig::default();
-        config.region = ElevenLabsRegion::Eu;
+        let config = ElevenLabsSTTConfig {
+            region: ElevenLabsRegion::Eu,
+            ..Default::default()
+        };
 
         let url = stt.build_websocket_url(&config).unwrap();
 
