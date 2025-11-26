@@ -4,12 +4,12 @@ info:
   description: Real-time voice processing server with Speech-to-Text (STT) and Text-to-Speech (TTS) services
   contact:
     name: Sayna
-    url: https://api.sayna.dev
+    url: https://api.sayna.ai
   license:
     name: ''
   version: 0.1.0
 servers:
-- url: https://api.sayna.dev
+- url: https://api.sayna.ai
   description: Production API
 - url: http://localhost:3001
   description: Local development
@@ -67,6 +67,77 @@ paths:
           description: LiveKit service not configured or token generation failed
       security:
       - bearer_auth: []
+  /sip/hooks:
+    get:
+      tags:
+      - sip
+      summary: Lists all configured SIP hooks.
+      description: |-
+        Returns the current list of SIP hooks from the cache file.
+        This endpoint requires authentication if `AUTH_REQUIRED=true`.
+
+        # Returns
+        * `200 OK` - List of SIP hooks
+        * `500 Internal Server Error` - If reading the cache fails
+      operationId: list_sip_hooks
+      responses:
+        '200':
+          description: List of SIP hooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksResponse'
+        '500':
+          description: Failed to read hooks cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
+    post:
+      tags:
+      - sip
+      summary: Updates SIP hooks.
+      description: |-
+        Adds or replaces SIP hooks in the cache. Hooks with matching hosts
+        (case-insensitive) will be replaced. The changes take effect immediately
+        and persist across server restarts.
+
+        **Note**: Secrets are NOT stored in the cache. Runtime-added hooks will
+        use the global `hook_secret` from the server configuration.
+
+        # Request Body
+        Array of hook entries with `host` and `url` fields.
+
+        # Returns
+        * `200 OK` - Updated list of SIP hooks
+        * `400 Bad Request` - If validation fails (e.g., duplicate hosts)
+        * `500 Internal Server Error` - If writing the cache fails
+      operationId: update_sip_hooks
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SipHooksRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated list of SIP hooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
+        '500':
+          description: Failed to write hooks cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
   /speak:
     post:
       tags:
@@ -451,6 +522,56 @@ components:
           description: Sample rate of the audio in Hz
           example: 16000
           minimum: 0
+    SipHookEntry:
+      type: object
+      description: A single SIP hook entry.
+      required:
+      - host
+      - url
+      properties:
+        host:
+          type: string
+          description: Host pattern for matching SIP domains (case-insensitive)
+          example: example.com
+        url:
+          type: string
+          description: HTTPS URL to forward webhook events to
+          example: https://webhook.example.com/events
+    SipHooksErrorResponse:
+      type: object
+      description: Error response for SIP hooks operations.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Error message describing what went wrong
+          example: 'Duplicate host detected: example.com'
+    SipHooksRequest:
+      type: object
+      description: |-
+        Request body for updating SIP hooks.
+
+        Contains a list of SIP webhook configurations to add or replace.
+      properties:
+        hooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/SipHookEntry'
+          description: |-
+            List of SIP hooks to add or replace.
+            Hooks with matching hosts (case-insensitive) will be replaced.
+    SipHooksResponse:
+      type: object
+      description: Response body for SIP hooks operations.
+      required:
+      - hooks
+      properties:
+        hooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/SipHookEntry'
+          description: List of all configured SIP hooks
     SpeakRequest:
       type: object
       description: Request body for the speak endpoint
@@ -676,5 +797,7 @@ tags:
   description: Text-to-speech synthesis
 - name: livekit
   description: LiveKit room and token management
+- name: sip
+  description: SIP webhook configuration management
 - name: websocket
   description: WebSocket API for real-time communication

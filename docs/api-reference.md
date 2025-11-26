@@ -155,6 +155,61 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   - `400 Bad Request` when any field is empty.
   - `500 Internal Server Error` if LiveKit credentials are not configured or token generation fails.
 
+#### `GET /sip/hooks`
+- **Purpose**: List all configured SIP webhook hooks from the runtime cache.
+- **Success** `200 OK`:
+  ```json
+  {
+    "hooks": [
+      {
+        "host": "example.com",
+        "url": "https://webhook.example.com/events"
+      }
+    ]
+  }
+  ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `hooks` | array | List of configured SIP hooks. |
+| `hooks[].host` | string | SIP domain pattern (case-insensitive). |
+| `hooks[].url` | string | HTTPS URL to forward webhook events to. |
+
+- **Failure**:
+  - `500 Internal Server Error` if reading the cache fails.
+
+#### `POST /sip/hooks`
+- **Purpose**: Add or replace SIP webhook hooks at runtime. Changes persist across server restarts via the cache file (`<cache_path>/sip_hooks.json`).
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `hooks` | array | Yes | List of hooks to add or replace. |
+| `hooks[].host` | string | Yes | SIP domain pattern (case-insensitive). Existing hooks with matching hosts are replaced. |
+| `hooks[].url` | string | Yes | HTTPS URL to forward webhook events to. |
+
+- **Success** `200 OK`: Returns the merged list of all hooks (existing + new).
+  ```json
+  {
+    "hooks": [
+      {
+        "host": "example.com",
+        "url": "https://webhook.example.com/events"
+      },
+      {
+        "host": "another.com",
+        "url": "https://webhook.another.com/events"
+      }
+    ]
+  }
+  ```
+
+- **Failure**:
+  - `400 Bad Request` when duplicate hosts are detected in the request.
+  - `500 Internal Server Error` if no cache path is configured or writing fails.
+
+**Note**: Secrets are NOT stored in the runtime cache. Hooks added via this endpoint will use the global `hook_secret` from the server configuration for webhook signing.
+
 ### WebSocket Endpoint (`GET /ws`)
 
 #### Connection Lifecycle

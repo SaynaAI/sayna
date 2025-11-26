@@ -3,6 +3,8 @@
 //! This module defines SIP-specific configuration including room prefixes,
 //! allowed IP addresses for SIP connections, and downstream webhook targets.
 
+use crate::utils::sip_hooks::SipHookInfo;
+
 /// SIP webhook configuration
 ///
 /// Defines a downstream webhook target for forwarding LiveKit SIP events.
@@ -15,6 +17,22 @@ pub struct SipHookConfig {
     pub url: String,
     /// Optional per-hook signing secret (overrides global hook_secret)
     pub secret: Option<String>,
+}
+
+impl SipHookInfo for SipHookConfig {
+    fn host(&self) -> &str {
+        &self.host
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl AsRef<str> for SipHookConfig {
+    fn as_ref(&self) -> &str {
+        &self.host
+    }
 }
 
 /// SIP configuration

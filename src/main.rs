@@ -9,7 +9,10 @@ use tokio::net::TcpListener;
 
 use anyhow::anyhow;
 
-use sayna::{ServerConfig, init, middleware::auth::auth_middleware, routes, state::AppState};
+use sayna::{
+    ServerConfig, config::SipHookConfig, init, middleware::auth::auth_middleware, routes,
+    state::AppState, utils::sip_hooks,
+};
 
 /// Sayna - Real-time voice processing server
 #[derive(Parser, Debug)]
@@ -99,12 +102,44 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load configuration from file or environment
-    let config = if let Some(config_path) = cli.config {
+    let mut config = if let Some(config_path) = cli.config {
         println!("Loading configuration from {}", config_path.display());
         ServerConfig::from_file(&config_path).map_err(|e| anyhow!(e.to_string()))?
     } else {
         ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?
     };
+
+    // Merge SIP hooks from cache if cache path and SIP config are configured
+    if let (Some(cache_path), Some(sip_config)) = (&config.cache_path, &mut config.sip) {
+        let merged = sip_hooks::read_and_merge_hooks(cache_path, &sip_config.hooks).await;
+
+        // Convert merged CachedSipHook back to SipHookConfig, preserving secrets
+        let new_hooks: Vec<SipHookConfig> = merged
+            .into_iter()
+            .map(|cached| {
+                // Try to find the original hook to preserve its secret
+                let original_secret = sip_config
+                    .hooks
+                    .iter()
+                    .find(|h| h.host.eq_ignore_ascii_case(&cached.host))
+                    .and_then(|h| h.secret.clone());
+
+                SipHookConfig {
+                    host: cached.host,
+                    url: cached.url,
+                    secret: original_secret,
+                }
+            })
+            .collect();
+
+        let count = new_hooks.len();
+        sip_config.hooks = new_hooks;
+
+        if count > 0 {
+            println!("Loaded {} SIP hooks (including cached)", count);
+        }
+    }
+
     let address = config.address();
     println!("Starting server on {address}");
 

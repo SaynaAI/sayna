@@ -353,11 +353,11 @@ use utoipa::OpenApi;
         description = "Real-time voice processing server with Speech-to-Text (STT) and Text-to-Speech (TTS) services",
         contact(
             name = "Sayna",
-            url = "https://api.sayna.dev"
+            url = "https://api.sayna.ai"
         )
     ),
     servers(
-        (url = "https://api.sayna.dev", description = "Production API"),
+        (url = "https://api.sayna.ai", description = "Production API"),
         (url = "http://localhost:3001", description = "Local development")
     ),
     paths(

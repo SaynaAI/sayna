@@ -10,6 +10,7 @@ use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
     livekit::{TokenRequest, TokenResponse},
+    sip_hooks::{SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse},
     speak::SpeakRequest,
     voices::Voice,
     ws::{
@@ -27,11 +28,11 @@ use crate::handlers::{
         description = "Real-time voice processing server with Speech-to-Text (STT) and Text-to-Speech (TTS) services",
         contact(
             name = "Sayna",
-            url = "https://api.sayna.dev"
+            url = "https://api.sayna.ai"
         )
     ),
     servers(
-        (url = "https://api.sayna.dev", description = "Production API"),
+        (url = "https://api.sayna.ai", description = "Production API"),
         (url = "http://localhost:3001", description = "Local development")
     ),
     paths(
@@ -39,6 +40,8 @@ use crate::handlers::{
         crate::handlers::voices::list_voices,
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
+        crate::handlers::sip_hooks::list_sip_hooks,
+        crate::handlers::sip_hooks::update_sip_hooks,
     ),
     components(schemas(
         // REST API types
@@ -47,6 +50,11 @@ use crate::handlers::{
         SpeakRequest,
         TokenRequest,
         TokenResponse,
+        // SIP hooks types
+        SipHooksRequest,
+        SipHooksResponse,
+        SipHookEntry,
+        SipHooksErrorResponse,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,
@@ -64,6 +72,7 @@ use crate::handlers::{
         (name = "voices", description = "TTS voice management"),
         (name = "tts", description = "Text-to-speech synthesis"),
         (name = "livekit", description = "LiveKit room and token management"),
+        (name = "sip", description = "SIP webhook configuration management"),
         (name = "websocket", description = "WebSocket API for real-time communication")
     )
 )]

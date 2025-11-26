@@ -4,7 +4,7 @@ use axum::{
 };
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{livekit, speak, voices};
+use crate::handlers::{livekit, sip_hooks, speak, voices};
 use crate::state::AppState;
 use std::sync::Arc;
 
@@ -17,5 +17,10 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
         .route("/voices", get(voices::list_voices))
         .route("/speak", post(speak::speak_handler))
         .route("/livekit/token", post(livekit::generate_token))
+        // SIP hooks management
+        .route(
+            "/sip/hooks",
+            get(sip_hooks::list_sip_hooks).post(sip_hooks::update_sip_hooks),
+        )
         .layer(TraceLayer::new_for_http())
 }

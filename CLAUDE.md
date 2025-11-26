@@ -185,6 +185,7 @@ When adding new features:
   - `env.rs`: Environment variable loading
   - `merge.rs`: Configuration merging logic
   - `validation.rs`: Configuration validation
+- `src/utils/sip_hooks.rs`: SIP hooks cache file operations (read/write/merge)
 - `src/errors/mod.rs`: Centralized error types using thiserror
 - `src/docs/openapi.rs`: OpenAPI 3.1 specification and documentation (feature-gated)
 
@@ -227,6 +228,14 @@ See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration
 - `POST /livekit/token` - Generate LiveKit participant token (requires auth if AUTH_REQUIRED=true)
   - Request: `{"room_name": "room-123", "participant_name": "User", "participant_identity": "user-id"}`
   - Response: `{"token": "JWT...", "room_name": "room-123", "participant_identity": "user-id", "livekit_url": "ws://..."}`
+- `GET /sip/hooks` - List all configured SIP hooks from cache (requires auth if AUTH_REQUIRED=true)
+  - Response: `{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}`
+- `POST /sip/hooks` - Add or replace SIP hooks at runtime (requires auth if AUTH_REQUIRED=true)
+  - Request: `{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}`
+  - Response: `{"hooks": [...]}` (merged list of all hooks)
+  - Hooks are persisted to `<cache_path>/sip_hooks.json` and merged with config on startup
+  - Cached hooks override config hooks with matching hosts (case-insensitive)
+  - Note: Secrets are NOT stored in cache - runtime hooks use the global `hook_secret`
 
 **Authentication**: When `AUTH_REQUIRED=true`, protected endpoints require a valid `Authorization: Bearer {token}` header. See [docs/authentication.md](docs/authentication.md) for setup details.
 

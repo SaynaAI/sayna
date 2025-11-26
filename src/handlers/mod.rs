@@ -1,6 +1,7 @@
 pub mod api;
 pub mod livekit;
 pub mod livekit_webhook;
+pub mod sip_hooks;
 pub mod speak;
 pub mod voices;
 pub mod ws;
