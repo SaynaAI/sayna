@@ -286,13 +286,20 @@ When a participant connects via SIP, their `attributes` map contains SIP metadat
 
 | Attribute Key | Description | Example |
 |---------------|-------------|---------|
-| `sip.h.to` | Full SIP `To` header | `sip:customer@example.com` |
+| `sip.h.x-to-ip` | Custom `X-To-IP` header for routing override (**priority 1**) | `sip:customer@custom-host.com` |
+| `sip.h.to` | Full SIP `To` header (**priority 2**, fallback) | `sip:customer@example.com` |
 | `sip.h.from` | Full SIP `From` header | `"Caller Name" <sip:user@provider.com>` |
 | `sip.trunkPhoneNumber` | Phone number from trunk | `+15551234567` |
 | `sip.phoneNumber` | Caller's phone number | `+15559876543` |
 | `sip.callID` | SIP call identifier | `abc123-def456` |
 | `sip.fromUser` | SIP From header user part | `alice` |
 | `sip.toUser` | SIP To header user part | `bob` |
+
+**SIP Host Header Priority**: When determining the target domain for webhook routing, Sayna checks attributes in this order:
+1. `sip.h.x-to-ip` - Custom header that allows operators to override the routing domain
+2. `sip.h.to` - Standard SIP To header (fallback if `sip.h.x-to-ip` is not present)
+
+This priority allows SIP gateways to send a custom `X-To-IP` header when the standard `To` header doesn't contain the desired routing target.
 
 ### Logging
 
@@ -393,13 +400,13 @@ After successful provisioning, verify in your LiveKit dashboard:
 
 ### Overview
 
-Sayna automatically forwards LiveKit webhook events to downstream services based on the SIP domain in the `sip.h.to` participant attribute. This enables per-domain automation and integration with external systems.
+Sayna automatically forwards LiveKit webhook events to downstream services based on the SIP domain extracted from participant attributes. The `sip.h.x-to-ip` attribute takes priority over `sip.h.to`, allowing operators to override the routing domain when needed. This enables per-domain automation and integration with external systems.
 
 ### How It Works
 
 1. **Receive webhook** from LiveKit at `POST /livekit/webhook`
 2. **Verify signature** using LiveKit's JWT mechanism
-3. **Parse SIP domain** from `sip.h.to` attribute (e.g., `sip:user@example.com` → `example.com`)
+3. **Parse SIP domain** from SIP header attributes (`sip.h.x-to-ip` takes priority, falls back to `sip.h.to`)
 4. **Look up hook configuration** for the extracted domain (case-insensitive)
 5. **Forward event** to the configured webhook URL asynchronously (non-blocking)
 6. **Return 200 OK** to LiveKit immediately (doesn't wait for downstream hook)
@@ -416,10 +423,13 @@ The domain parser handles various SIP header formats:
 - URI parameters: `sip:user@example.com;user=phone;tag=xyz` → `example.com`
 - Secure SIP: `sips:user@secure.example.com` → `secure.example.com`
 - With port: `sip:user@example.com:5060` → `example.com:5060`
+- Plain hostname: `sip-1.example.com:5060` → `sip-1.example.com` (for `sip.h.x-to-ip`)
+- Plain hostname without port: `example.com` → `example.com`
 
 **Normalization**:
 - Domains converted to lowercase (case-insensitive matching)
 - URI parameters (after `;`) stripped before extraction
+- Port numbers stripped from plain hostnames
 - Leading/trailing whitespace trimmed
 
 ### Forwarded Payload
@@ -481,7 +491,7 @@ Webhook forwarding is **non-blocking** and **best-effort**:
 |----------|----------|--------|--------|
 | No SIP config | N/A | Not logged | Skipped silently |
 | Event has no participant | Debug | `Skipping SIP forwarding: event has no participant` | Skipped (expected) |
-| Missing `sip.h.to` | Debug | `Skipping SIP forwarding: participant has no sip.h.to attribute` | Skipped (expected) |
+| Missing SIP host header | Debug | `Skipping SIP forwarding: participant has no sip.h.to attribute` | Skipped (expected, neither `sip.h.x-to-ip` nor `sip.h.to` present) |
 | Malformed SIP header | Info | `Skipping SIP forwarding: malformed sip.h.to header` | Check upstream gateway |
 | No matching hook | Warn | `SIP forwarding failed: no webhook configured for domain` | Add to config |
 | HTTP request failure | Warn | `HTTP request error` with details | Check connectivity |

@@ -284,13 +284,14 @@ pub async fn handle_livekit_webhook(
         && !sip_config.hooks.is_empty()
         && event.event == "participant_joined"
     {
+        log_webhook_event(&event);
         // Optimization: Check if the SIP domain matches a configured hook BEFORE spawning.
         // We only care about events that map to a configured SIP hook.
         let should_forward = event
             .participant
             .as_ref()
-            .and_then(|p| p.attributes.get("sip.h.to"))
-            .and_then(|sip_to| parse_sip_domain(sip_to))
+            .and_then(|p| get_sip_host_header(&p.attributes))
+            .and_then(parse_sip_domain)
             .map(|domain| {
                 sip_config
                     .hooks
@@ -377,27 +378,67 @@ pub fn webhook_error_to_status(error: &WebhookError) -> StatusCode {
     }
 }
 
-/// Parses a SIP domain from a SIP header value.
+/// Extracts the SIP host header value from participant attributes with priority.
+///
+/// Checks attributes in the following order:
+/// 1. `sip.h.x-to-ip` - Custom header with explicit target IP/host (takes priority)
+/// 2. `sip.h.to` - Standard SIP To header
+///
+/// This allows operators to override the routing domain via the `X-To-IP` custom
+/// SIP header when the standard `To` header doesn't contain the desired target.
+///
+/// # Arguments
+/// * `attributes` - The participant's attributes map
+///
+/// # Returns
+/// * `Some(&str)` - The header value if found
+/// * `None` - If neither attribute is present
+pub fn get_sip_host_header(attributes: &HashMap<String, String>) -> Option<&str> {
+    // Priority 1: Check for custom X-To-IP header
+    if let Some(value) = attributes.get("sip.h.x-to-ip") {
+        return Some(value.as_str());
+    }
+    // Priority 2: Fall back to standard To header
+    attributes.get("sip.h.to").map(|s| s.as_str())
+}
+
+/// Parses a SIP domain/host from a SIP header value or plain hostname.
 ///
 /// Handles common SIP header formats:
 /// - `sip:user@domain`
 /// - `"Display Name" <sip:user@domain>`
 /// - `sip:user@domain;tag=xyz;user=phone`
+/// - Plain hostname: `example.com` or `example.com:5060`
 ///
-/// Returns the domain in lowercase for case-insensitive matching.
+/// Returns the domain/host in lowercase for case-insensitive matching.
 /// Strips URI parameters (everything after ';') before extracting the domain.
+/// For plain hostnames, strips the port if present.
 ///
 /// # Examples
 ///
 /// ```
 /// use sayna::handlers::livekit_webhook::parse_sip_domain;
 ///
+/// // SIP URI formats
 /// assert_eq!(parse_sip_domain("sip:user@example.com"), Some("example.com".to_string()));
 /// assert_eq!(parse_sip_domain("\"User\" <sip:user@example.com>"), Some("example.com".to_string()));
 /// assert_eq!(parse_sip_domain("sip:user@example.com;user=phone"), Some("example.com".to_string()));
-/// assert_eq!(parse_sip_domain("invalid"), None);
+///
+/// // Plain hostname formats (for sip.h.x-to-ip)
+/// assert_eq!(parse_sip_domain("sip-1.example.com:5060"), Some("sip-1.example.com".to_string()));
+/// assert_eq!(parse_sip_domain("example.com"), Some("example.com".to_string()));
+///
+/// // Invalid (empty, no dot, or malformed SIP URI)
+/// assert_eq!(parse_sip_domain(""), None);
+/// assert_eq!(parse_sip_domain("not-a-domain"), None);
+/// assert_eq!(parse_sip_domain("sip:nodomain"), None);
 /// ```
 pub fn parse_sip_domain(header: &str) -> Option<String> {
+    let header = header.trim();
+    if header.is_empty() {
+        return None;
+    }
+
     // Extract the SIP URI from angle brackets if present
     let uri = if let Some(start) = header.find('<') {
         if let Some(end) = header.find('>') {
@@ -412,7 +453,7 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
     // Strip URI parameters (everything after ';')
     let uri = uri.split(';').next().unwrap_or(uri);
 
-    // Extract domain from sip:user@domain format
+    // Try to extract domain from sip:user@domain format
     if let Some(sip_part) = uri
         .strip_prefix("sip:")
         .or_else(|| uri.strip_prefix("sips:"))
@@ -420,6 +461,38 @@ pub fn parse_sip_domain(header: &str) -> Option<String> {
     {
         let domain = &sip_part[at_pos + 1..];
         return Some(domain.trim().to_lowercase());
+    }
+
+    // Fallback: treat as plain hostname (possibly with port)
+    // This handles cases like "sip-1.aivaconnect.ai:5060" from sip.h.x-to-ip
+    // Only apply fallback if:
+    // - Not a malformed SIP URI (doesn't start with sip:/sips:)
+    // - Contains a '.' (looks like a real hostname/domain)
+    // - No spaces or @ signs
+    let uri = uri.trim();
+    let is_sip_scheme = uri.starts_with("sip:") || uri.starts_with("sips:");
+    if !uri.is_empty()
+        && !is_sip_scheme
+        && uri.contains('.')
+        && !uri.contains(' ')
+        && !uri.contains('@')
+    {
+        // Strip port if present (handle both hostname:port and IPv4:port)
+        let host = if let Some(colon_pos) = uri.rfind(':') {
+            // Check if everything after colon is digits (port number)
+            let potential_port = &uri[colon_pos + 1..];
+            if potential_port.chars().all(|c| c.is_ascii_digit()) && !potential_port.is_empty() {
+                &uri[..colon_pos]
+            } else {
+                uri
+            }
+        } else {
+            uri
+        };
+
+        if !host.is_empty() {
+            return Some(host.to_lowercase());
+        }
     }
 
     None
@@ -533,11 +606,9 @@ async fn forward_to_sip_hook(
             event_type: event.event.clone(),
         })?;
 
-    // Step 3: Extract sip.h.to attribute
-    let sip_to_header = participant
-        .attributes
-        .get("sip.h.to")
-        .ok_or(SipForwardingError::MissingSipHeader)?;
+    // Step 3: Extract SIP host header (sip.h.x-to-ip takes priority over sip.h.to)
+    let sip_host_header =
+        get_sip_host_header(&participant.attributes).ok_or(SipForwardingError::MissingSipHeader)?;
 
     // Step 4: Extract caller phone number from sip.phoneNumber
     let from_phone_number = participant
@@ -552,10 +623,11 @@ async fn forward_to_sip_hook(
         .ok_or(SipForwardingError::MissingToPhoneNumber)?;
 
     // Step 6: Parse domain from SIP header
-    let domain =
-        parse_sip_domain(sip_to_header).ok_or_else(|| SipForwardingError::MalformedSipHeader {
-            header: sip_to_header.clone(),
-        })?;
+    let domain = parse_sip_domain(sip_host_header).ok_or_else(|| {
+        SipForwardingError::MalformedSipHeader {
+            header: sip_host_header.to_string(),
+        }
+    })?;
 
     // Step 7: Look up hook configuration (case-insensitive)
     let hook = sip_config
@@ -758,10 +830,10 @@ fn log_webhook_event(event: &WebhookEvent) {
     let sip_attributes: HashMap<String, String> =
         participant.map(extract_sip_attributes).unwrap_or_default();
 
-    // Extract and parse SIP domain from sip.h.to attribute
+    // Extract and parse SIP domain (sip.h.x-to-ip takes priority over sip.h.to)
     let sip_domain = participant
-        .and_then(|p| p.attributes.get("sip.h.to"))
-        .and_then(|header| parse_sip_domain(header));
+        .and_then(|p| get_sip_host_header(&p.attributes))
+        .and_then(parse_sip_domain);
 
     // Log with structured fields
     info!(
@@ -1039,5 +1111,103 @@ mod tests {
         let error_msg = error.to_string();
         assert!(error_msg.contains("example.com"));
         assert!(error_msg.contains("signing secret"));
+    }
+
+    #[test]
+    fn test_get_sip_host_header_x_to_ip_priority() {
+        // When both sip.h.x-to-ip and sip.h.to are present, x-to-ip takes priority
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "sip.h.x-to-ip".to_string(),
+            "sip:user@priority-host.com".to_string(),
+        );
+        attrs.insert(
+            "sip.h.to".to_string(),
+            "sip:user@fallback-host.com".to_string(),
+        );
+
+        let result = super::get_sip_host_header(&attrs);
+        assert_eq!(result, Some("sip:user@priority-host.com"));
+    }
+
+    #[test]
+    fn test_get_sip_host_header_fallback_to_to() {
+        // When only sip.h.to is present, use it as fallback
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "sip.h.to".to_string(),
+            "sip:user@fallback-host.com".to_string(),
+        );
+
+        let result = super::get_sip_host_header(&attrs);
+        assert_eq!(result, Some("sip:user@fallback-host.com"));
+    }
+
+    #[test]
+    fn test_get_sip_host_header_only_x_to_ip() {
+        // When only sip.h.x-to-ip is present
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "sip.h.x-to-ip".to_string(),
+            "sip:user@priority-host.com".to_string(),
+        );
+
+        let result = super::get_sip_host_header(&attrs);
+        assert_eq!(result, Some("sip:user@priority-host.com"));
+    }
+
+    #[test]
+    fn test_get_sip_host_header_neither_present() {
+        // When neither attribute is present
+        let mut attrs = HashMap::new();
+        attrs.insert("sip.other".to_string(), "value".to_string());
+
+        let result = super::get_sip_host_header(&attrs);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_sip_host_header_empty_attrs() {
+        // Empty attributes map
+        let attrs = HashMap::new();
+
+        let result = super::get_sip_host_header(&attrs);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sip_domain_plain_hostname_with_port() {
+        // Plain hostname with port (typical sip.h.x-to-ip format)
+        assert_eq!(
+            super::parse_sip_domain("sip-1.aivaconnect.ai:5060"),
+            Some("sip-1.aivaconnect.ai".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_sip_domain_plain_hostname_without_port() {
+        // Plain hostname without port
+        assert_eq!(
+            super::parse_sip_domain("example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_sip_domain_plain_ip_with_port() {
+        // Plain IP address with port
+        assert_eq!(
+            super::parse_sip_domain("192.168.1.100:5060"),
+            Some("192.168.1.100".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_sip_domain_plain_hostname_case_insensitive() {
+        // Plain hostname should be lowercased
+        assert_eq!(
+            super::parse_sip_domain("SIP-Server.EXAMPLE.COM:5060"),
+            Some("sip-server.example.com".to_string())
+        );
     }
 }
