@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::fs;
 use tracing::{debug, info, warn};
 
+use crate::config::SipHookConfig;
 /// Name of the cache file for SIP hooks
 pub const SIP_HOOKS_CACHE_FILE: &str = "sip_hooks.json";
 
@@ -244,6 +245,50 @@ where
     result_map.into_values().collect()
 }
 
+/// Merges cached hooks with existing configuration hooks while preserving secrets.
+///
+/// This returns full `SipHookConfig` entries so downstream consumers can still
+/// access per-hook secrets from the original configuration while honoring runtime
+/// URL overrides and additions from the cache file.
+pub fn merge_hooks_with_secrets(
+    config_hooks: &[SipHookConfig],
+    cached_hooks: &[CachedSipHook],
+) -> Vec<SipHookConfig> {
+    use std::collections::HashMap;
+
+    let mut merged: HashMap<String, SipHookConfig> = HashMap::new();
+
+    for hook in config_hooks {
+        let host = hook.host.trim().to_lowercase();
+        merged.insert(
+            host.clone(),
+            SipHookConfig {
+                host,
+                url: hook.url.clone(),
+                secret: hook.secret.clone(),
+            },
+        );
+    }
+
+    for hook in cached_hooks {
+        let host = hook.host.trim().to_lowercase();
+        if let Some(existing) = merged.get_mut(&host) {
+            existing.url = hook.url.clone();
+        } else {
+            merged.insert(
+                host.clone(),
+                SipHookConfig {
+                    host,
+                    url: hook.url.clone(),
+                    secret: None,
+                },
+            );
+        }
+    }
+
+    merged.into_values().collect()
+}
+
 /// Trait for extracting hook information from different types.
 ///
 /// This allows `merge_hooks` to work with both `SipHookConfig` and `CachedSipHook`.
@@ -322,6 +367,33 @@ where
     );
 
     merged
+}
+
+/// Removes hooks from the cache by their host names (case-insensitive).
+///
+/// This function filters out hooks whose hosts match any in the provided list.
+/// The comparison is case-insensitive.
+///
+/// # Arguments
+/// * `hooks` - The current list of cached hooks
+/// * `hosts_to_remove` - List of host names to remove (case-insensitive)
+///
+/// # Returns
+/// A new list with the specified hosts removed.
+pub fn remove_hooks_by_hosts(
+    hooks: &[CachedSipHook],
+    hosts_to_remove: &[String],
+) -> Vec<CachedSipHook> {
+    let hosts_set: HashSet<String> = hosts_to_remove
+        .iter()
+        .map(|h| h.trim().to_lowercase())
+        .collect();
+
+    hooks
+        .iter()
+        .filter(|hook| !hosts_set.contains(&hook.host.to_lowercase()))
+        .cloned()
+        .collect()
 }
 
 /// Deletes the SIP hooks cache file if it exists.
@@ -539,6 +611,53 @@ mod tests {
         assert!(hosts.contains(&"cached.com"));
     }
 
+    #[test]
+    fn test_merge_hooks_with_secrets_preserves_existing() {
+        let config_hooks = vec![SipHookConfig {
+            host: "example.com".to_string(),
+            url: "https://existing.com".to_string(),
+            secret: Some("secret-1".to_string()),
+        }];
+
+        let result = merge_hooks_with_secrets(&config_hooks, &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].url, "https://existing.com");
+        assert_eq!(result[0].secret.as_deref(), Some("secret-1"));
+    }
+
+    #[test]
+    fn test_merge_hooks_with_secrets_overrides_url_preserves_secret() {
+        let config_hooks = vec![SipHookConfig {
+            host: "example.com".to_string(),
+            url: "https://existing.com".to_string(),
+            secret: Some("secret-1".to_string()),
+        }];
+        let cached_hooks = vec![CachedSipHook::new("example.com", "https://cached.com")];
+
+        let result = merge_hooks_with_secrets(&config_hooks, &cached_hooks);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].url, "https://cached.com");
+        assert_eq!(result[0].secret.as_deref(), Some("secret-1"));
+    }
+
+    #[test]
+    fn test_merge_hooks_with_secrets_adds_new_hook_without_secret() {
+        let config_hooks = vec![SipHookConfig {
+            host: "example.com".to_string(),
+            url: "https://existing.com".to_string(),
+            secret: Some("secret-1".to_string()),
+        }];
+        let cached_hooks = vec![CachedSipHook::new("new.com", "https://cached.com")];
+
+        let result = merge_hooks_with_secrets(&config_hooks, &cached_hooks);
+        assert_eq!(result.len(), 2);
+        let new_hook = result
+            .iter()
+            .find(|h| h.host == "new.com")
+            .expect("new hook should be present");
+        assert_eq!(new_hook.secret, None);
+    }
+
     #[tokio::test]
     async fn test_read_and_merge_hooks_no_cache() {
         let temp_dir = TempDir::new().unwrap();
@@ -579,5 +698,61 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://cached.com");
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_empty_list() {
+        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let result = remove_hooks_by_hosts(&hooks, &[]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_removes_matching() {
+        let hooks = vec![
+            CachedSipHook::new("example.com", "https://example.com"),
+            CachedSipHook::new("other.com", "https://other.com"),
+        ];
+        let result = remove_hooks_by_hosts(&hooks, &["example.com".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].host, "other.com");
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_case_insensitive() {
+        let hooks = vec![
+            CachedSipHook::new("example.com", "https://example.com"),
+            CachedSipHook::new("other.com", "https://other.com"),
+        ];
+        let result = remove_hooks_by_hosts(&hooks, &["EXAMPLE.COM".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].host, "other.com");
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_removes_multiple() {
+        let hooks = vec![
+            CachedSipHook::new("a.com", "https://a.com"),
+            CachedSipHook::new("b.com", "https://b.com"),
+            CachedSipHook::new("c.com", "https://c.com"),
+        ];
+        let result = remove_hooks_by_hosts(&hooks, &["a.com".to_string(), "c.com".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].host, "b.com");
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_nonexistent_host() {
+        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let result = remove_hooks_by_hosts(&hooks, &["nonexistent.com".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].host, "example.com");
+    }
+
+    #[test]
+    fn test_remove_hooks_by_hosts_trims_whitespace() {
+        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let result = remove_hooks_by_hosts(&hooks, &["  example.com  ".to_string()]);
+        assert_eq!(result.len(), 0);
     }
 }

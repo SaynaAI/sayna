@@ -210,6 +210,32 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 **Note**: Secrets are NOT stored in the runtime cache. Hooks added via this endpoint will use the global `hook_secret` from the server configuration for webhook signing.
 
+#### `DELETE /sip/hooks`
+- **Purpose**: Remove SIP webhook hooks by host name. Changes persist across server restarts. If a deleted host exists in the original server configuration, it will revert to its config value after deletion.
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `hosts` | array | Yes | List of host names to remove (case-insensitive). Must contain at least one host. |
+
+- **Success** `200 OK`: Returns the updated list of hooks after deletion.
+  ```json
+  {
+    "hooks": [
+      {
+        "host": "remaining.com",
+        "url": "https://webhook.remaining.com/events"
+      }
+    ]
+  }
+  ```
+
+- **Failure**:
+  - `400 Bad Request` when the `hosts` array is empty.
+  - `500 Internal Server Error` if no cache path is configured or writing fails.
+
+**Note**: Deleting a host that exists in the original server configuration will cause it to revert to its config value. This is because the runtime state is always a merge of config + cache, so removing a host from cache allows the config value to take precedence again.
+
 ### WebSocket Endpoint (`GET /ws`)
 
 #### Connection Lifecycle

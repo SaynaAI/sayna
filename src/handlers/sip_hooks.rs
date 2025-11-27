@@ -62,7 +62,7 @@ pub struct SipHooksErrorResponse {
 
 /// Lists all configured SIP hooks.
 ///
-/// Returns the current list of SIP hooks from the cache file.
+/// Returns the current list of SIP hooks from runtime state.
 /// This endpoint requires authentication if `AUTH_REQUIRED=true`.
 ///
 /// # Returns
@@ -83,35 +83,21 @@ pub struct SipHooksErrorResponse {
 pub async fn list_sip_hooks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SipHooksResponse>, (StatusCode, Json<SipHooksErrorResponse>)> {
-    let cache_path = match &state.config.cache_path {
-        Some(path) => path.clone(),
-        None => {
-            // No cache configured, return empty list
-            return Ok(Json(SipHooksResponse { hooks: vec![] }));
-        }
-    };
+    if let Some(hooks_state) = state.core_state.get_sip_hooks_state() {
+        let hooks_guard = hooks_state.read().await;
+        let hooks: Vec<SipHookEntry> = hooks_guard
+            .get_hooks()
+            .iter()
+            .map(|h| SipHookEntry {
+                host: h.host.clone(),
+                url: h.url.clone(),
+            })
+            .collect();
 
-    let cached_hooks = sip_hooks::read_hooks_cache(&cache_path)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to read SIP hooks cache");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(SipHooksErrorResponse {
-                    error: format!("Failed to read hooks cache: {}", e),
-                }),
-            )
-        })?;
+        return Ok(Json(SipHooksResponse { hooks }));
+    }
 
-    let hooks: Vec<SipHookEntry> = cached_hooks
-        .into_iter()
-        .map(|h| SipHookEntry {
-            host: h.host,
-            url: h.url,
-        })
-        .collect();
-
-    Ok(Json(SipHooksResponse { hooks }))
+    Ok(Json(SipHooksResponse { hooks: vec![] }))
 }
 
 /// Updates SIP hooks.
@@ -199,21 +185,191 @@ pub async fn update_sip_hooks(
             )
         })?;
 
-    info!(
-        hook_count = merged_hooks.len(),
-        new_hooks = new_hooks.len(),
-        "Updated SIP hooks cache"
-    );
+    // Update runtime state and get the fully merged hooks (config + cache)
+    let response_hooks: Vec<SipHookEntry> =
+        if let Some(hooks_state) = state.core_state.get_sip_hooks_state() {
+            let mut hooks_guard = hooks_state.write().await;
+            let original_hooks = state
+                .config
+                .sip
+                .as_ref()
+                .map(|c| c.hooks.as_slice())
+                .unwrap_or(&[]);
+            // update_hooks merges cache with config and returns the full state
+            let full_state = hooks_guard.update_hooks(merged_hooks.clone(), original_hooks);
 
-    let hooks: Vec<SipHookEntry> = merged_hooks
-        .into_iter()
-        .map(|h| SipHookEntry {
-            host: h.host,
-            url: h.url,
-        })
-        .collect();
+            info!(
+                hook_count = full_state.len(),
+                new_hooks = new_hooks.len(),
+                "Updated SIP hooks cache and runtime state"
+            );
 
-    Ok(Json(SipHooksResponse { hooks }))
+            full_state
+                .into_iter()
+                .map(|h| SipHookEntry {
+                    host: h.host,
+                    url: h.url,
+                })
+                .collect()
+        } else {
+            // No SIP state configured, return the cache-only merge
+            info!(
+                hook_count = merged_hooks.len(),
+                new_hooks = new_hooks.len(),
+                "Updated SIP hooks cache (no runtime state)"
+            );
+
+            merged_hooks
+                .into_iter()
+                .map(|h| SipHookEntry {
+                    host: h.host,
+                    url: h.url,
+                })
+                .collect()
+        };
+
+    Ok(Json(SipHooksResponse {
+        hooks: response_hooks,
+    }))
+}
+
+/// Request body for deleting SIP hooks.
+///
+/// Contains a list of host names to remove from the SIP hooks cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeleteSipHooksRequest {
+    /// List of host names to remove (case-insensitive).
+    /// Hosts that exist in the original config will revert to their config values.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(example = json!(["example.com", "other.com"])))]
+    pub hosts: Vec<String>,
+}
+
+/// Deletes SIP hooks by host name.
+///
+/// Removes the specified hosts from the cache. If a host exists in the original
+/// server configuration, it will revert to its config value after deletion.
+/// Hosts that only exist in cache will be completely removed.
+///
+/// The changes take effect immediately and persist across server restarts.
+///
+/// # Request Body
+/// Array of host names to remove (case-insensitive).
+///
+/// # Returns
+/// * `200 OK` - Updated list of SIP hooks after deletion
+/// * `400 Bad Request` - If the hosts array is empty
+/// * `500 Internal Server Error` - If writing the cache fails
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/sip/hooks",
+        request_body = DeleteSipHooksRequest,
+        responses(
+            (status = 200, description = "Updated list of SIP hooks after deletion", body = SipHooksResponse),
+            (status = 400, description = "Validation error", body = SipHooksErrorResponse),
+            (status = 500, description = "Failed to write hooks cache", body = SipHooksErrorResponse)
+        ),
+        tag = "sip"
+    )
+)]
+pub async fn delete_sip_hooks(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DeleteSipHooksRequest>,
+) -> Result<Json<SipHooksResponse>, (StatusCode, Json<SipHooksErrorResponse>)> {
+    // Validate request has at least one host
+    if request.hosts.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(SipHooksErrorResponse {
+                error: "No hosts provided to delete.".to_string(),
+            }),
+        ));
+    }
+
+    let cache_path = match &state.config.cache_path {
+        Some(path) => path.clone(),
+        None => {
+            warn!("No cache path configured, cannot persist SIP hooks");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SipHooksErrorResponse {
+                    error: "No cache path configured. Cannot persist SIP hooks.".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Read existing hooks from cache
+    let existing_hooks = sip_hooks::read_hooks_cache(&cache_path)
+        .await
+        .unwrap_or_default();
+
+    // Remove the specified hosts from cache
+    let remaining_hooks = sip_hooks::remove_hooks_by_hosts(&existing_hooks, &request.hosts);
+
+    // Write remaining hooks back to cache
+    sip_hooks::write_hooks_cache(&cache_path, &remaining_hooks)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to write SIP hooks cache");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SipHooksErrorResponse {
+                    error: format!("Failed to write hooks cache: {}", e),
+                }),
+            )
+        })?;
+
+    // Update runtime state and get the fully merged hooks (config + cache)
+    // This will automatically revert to config values for any deleted hosts
+    let response_hooks: Vec<SipHookEntry> =
+        if let Some(hooks_state) = state.core_state.get_sip_hooks_state() {
+            let mut hooks_guard = hooks_state.write().await;
+            let original_hooks = state
+                .config
+                .sip
+                .as_ref()
+                .map(|c| c.hooks.as_slice())
+                .unwrap_or(&[]);
+            // update_hooks merges cache with config - config hooks reappear if removed from cache
+            let full_state = hooks_guard.update_hooks(remaining_hooks.clone(), original_hooks);
+
+            info!(
+                hook_count = full_state.len(),
+                deleted_hosts = ?request.hosts,
+                "Deleted SIP hooks from cache and updated runtime state"
+            );
+
+            full_state
+                .into_iter()
+                .map(|h| SipHookEntry {
+                    host: h.host,
+                    url: h.url,
+                })
+                .collect()
+        } else {
+            // No SIP state configured, return the cache-only result
+            info!(
+                hook_count = remaining_hooks.len(),
+                deleted_hosts = ?request.hosts,
+                "Deleted SIP hooks from cache (no runtime state)"
+            );
+
+            remaining_hooks
+                .into_iter()
+                .map(|h| SipHookEntry {
+                    host: h.host,
+                    url: h.url,
+                })
+                .collect()
+        };
+
+    Ok(Json(SipHooksResponse {
+        hooks: response_hooks,
+    }))
 }
 
 #[cfg(test)]
@@ -268,5 +424,32 @@ mod tests {
         let json = serde_json::to_string(&response).expect("Failed to serialize");
         assert!(json.contains("hooks"));
         assert!(json.contains("example.com"));
+    }
+
+    #[test]
+    fn test_delete_sip_hooks_request_deserialization() {
+        let json = r#"{"hosts": ["example.com", "other.com"]}"#;
+        let request: DeleteSipHooksRequest =
+            serde_json::from_str(json).expect("Failed to deserialize");
+
+        assert_eq!(request.hosts.len(), 2);
+        assert_eq!(request.hosts[0], "example.com");
+        assert_eq!(request.hosts[1], "other.com");
+    }
+
+    #[test]
+    fn test_delete_sip_hooks_request_empty_hosts() {
+        let json = r#"{"hosts": []}"#;
+        let request: DeleteSipHooksRequest =
+            serde_json::from_str(json).expect("Failed to deserialize");
+        assert!(request.hosts.is_empty());
+    }
+
+    #[test]
+    fn test_delete_sip_hooks_request_default() {
+        let json = r#"{}"#;
+        let request: DeleteSipHooksRequest =
+            serde_json::from_str(json).expect("Failed to deserialize");
+        assert!(request.hosts.is_empty());
     }
 }

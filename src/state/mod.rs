@@ -8,6 +8,10 @@ use crate::livekit::room_handler::{LiveKitRoomHandler, RecordingConfig};
 use crate::livekit::sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
 use crate::utils::req_manager::ReqManager;
 
+mod sip_hooks_state;
+
+pub use sip_hooks_state::SipHooksState;
+
 /// Application state that can be shared across handlers
 #[derive(Clone)]
 pub struct AppState {

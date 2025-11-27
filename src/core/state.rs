@@ -17,6 +17,7 @@ use crate::core::tts::get_tts_provider_urls;
 use crate::core::turn_detect::TurnDetector;
 #[cfg(feature = "turn-detect")]
 use crate::core::turn_detect::{TurnDetector, TurnDetectorConfig};
+use crate::state::SipHooksState;
 use crate::utils::req_manager::ReqManager;
 
 /// Core-specific shared state for the application.
@@ -31,6 +32,8 @@ pub struct CoreState {
     pub cache: Arc<CacheStore>,
     /// Turn detector for determining end of user speech turns
     pub turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    /// SIP hooks runtime state with preserved secrets
+    pub sip_hooks_state: Option<Arc<RwLock<SipHooksState>>>,
 }
 
 impl CoreState {
@@ -78,10 +81,19 @@ impl CoreState {
         // Initialize and warmup Turn Detector
         let turn_detector = Self::initialize_turn_detector(config.cache_path.as_ref()).await;
 
+        let sip_hooks_state = if let Some(sip_config) = &config.sip {
+            Some(Arc::new(RwLock::new(
+                SipHooksState::new(sip_config, config.cache_path.as_deref()).await,
+            )))
+        } else {
+            None
+        };
+
         Arc::new(Self {
             tts_req_managers: Arc::new(RwLock::new(tts_req_managers)),
             cache,
             turn_detector,
+            sip_hooks_state,
         })
     }
 
@@ -210,5 +222,10 @@ impl CoreState {
     /// Get the Turn Detector if available
     pub fn get_turn_detector(&self) -> Option<Arc<RwLock<TurnDetector>>> {
         self.turn_detector.clone()
+    }
+
+    /// Get SIP hooks runtime state if SIP is configured.
+    pub fn get_sip_hooks_state(&self) -> Option<Arc<RwLock<SipHooksState>>> {
+        self.sip_hooks_state.clone()
     }
 }

@@ -10,7 +10,10 @@ use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
     livekit::{TokenRequest, TokenResponse},
-    sip_hooks::{SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse},
+    sip_hooks::{
+        DeleteSipHooksRequest, SipHookEntry, SipHooksErrorResponse, SipHooksRequest,
+        SipHooksResponse,
+    },
     speak::SpeakRequest,
     voices::Voice,
     ws::{
@@ -42,6 +45,7 @@ use crate::handlers::{
         crate::handlers::livekit::generate_token,
         crate::handlers::sip_hooks::list_sip_hooks,
         crate::handlers::sip_hooks::update_sip_hooks,
+        crate::handlers::sip_hooks::delete_sip_hooks,
     ),
     components(schemas(
         // REST API types
@@ -55,6 +59,7 @@ use crate::handlers::{
         SipHooksResponse,
         SipHookEntry,
         SipHooksErrorResponse,
+        DeleteSipHooksRequest,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,

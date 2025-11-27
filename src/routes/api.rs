@@ -20,7 +20,9 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
         // SIP hooks management
         .route(
             "/sip/hooks",
-            get(sip_hooks::list_sip_hooks).post(sip_hooks::update_sip_hooks),
+            get(sip_hooks::list_sip_hooks)
+                .post(sip_hooks::update_sip_hooks)
+                .delete(sip_hooks::delete_sip_hooks),
         )
         .layer(TraceLayer::new_for_http())
 }

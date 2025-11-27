@@ -14,9 +14,11 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
+use crate::state::SipHooksState;
 use crate::utils::req_manager::ReqManager;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -280,25 +282,25 @@ pub async fn handle_livekit_webhook(
     // Short-circuit: Only spawn forwarding task if SIP config exists and has hooks.
     // This ensures pure non-SIP deployments don't incur unnecessary background tasks
     // or noisy debug logs about missing configuration.
-    if let Some(sip_config) = &state.config.sip
-        && !sip_config.hooks.is_empty()
+    if let Some(sip_hooks_state) = state.core_state.get_sip_hooks_state()
         && event.event == "participant_joined"
     {
-        log_webhook_event(&event);
         // Optimization: Check if the SIP domain matches a configured hook BEFORE spawning.
         // We only care about events that map to a configured SIP hook.
-        let should_forward = event
-            .participant
-            .as_ref()
-            .and_then(|p| get_sip_host_header(&p.attributes))
-            .and_then(parse_sip_domain)
-            .map(|domain| {
-                sip_config
-                    .hooks
-                    .iter()
-                    .any(|h| h.host.eq_ignore_ascii_case(&domain))
-            })
-            .unwrap_or(false);
+        let should_forward = {
+            let hooks_guard = sip_hooks_state.read().await;
+            if hooks_guard.get_hooks().is_empty() {
+                false
+            } else {
+                event
+                    .participant
+                    .as_ref()
+                    .and_then(|p| get_sip_host_header(&p.attributes))
+                    .and_then(parse_sip_domain)
+                    .map(|domain| hooks_guard.get_hook_for_domain(&domain).is_some())
+                    .unwrap_or(false)
+            }
+        };
 
         if should_forward {
             // Step 5: Log the event with structured fields
@@ -307,10 +309,10 @@ pub async fn handle_livekit_webhook(
             // We spawn this in the background to avoid delaying the response to LiveKit
             let state_clone = state.clone();
             let event_clone = event.clone();
-            let sip_config_clone = sip_config.clone();
+            let hooks_state_clone = sip_hooks_state.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    forward_to_sip_hook(&state_clone, &sip_config_clone, &event_clone).await
+                    forward_to_sip_hook(&state_clone, &hooks_state_clone, &event_clone).await
                 {
                     // Log with appropriate severity based on error type
                     let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
@@ -562,7 +564,7 @@ fn generate_webhook_signature(
 ///
 /// # Arguments
 /// * `state` - Application state containing ReqManager instances
-/// * `sip_config` - SIP configuration (must contain hooks). Caller ensures this is non-empty.
+/// * `hooks_state` - SIP hooks runtime state (must contain hooks). Caller ensures this is non-empty.
 /// * `event` - The LiveKit webhook event to forward
 ///
 /// # Returns
@@ -575,11 +577,11 @@ fn generate_webhook_signature(
 /// - Secrets are never logged; only timing and status information is recorded
 ///
 /// # Panics
-/// This function assumes `sip_config` is provided and non-empty by the caller.
+/// This function assumes SIP hooks are configured and present in state.
 /// It should never be called without first checking that SIP hooks exist.
 async fn forward_to_sip_hook(
     state: &Arc<AppState>,
-    sip_config: &crate::config::SipConfig,
+    hooks_state: &Arc<RwLock<SipHooksState>>,
     event: &WebhookEvent,
 ) -> Result<(), SipForwardingError> {
     // Step 0: Only process participant_joined events, ignore all others
@@ -629,23 +631,27 @@ async fn forward_to_sip_hook(
         }
     })?;
 
-    // Step 7: Look up hook configuration (case-insensitive)
-    let hook = sip_config
-        .hooks
-        .iter()
-        .find(|h| h.host.eq_ignore_ascii_case(&domain))
-        .ok_or_else(|| SipForwardingError::NoHookConfigured {
-            domain: domain.clone(),
+    // Step 7/8: Look up hook configuration and resolve signing secret (case-insensitive)
+    let (hook_url, signing_secret, room_prefix) = {
+        let hooks_guard = hooks_state.read().await;
+        let hook = hooks_guard.get_hook_for_domain(&domain).ok_or_else(|| {
+            SipForwardingError::NoHookConfigured {
+                domain: domain.clone(),
+            }
         })?;
 
-    // Step 8: Fetch effective signing secret (hook-level override or global)
-    let signing_secret = hook
-        .secret
-        .as_ref()
-        .or(sip_config.hook_secret.as_ref())
-        .ok_or_else(|| SipForwardingError::MissingSigningSecret {
-            domain: domain.clone(),
+        let signing_secret = hooks_guard.get_signing_secret(hook).ok_or_else(|| {
+            SipForwardingError::MissingSigningSecret {
+                domain: domain.clone(),
+            }
         })?;
+
+        (
+            hook.url.clone(),
+            signing_secret.to_string(),
+            hooks_guard.get_room_prefix().to_string(),
+        )
+    };
 
     // Step 9: Build SIPHookEvent payload
     let sip_event = SIPHookEvent {
@@ -660,7 +666,7 @@ async fn forward_to_sip_hook(
         },
         from_phone_number: from_phone_number.clone(),
         to_phone_number: to_phone_number.clone(),
-        room_prefix: sip_config.room_prefix.clone(),
+        room_prefix: room_prefix.clone(),
         sip_host: domain.clone(),
     };
 
@@ -679,11 +685,11 @@ async fn forward_to_sip_hook(
         .as_secs();
 
     let signing_headers =
-        generate_webhook_signature(signing_secret, timestamp, &event.id, &payload)
+        generate_webhook_signature(&signing_secret, timestamp, &event.id, &payload)
             .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
 
     // Step 12: Get or create ReqManager for this hook host
-    let req_manager = get_or_create_hook_manager(state, &hook.url)
+    let req_manager = get_or_create_hook_manager(state, &hook_url)
         .await
         .map_err(|e| SipForwardingError::HttpClientError { error: e })?;
 
@@ -698,7 +704,7 @@ async fn forward_to_sip_hook(
 
     let mut request = guard
         .client()
-        .post(&hook.url)
+        .post(&hook_url)
         .header("Content-Type", "application/json");
 
     // Add signing headers
@@ -723,7 +729,7 @@ async fn forward_to_sip_hook(
         info!(
             event_id = %event.id,
             sip_domain = %domain,
-            hook_url = %hook.url,
+            hook_url = %hook_url,
             status = %status,
             duration_ms = elapsed.as_millis(),
             "Successfully forwarded webhook to SIP hook"

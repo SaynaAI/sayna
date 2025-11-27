@@ -73,7 +73,7 @@ paths:
       - sip
       summary: Lists all configured SIP hooks.
       description: |-
-        Returns the current list of SIP hooks from the cache file.
+        Returns the current list of SIP hooks from runtime state.
         This endpoint requires authentication if `AUTH_REQUIRED=true`.
 
         # Returns
@@ -122,6 +122,50 @@ paths:
       responses:
         '200':
           description: Updated list of SIP hooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
+        '500':
+          description: Failed to write hooks cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
+    delete:
+      tags:
+      - sip
+      summary: Deletes SIP hooks by host name.
+      description: |-
+        Removes the specified hosts from the cache. If a host exists in the original
+        server configuration, it will revert to its config value after deletion.
+        Hosts that only exist in cache will be completely removed.
+
+        The changes take effect immediately and persist across server restarts.
+
+        # Request Body
+        Array of host names to remove (case-insensitive).
+
+        # Returns
+        * `200 OK` - Updated list of SIP hooks after deletion
+        * `400 Bad Request` - If the hosts array is empty
+        * `500 Internal Server Error` - If writing the cache fails
+      operationId: delete_sip_hooks
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteSipHooksRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated list of SIP hooks after deletion
           content:
             application/json:
               schema:
@@ -197,6 +241,23 @@ paths:
       - bearer_auth: []
 components:
   schemas:
+    DeleteSipHooksRequest:
+      type: object
+      description: |-
+        Request body for deleting SIP hooks.
+
+        Contains a list of host names to remove from the SIP hooks cache.
+      properties:
+        hosts:
+          type: array
+          items:
+            type: string
+          description: |-
+            List of host names to remove (case-insensitive).
+            Hosts that exist in the original config will revert to their config values.
+          example:
+          - example.com
+          - other.com
     HealthResponse:
       type: object
       description: Health check response
