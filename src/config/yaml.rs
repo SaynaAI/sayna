@@ -95,6 +95,12 @@ pub struct ProvidersYaml {
     /// - Inline JSON content (for secrets management)
     /// - Empty string to use Application Default Credentials
     pub google_credentials: Option<String>,
+    /// Azure Speech Services subscription key from Azure Portal
+    /// (Azure Portal → Speech resource → Keys and Endpoint → Key 1 or Key 2)
+    pub azure_speech_subscription_key: Option<String>,
+    /// Azure region where the Speech resource is deployed (e.g., "eastus", "westus2")
+    /// The subscription key is tied to this specific region
+    pub azure_speech_region: Option<String>,
 }
 
 /// Recording S3 configuration from YAML

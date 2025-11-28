@@ -145,6 +145,8 @@ Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
 - `ELEVENLABS_API_KEY`: ElevenLabs API authentication (used for both STT and TTS)
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
+- `AZURE_SPEECH_SUBSCRIPTION_KEY`: Azure Speech Services subscription key (for Azure STT). Get from Azure Portal → Speech resource → Keys and Endpoint.
+- `AZURE_SPEECH_REGION`: Azure region where the Speech resource is deployed (default: "eastus"). The subscription key is tied to this specific region.
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
 - `PORT`: Server port (default: 3001)
@@ -216,6 +218,7 @@ When adding new features:
 - **Deepgram** (`deepgram.rs`): WebSocket-based streaming, uses `tokio-tungstenite`
 - **Google** (`google.rs`): gRPC bidirectional streaming, uses `tonic` with Google Cloud protos
 - **ElevenLabs** (`elevenlabs.rs`): WebSocket-based streaming with JSON messages, uses `tokio-tungstenite`
+- **Microsoft Azure** (`azure/`): WebSocket-based streaming, uses `tokio-tungstenite` with Azure Speech Services SDK protocol
 
 See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
 

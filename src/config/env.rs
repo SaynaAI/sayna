@@ -43,6 +43,11 @@ impl ServerConfig {
         // - Empty/None to use Application Default Credentials
         let google_credentials = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok();
 
+        // Azure Speech Services configuration
+        // The subscription key is tied to a specific Azure region
+        let azure_speech_subscription_key = env::var("AZURE_SPEECH_SUBSCRIPTION_KEY").ok();
+        let azure_speech_region = env::var("AZURE_SPEECH_REGION").ok();
+
         // LiveKit recording S3 configuration
         let recording_s3_bucket = env::var("RECORDING_S3_BUCKET").ok();
         let recording_s3_region = env::var("RECORDING_S3_REGION").ok();
@@ -94,6 +99,8 @@ impl ServerConfig {
             deepgram_api_key,
             elevenlabs_api_key,
             google_credentials,
+            azure_speech_subscription_key,
+            azure_speech_region,
             recording_s3_bucket,
             recording_s3_region,
             recording_s3_endpoint,

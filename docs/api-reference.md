@@ -9,7 +9,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 - Unified STT/TTS pipeline that polyfills provider differences and enforces the same message schema across transports.
 - Bidirectional WebSocket endpoint (`/ws`) for low-latency audio streaming, TTS commands, LiveKit coordination, and control signals.
 - REST endpoints for health checks, voice discovery, one-shot TTS synthesis, and LiveKit token issuance.
-- Pluggable provider layer with Deepgram (STT + TTS) and ElevenLabs (TTS) adapters; adding providers requires implementing the trait in `src/core/stt` or `src/core/tts`.
+- Pluggable provider layer with Deepgram (STT + TTS), ElevenLabs (STT + TTS), Google (STT + TTS), and Microsoft Azure (STT) adapters; adding providers requires implementing the trait in `src/core/stt` or `src/core/tts`.
 - Optional DSP layers: ONNX-based turn detection (`turn-detect` feature) and DeepFilterNet noise suppression (`noise-filter` feature).
 - Request pooling, adaptive retry logic, and binary audio caching so repeated prompts replay instantly while respecting provider rate limits.
 
@@ -62,7 +62,9 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | --- | --- | --- |
 | `HOST`, `PORT` | Bind address and port for the Axum server. | `0.0.0.0`, `3001` |
 | `DEEPGRAM_API_KEY` | API key for Deepgram STT/TTS. Required when Deepgram is selected. | – |
-| `ELEVENLABS_API_KEY` | API key for ElevenLabs TTS. Required when ElevenLabs voices or synthesis are used. | – |
+| `ELEVENLABS_API_KEY` | API key for ElevenLabs STT/TTS. Required when ElevenLabs voices or synthesis are used. | – |
+| `AZURE_SPEECH_SUBSCRIPTION_KEY` | Subscription key for Microsoft Azure Speech Services. Required when Azure STT is selected. | – |
+| `AZURE_SPEECH_REGION` | Azure region where the Speech resource was created (e.g., `eastus`, `westeurope`). | `eastus` |
 | `LIVEKIT_URL` | Internal LiveKit WebSocket URL (used by the server). | `ws://localhost:7880` |
 | `LIVEKIT_PUBLIC_URL` | URL the client should dial; returned in `/livekit/token` responses and WebSocket `ready`. | `http://localhost:7880` |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Credentials for generating LiveKit tokens on the server side. | – |
@@ -262,7 +264,7 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `provider` | string | Provider identifier (currently `deepgram`). |
+| `provider` | string | Provider identifier (`deepgram`, `google`, `elevenlabs`, or `microsoft-azure`). |
 | `language` | string | Locale such as `en-US`. |
 | `sample_rate` | integer | Expected sample rate for inbound audio. |
 | `channels` | integer | Channel count (1 = mono). |

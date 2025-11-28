@@ -5,7 +5,7 @@ alwaysApply: true
 ---
 # Sayna Project
 
-This Rust Axum project is a unified STT, TTS server that handles a real time websocket APIs for STT and TTS providers like DeepGram, ElevenLabs, Google TTS, Google STT or other open source projects into one unified Websocket API, that can abstract away from providers.
+This Rust Axum project is a unified STT, TTS server that handles a real time websocket APIs for STT and TTS providers like Deepgram, ElevenLabs, Google, Microsoft Azure, or other providers into one unified Websocket API, that can abstract away from providers.
 
 The main business logic is inside [mod.rs](mdc:src/core/mod.rs) ("core" folder), that uses the abstraction concept to have a unified higher level implementations of TTS and STT separated as a dedicated folders.
 

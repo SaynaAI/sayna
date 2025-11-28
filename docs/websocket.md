@@ -845,7 +845,7 @@ Required when `audio=true`.
 
 | Field | Type | Required | Description | Example |
 |-------|------|----------|-------------|---------|
-| `provider` | string | Yes | STT provider name. Supported: `"deepgram"`, `"google"` | `"deepgram"` |
+| `provider` | string | Yes | STT provider name. Supported: `"deepgram"`, `"google"`, `"elevenlabs"`, `"microsoft-azure"` | `"deepgram"` |
 | `api_key` | string | No | Provider credentials (see below for Google) | `""` |
 | `language` | string | Yes | BCP-47 language code for transcription | `"en-US"`, `"es-ES"`, `"fr-FR"` |
 | `sample_rate` | number | Yes | Audio sample rate in Hz. Must match binary audio you send. | `16000`, `24000`, `48000` |
@@ -861,6 +861,8 @@ Required when `audio=true`.
   - Empty string (`""`): Uses Application Default Credentials
   - File path: Path to service account JSON file
   - JSON content: Raw JSON string (starts with `{`)
+- **ElevenLabs**: API key injected from server environment (`ELEVENLABS_API_KEY`). Clients should not include `api_key` field.
+- **Microsoft Azure**: Subscription key injected from server environment (`AZURE_SPEECH_SUBSCRIPTION_KEY`). Region configured via `AZURE_SPEECH_REGION`. See [Azure STT documentation](azure-stt.md) for details.
 
 **Critical:** The `sample_rate`, `channels`, and `encoding` must **exactly match** the binary audio frames you send. Sayna does not perform audio format conversion. Mismatches result in garbled transcriptions or errors.
 
@@ -920,7 +922,21 @@ Required when `audio=true`.
 }
 ```
 
-See [Google STT documentation](google-stt.md) for detailed configuration options and model selection.
+**Microsoft Azure STT - Standard configuration:**
+```json
+{
+  "provider": "microsoft-azure",
+  "api_key": "",
+  "language": "en-US",
+  "sample_rate": 16000,
+  "channels": 1,
+  "punctuation": true,
+  "encoding": "linear16",
+  "model": ""
+}
+```
+
+See [Google STT documentation](google-stt.md) and [Azure STT documentation](azure-stt.md) for detailed configuration options and model selection.
 
 ---
 
@@ -2250,6 +2266,7 @@ With this foundation, you can build sophisticated voice applications ranging fro
 
 **Additional Resources:**
 - [Google STT Integration](google-stt.md)
+- [Azure STT Integration](azure-stt.md)
 - [Google TTS Integration](google-tts.md)
 - [Authentication Documentation](authentication.md)
 - [LiveKit Webhook Documentation](livekit_webhook.md)

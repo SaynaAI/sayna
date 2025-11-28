@@ -105,6 +105,21 @@ pub fn merge_config(
             .and_then(|p| p.google_credentials.clone())
     );
 
+    // Azure Speech Services configuration
+    let azure_speech_subscription_key = get_optional!(
+        "AZURE_SPEECH_SUBSCRIPTION_KEY",
+        yaml.providers
+            .as_ref()
+            .and_then(|p| p.azure_speech_subscription_key.clone())
+    );
+
+    let azure_speech_region = get_optional!(
+        "AZURE_SPEECH_REGION",
+        yaml.providers
+            .as_ref()
+            .and_then(|p| p.azure_speech_region.clone())
+    );
+
     // Recording S3 configuration
     let recording_s3_bucket = get_optional!(
         "RECORDING_S3_BUCKET",
@@ -203,6 +218,8 @@ pub fn merge_config(
         deepgram_api_key,
         elevenlabs_api_key,
         google_credentials,
+        azure_speech_subscription_key,
+        azure_speech_region,
         recording_s3_bucket,
         recording_s3_region,
         recording_s3_endpoint,

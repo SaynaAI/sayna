@@ -45,7 +45,7 @@ pub use sip::{SipConfig, SipHookConfig};
 /// Contains all configuration needed to run the Sayna server, including:
 /// - Server settings (host, port)
 /// - LiveKit integration settings
-/// - Provider API keys (Deepgram, ElevenLabs)
+/// - Provider API keys (Deepgram, ElevenLabs, Google, Azure)
 /// - Recording configuration (S3)
 /// - Cache settings
 /// - Authentication settings
@@ -70,6 +70,12 @@ pub struct ServerConfig {
     /// - JSON string starting with '{': Service account credentials inline
     /// - File path: Path to service account JSON file
     pub google_credentials: Option<String>,
+    /// Azure Speech Services subscription key from Azure Portal
+    /// (Azure Portal → Speech resource → Keys and Endpoint → Key 1 or Key 2)
+    pub azure_speech_subscription_key: Option<String>,
+    /// Azure region where the Speech resource is deployed (e.g., "eastus", "westus2")
+    /// The subscription key is tied to this specific region
+    pub azure_speech_region: Option<String>,
 
     // LiveKit recording configuration
     pub recording_s3_bucket: Option<String>,
@@ -230,8 +236,32 @@ impl ServerConfig {
                 // environment variable or gcloud auth.
                 Ok(self.google_credentials.clone().unwrap_or_default())
             }
+            "microsoft-azure" => {
+                // Azure Speech Services uses subscription key authentication
+                // The key is tied to a specific Azure region
+                self.azure_speech_subscription_key
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| {
+                        "Azure Speech subscription key not configured in server environment"
+                            .to_string()
+                    })
+            }
             _ => Err(format!("Unsupported provider: {provider}")),
         }
+    }
+
+    /// Get Azure Speech Services region
+    ///
+    /// Returns the configured Azure region, or "eastus" as default if not specified.
+    /// The region must match where the subscription key was created.
+    ///
+    /// # Returns
+    /// * `String` - The Azure region identifier (e.g., "eastus", "westus2")
+    pub fn get_azure_speech_region(&self) -> String {
+        self.azure_speech_region
+            .clone()
+            .unwrap_or_else(|| "eastus".to_string())
     }
 }
 
@@ -255,6 +285,8 @@ mod tests {
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -287,6 +319,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -319,6 +353,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -354,6 +390,8 @@ mod tests {
             deepgram_api_key: Some("test-key".to_string()),
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -389,6 +427,8 @@ mod tests {
             deepgram_api_key: Some("test-deepgram-key".to_string()),
             elevenlabs_api_key: Some("test-elevenlabs-key".to_string()),
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -430,6 +470,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -458,6 +500,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -488,6 +532,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -516,6 +562,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -546,6 +594,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: Some("/path/to/service-account.json".to_string()),
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -580,6 +630,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: Some(json_credentials.to_string()),
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -613,6 +665,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: None, // Not configured - will use ADC
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -646,6 +700,8 @@ mod tests {
             deepgram_api_key: None,
             elevenlabs_api_key: None,
             google_credentials: Some("/path/to/creds.json".to_string()),
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -670,6 +726,142 @@ mod tests {
         let result2 = config.get_api_key("Google");
         assert!(result2.is_ok());
         assert_eq!(result2.unwrap(), "/path/to/creds.json");
+    }
+
+    #[test]
+    fn test_get_api_key_azure_success() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: Some("test-azure-key".to_string()),
+            azure_speech_region: Some("westus2".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        let result = config.get_api_key("microsoft-azure");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "test-azure-key");
+    }
+
+    #[test]
+    fn test_get_api_key_azure_missing() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        let result = config.get_api_key("microsoft-azure");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Azure Speech subscription key not configured in server environment"
+        );
+    }
+
+    #[test]
+    fn test_get_azure_speech_region_configured() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: Some("test-key".to_string()),
+            azure_speech_region: Some("westeurope".to_string()),
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        assert_eq!(config.get_azure_speech_region(), "westeurope");
+    }
+
+    #[test]
+    fn test_get_azure_speech_region_default() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secret: None,
+            auth_timeout_seconds: 5,
+            auth_required: false,
+            sip: None,
+        };
+
+        // Default is "eastus"
+        assert_eq!(config.get_azure_speech_region(), "eastus");
     }
 
     // Helper to clean up environment variables
