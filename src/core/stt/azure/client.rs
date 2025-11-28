@@ -332,7 +332,7 @@ impl AzureSTT {
 
         // Clone necessary data for the connection task
         let api_key = config.base.api_key.clone();
-        let host = config.region.hostname();
+        let host = config.region.stt_hostname();
         let content_type = Self::build_content_type(&config);
         let connection_id = self.connection_id.clone();
         let interim_results_enabled = config.interim_results;

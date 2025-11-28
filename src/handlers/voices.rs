@@ -92,6 +92,26 @@ struct GoogleVoice {
     ssml_gender: Option<String>,
 }
 
+// Azure TTS Voices API response structures
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AzureVoice {
+    /// Full voice name, e.g., "Microsoft Server Speech Text to Speech Voice (en-US, JennyNeural)"
+    #[allow(dead_code)]
+    name: String,
+    /// Display name, e.g., "Jenny"
+    display_name: String,
+    /// Short name used as voice ID, e.g., "en-US-JennyNeural"
+    short_name: String,
+    /// Gender: "Female" or "Male"
+    gender: String,
+    /// Locale code, e.g., "en-US"
+    locale: String,
+    /// Voice type, e.g., "Neural"
+    #[allow(dead_code)]
+    voice_type: String,
+}
+
 /// Maps a language code (e.g., "en-US") to a human-readable language name.
 fn language_code_to_name(code: &str) -> String {
     // Extract the primary language code (e.g., "en" from "en-US")
@@ -462,6 +482,56 @@ async fn fetch_google_voices(
     Ok(voices)
 }
 
+// Helper function to fetch voices from Azure TTS API
+async fn fetch_azure_voices(
+    subscription_key: &str,
+    region: &str,
+) -> Result<Vec<Voice>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+
+    // Azure TTS voices list endpoint
+    let url = format!(
+        "https://{}.tts.speech.microsoft.com/cognitiveservices/voices/list",
+        region
+    );
+
+    let response = client
+        .get(&url)
+        .header("Ocp-Apim-Subscription-Key", subscription_key)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Azure TTS API error ({}): {}", status, error_body).into());
+    }
+
+    let azure_voices: Vec<AzureVoice> = response.json().await?;
+
+    let voices = azure_voices
+        .into_iter()
+        .map(|voice| {
+            let language = language_code_to_name(&voice.locale);
+            let accent = extract_accent_from_code(&voice.locale);
+
+            Voice {
+                id: voice.short_name,
+                sample: String::new(), // Azure doesn't provide sample URLs in this API
+                name: voice.display_name,
+                accent,
+                gender: voice.gender,
+                language,
+            }
+        })
+        .collect();
+
+    Ok(voices)
+}
+
 /// Handler for GET /voices - returns available voices per provider
 #[cfg_attr(
     feature = "openapi",
@@ -524,6 +594,21 @@ pub async fn list_voices(
         }
     } else {
         tracing::debug!("Google credentials not configured, skipping");
+    }
+
+    // Fetch Azure TTS voices - skip if not configured
+    if let Ok(subscription_key) = state.config.get_api_key("microsoft-azure") {
+        let region = state.config.get_azure_speech_region();
+        match fetch_azure_voices(&subscription_key, &region).await {
+            Ok(voices) => {
+                voices_response.insert("azure".to_string(), voices);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch Azure TTS voices: {}", e);
+            }
+        }
+    } else {
+        tracing::debug!("Azure Speech credentials not configured, skipping");
     }
 
     Ok(Json(voices_response))

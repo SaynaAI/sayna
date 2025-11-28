@@ -34,13 +34,14 @@ providers:
   # Note: project_id is automatically extracted from the credentials JSON
   google_credentials: ""                         # ENV: GOOGLE_APPLICATION_CREDENTIALS
 
-  # Azure Speech Services settings (used for Speech-to-Text)
+  # Microsoft Azure Speech Services settings (used for both STT and TTS)
   # Get these from Azure Portal → Your Speech resource → Keys and Endpoint
   # IMPORTANT: The subscription key is tied to a specific Azure region.
   # Using a key with the wrong region will result in 401 Unauthorized errors.
   azure_speech_subscription_key: ""              # ENV: AZURE_SPEECH_SUBSCRIPTION_KEY
   # Azure region where your Speech resource was created
   # Common regions: eastus, westus, westus2, westeurope, northeurope, eastasia, southeastasia
+  # Note: Both STT and TTS use the same region setting
   azure_speech_region: "eastus"                  # ENV: AZURE_SPEECH_REGION (default: eastus)
 
 # STT Provider Configuration (optional - can also be set via WebSocket config)

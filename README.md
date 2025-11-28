@@ -12,6 +12,7 @@ A high-performance real-time voice processing server built in Rust that provides
   - Deepgram (STT/TTS)
   - ElevenLabs (STT/TTS)
   - Google Cloud (STT/TTS) - WaveNet, Neural2, and Studio voices
+  - Microsoft Azure (STT/TTS) - 400+ neural voices across 140+ languages
 - **Audio-Disabled Mode**: Development mode without API keys
 
 ## Quick Start
@@ -22,6 +23,7 @@ A high-performance real-time voice processing server built in Rust that provides
 - Optional: Deepgram API key (for STT/TTS)
 - Optional: ElevenLabs API key (for STT/TTS)
 - Optional: Google Cloud credentials (for STT/TTS)
+- Optional: Azure Speech subscription key and region (for STT/TTS)
 - Optional: LiveKit server (for WebRTC features)
 
 ### Installation
@@ -43,6 +45,8 @@ cp .env.example .env
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+AZURE_SPEECH_SUBSCRIPTION_KEY=your_azure_subscription_key
+AZURE_SPEECH_REGION=eastus
 
 # Server configuration
 PORT=3001
@@ -304,6 +308,8 @@ docker run -p 3001:3001 --env-file .env sayna
 | `DEEPGRAM_API_KEY` | Deepgram API authentication | - | No* |
 | `ELEVENLABS_API_KEY` | ElevenLabs API authentication | - | No* |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google Cloud service account JSON | - | No* |
+| `AZURE_SPEECH_SUBSCRIPTION_KEY` | Azure Speech Services subscription key | - | No* |
+| `AZURE_SPEECH_REGION` | Azure region (e.g., eastus, westeurope) | `eastus` | No* |
 | `LIVEKIT_URL` | LiveKit server WebSocket URL | `ws://localhost:7880` | No |
 | `LIVEKIT_API_KEY` | LiveKit API key (for webhooks and token generation) | - | No*** |
 | `LIVEKIT_API_SECRET` | LiveKit API secret (for webhooks and token generation) | - | No*** |

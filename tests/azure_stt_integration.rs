@@ -150,7 +150,7 @@ fn test_azure_region_hostnames() {
 
     for (region, expected_hostname) in test_cases {
         assert_eq!(
-            region.hostname(),
+            region.stt_hostname(),
             expected_hostname,
             "Region {:?} hostname mismatch",
             region
@@ -175,7 +175,7 @@ fn test_azure_region_websocket_urls() {
 
     for (region, expected_url) in test_cases {
         assert_eq!(
-            region.websocket_base_url(),
+            region.stt_websocket_base_url(),
             expected_url,
             "Region {:?} WebSocket URL mismatch",
             region
@@ -213,11 +213,11 @@ fn test_azure_custom_region() {
     let custom_region = AzureRegion::Custom("customregion".to_string());
     assert_eq!(custom_region.as_str(), "customregion");
     assert_eq!(
-        custom_region.hostname(),
+        custom_region.stt_hostname(),
         "customregion.stt.speech.microsoft.com"
     );
     assert_eq!(
-        custom_region.websocket_base_url(),
+        custom_region.stt_websocket_base_url(),
         "wss://customregion.stt.speech.microsoft.com"
     );
 }

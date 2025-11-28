@@ -70,7 +70,7 @@ Always consult these rule files when implementing new features or modifying exis
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
    - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket)
-   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS
+   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS
    - Providers implement `STTProvider` or `TTSProvider` traits
 
 3. **WebSocket Handler** (`src/handlers/ws.rs`):
@@ -145,8 +145,8 @@ Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
 - `ELEVENLABS_API_KEY`: ElevenLabs API authentication (used for both STT and TTS)
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
-- `AZURE_SPEECH_SUBSCRIPTION_KEY`: Azure Speech Services subscription key (for Azure STT). Get from Azure Portal → Speech resource → Keys and Endpoint.
-- `AZURE_SPEECH_REGION`: Azure region where the Speech resource is deployed (default: "eastus"). The subscription key is tied to this specific region.
+- `AZURE_SPEECH_SUBSCRIPTION_KEY`: Azure Speech Services subscription key (for Azure STT and TTS). Get from Azure Portal → Speech resource → Keys and Endpoint.
+- `AZURE_SPEECH_REGION`: Azure region where the Speech resource is deployed (default: "eastus"). The subscription key is tied to this specific region. Used for both STT and TTS.
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
 - `PORT`: Server port (default: 3001)
@@ -308,6 +308,47 @@ Voice names follow the pattern: `{language}-{region}-{type}-{variant}`
 - `alaw` - 8-bit A-law (telephony, Europe)
 
 See [docs/google-tts.md](docs/google-tts.md) for detailed Google TTS integration documentation.
+
+### Microsoft Azure TTS Integration
+
+Microsoft Azure Text-to-Speech provides high-quality neural voices across 140+ languages with natural prosody and intonation.
+
+**Key Features:**
+- 400+ neural voices across 140+ languages
+- Natural sounding speech synthesis with SSML support
+- Multiple audio output formats (PCM, MP3, Opus)
+- Uses the same credentials as Azure STT
+- Regional endpoints for optimized latency
+
+**Configuration:**
+```rust
+let config = TTSConfig {
+    provider: "azure".to_string(),
+    voice_id: Some("en-US-JennyNeural".to_string()),
+    audio_format: Some("linear16".to_string()),
+    sample_rate: Some(24000),
+    speaking_rate: Some(1.0),
+    ..Default::default()
+};
+```
+
+**Authentication:** Uses the same `AZURE_SPEECH_SUBSCRIPTION_KEY` and `AZURE_SPEECH_REGION` environment variables as Azure STT.
+
+**Voice Naming Convention:**
+Voice names follow the pattern: `{language}-{region}-{name}Neural`
+- `en-US-JennyNeural` - English US, Jenny voice
+- `en-GB-SoniaNeural` - British English, Sonia voice
+- `de-DE-ConradNeural` - German, Conrad voice
+- `fr-FR-DeniseNeural` - French, Denise voice
+
+**Supported Audio Formats:**
+- `linear16` / `pcm` - Raw 16-bit PCM (recommended for real-time)
+- `mp3` - Compressed MP3 (multiple bitrates)
+- `opus` - Low-latency Opus (for streaming)
+- `mulaw` - 8-bit μ-law (telephony, US)
+- `alaw` - 8-bit A-law (telephony, Europe)
+
+See [docs/azure-tts.md](docs/azure-tts.md) for detailed Azure TTS integration documentation.
 
 ## API Endpoints
 

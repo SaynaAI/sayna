@@ -1,179 +1,17 @@
 //! Configuration types for Microsoft Azure Speech-to-Text API.
 //!
 //! This module contains all configuration-related types including:
-//! - Regional endpoint selection
 //! - Output format specifications
 //! - Profanity handling options
 //! - Provider-specific configuration options
+//!
+//! Note: The `AzureRegion` type is now defined in `crate::core::providers::azure`
+//! and re-exported here for backwards compatibility.
 
 use super::super::base::STTConfig;
 
-// =============================================================================
-// Azure Regions
-// =============================================================================
-
-/// Microsoft Azure Speech Service regions.
-///
-/// Choose the region closest to your users for optimal latency,
-/// or use specific regions for data residency requirements.
-///
-/// See: <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/regions>
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum AzureRegion {
-    /// East US (Virginia)
-    #[default]
-    EastUS,
-    /// East US 2 (Virginia)
-    EastUS2,
-    /// West US (California)
-    WestUS,
-    /// West US 2 (Washington)
-    WestUS2,
-    /// West US 3 (Arizona)
-    WestUS3,
-    /// Central US (Iowa)
-    CentralUS,
-    /// North Central US (Illinois)
-    NorthCentralUS,
-    /// South Central US (Texas)
-    SouthCentralUS,
-    /// West Europe (Netherlands)
-    WestEurope,
-    /// North Europe (Ireland)
-    NorthEurope,
-    /// UK South (London)
-    UKSouth,
-    /// France Central (Paris)
-    FranceCentral,
-    /// Germany West Central (Frankfurt)
-    GermanyWestCentral,
-    /// Switzerland North (Zurich)
-    SwitzerlandNorth,
-    /// East Asia (Hong Kong)
-    EastAsia,
-    /// Southeast Asia (Singapore)
-    SoutheastAsia,
-    /// Japan East (Tokyo)
-    JapanEast,
-    /// Japan West (Osaka)
-    JapanWest,
-    /// Korea Central (Seoul)
-    KoreaCentral,
-    /// Australia East (Sydney)
-    AustraliaEast,
-    /// Canada Central (Toronto)
-    CanadaCentral,
-    /// Brazil South (Sao Paulo)
-    BrazilSouth,
-    /// India Central (Pune)
-    IndiaCentral,
-    /// Custom region not explicitly listed.
-    ///
-    /// Use this for new or less common regions without requiring code changes.
-    Custom(String),
-}
-
-impl AzureRegion {
-    /// Get the region identifier string used in Azure URLs.
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::EastUS => "eastus",
-            Self::EastUS2 => "eastus2",
-            Self::WestUS => "westus",
-            Self::WestUS2 => "westus2",
-            Self::WestUS3 => "westus3",
-            Self::CentralUS => "centralus",
-            Self::NorthCentralUS => "northcentralus",
-            Self::SouthCentralUS => "southcentralus",
-            Self::WestEurope => "westeurope",
-            Self::NorthEurope => "northeurope",
-            Self::UKSouth => "uksouth",
-            Self::FranceCentral => "francecentral",
-            Self::GermanyWestCentral => "germanywestcentral",
-            Self::SwitzerlandNorth => "switzerlandnorth",
-            Self::EastAsia => "eastasia",
-            Self::SoutheastAsia => "southeastasia",
-            Self::JapanEast => "japaneast",
-            Self::JapanWest => "japanwest",
-            Self::KoreaCentral => "koreacentral",
-            Self::AustraliaEast => "australiaeast",
-            Self::CanadaCentral => "canadacentral",
-            Self::BrazilSouth => "brazilsouth",
-            Self::IndiaCentral => "centralindia",
-            Self::Custom(region) => region.as_str(),
-        }
-    }
-
-    /// Get the hostname for the Azure Speech Service in this region.
-    ///
-    /// Format: `<region>.stt.speech.microsoft.com`
-    #[inline]
-    pub fn hostname(&self) -> String {
-        format!("{}.stt.speech.microsoft.com", self.as_str())
-    }
-
-    /// Get the base WebSocket URL for the Azure Speech Service in this region.
-    ///
-    /// Format: `wss://<region>.stt.speech.microsoft.com`
-    #[inline]
-    pub fn websocket_base_url(&self) -> String {
-        format!("wss://{}.stt.speech.microsoft.com", self.as_str())
-    }
-
-    /// Get the token issuing endpoint URL for obtaining authentication tokens.
-    ///
-    /// Format: `https://<region>.api.cognitive.microsoft.com/sts/v1.0/issueToken`
-    ///
-    /// Use this endpoint to exchange your subscription key for an access token.
-    #[inline]
-    pub fn token_endpoint(&self) -> String {
-        format!(
-            "https://{}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
-            self.as_str()
-        )
-    }
-}
-
-impl std::str::FromStr for AzureRegion {
-    type Err = std::convert::Infallible;
-
-    /// Parse a region from a string identifier.
-    ///
-    /// Known region identifiers are matched to their explicit variants.
-    /// Unknown identifiers are wrapped in the `Custom` variant.
-    ///
-    /// This implementation never fails - unknown regions become `Custom(s)`.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let region = match s.to_lowercase().as_str() {
-            "eastus" => Self::EastUS,
-            "eastus2" => Self::EastUS2,
-            "westus" => Self::WestUS,
-            "westus2" => Self::WestUS2,
-            "westus3" => Self::WestUS3,
-            "centralus" => Self::CentralUS,
-            "northcentralus" => Self::NorthCentralUS,
-            "southcentralus" => Self::SouthCentralUS,
-            "westeurope" => Self::WestEurope,
-            "northeurope" => Self::NorthEurope,
-            "uksouth" => Self::UKSouth,
-            "francecentral" => Self::FranceCentral,
-            "germanywestcentral" => Self::GermanyWestCentral,
-            "switzerlandnorth" => Self::SwitzerlandNorth,
-            "eastasia" => Self::EastAsia,
-            "southeastasia" => Self::SoutheastAsia,
-            "japaneast" => Self::JapanEast,
-            "japanwest" => Self::JapanWest,
-            "koreacentral" => Self::KoreaCentral,
-            "australiaeast" => Self::AustraliaEast,
-            "canadacentral" => Self::CanadaCentral,
-            "brazilsouth" => Self::BrazilSouth,
-            "centralindia" => Self::IndiaCentral,
-            _ => Self::Custom(s.to_string()),
-        };
-        Ok(region)
-    }
-}
+// Re-export AzureRegion from the shared providers module for backwards compatibility
+pub use crate::core::providers::azure::AzureRegion;
 
 // =============================================================================
 // Output Format
@@ -361,7 +199,7 @@ impl AzureSTTConfig {
     ///     &profanity=masked
     /// ```
     pub fn build_websocket_url(&self) -> String {
-        let base_url = self.region.websocket_base_url();
+        let base_url = self.region.stt_websocket_base_url();
 
         // Start with the base path and required parameters
         let mut url = format!(
@@ -416,57 +254,25 @@ impl AzureSTTConfig {
 mod tests {
     use super::*;
 
+    // Note: Core AzureRegion tests are now in crate::core::providers::azure::region.
+    // Tests here focus on STT-specific configuration and re-export verification.
+
     #[test]
-    fn test_azure_region_default() {
+    fn test_azure_region_reexport_works() {
+        // Verify that AzureRegion is properly re-exported from the providers module
         let region = AzureRegion::default();
         assert_eq!(region, AzureRegion::EastUS);
         assert_eq!(region.as_str(), "eastus");
     }
 
     #[test]
-    fn test_azure_region_hostname() {
+    fn test_azure_region_stt_methods_available() {
+        // Verify that STT-specific methods are available via re-export
         let region = AzureRegion::WestEurope;
-        assert_eq!(region.hostname(), "westeurope.stt.speech.microsoft.com");
-    }
-
-    #[test]
-    fn test_azure_region_websocket_url() {
-        let region = AzureRegion::SoutheastAsia;
+        assert_eq!(region.stt_hostname(), "westeurope.stt.speech.microsoft.com");
         assert_eq!(
-            region.websocket_base_url(),
-            "wss://southeastasia.stt.speech.microsoft.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_region_token_endpoint() {
-        let region = AzureRegion::EastUS;
-        assert_eq!(
-            region.token_endpoint(),
-            "https://eastus.api.cognitive.microsoft.com/sts/v1.0/issueToken"
-        );
-    }
-
-    #[test]
-    fn test_azure_region_custom() {
-        let region = AzureRegion::Custom("newregion".to_string());
-        assert_eq!(region.as_str(), "newregion");
-        assert_eq!(region.hostname(), "newregion.stt.speech.microsoft.com");
-    }
-
-    #[test]
-    fn test_azure_region_from_str() {
-        assert_eq!(
-            "eastus".parse::<AzureRegion>().unwrap(),
-            AzureRegion::EastUS
-        );
-        assert_eq!(
-            "WESTEUROPE".parse::<AzureRegion>().unwrap(),
-            AzureRegion::WestEurope
-        );
-        assert_eq!(
-            "unknown".parse::<AzureRegion>().unwrap(),
-            AzureRegion::Custom("unknown".to_string())
+            region.stt_websocket_base_url(),
+            "wss://westeurope.stt.speech.microsoft.com"
         );
     }
 
@@ -572,110 +378,8 @@ mod tests {
         assert_eq!(config.region, AzureRegion::JapanEast);
     }
 
-    // -------------------------------------------------------------------------
-    // Additional Region Tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_all_regions_as_str() {
-        // Verify all named regions produce expected string values
-        let regions = vec![
-            (AzureRegion::EastUS, "eastus"),
-            (AzureRegion::EastUS2, "eastus2"),
-            (AzureRegion::WestUS, "westus"),
-            (AzureRegion::WestUS2, "westus2"),
-            (AzureRegion::WestUS3, "westus3"),
-            (AzureRegion::CentralUS, "centralus"),
-            (AzureRegion::NorthCentralUS, "northcentralus"),
-            (AzureRegion::SouthCentralUS, "southcentralus"),
-            (AzureRegion::WestEurope, "westeurope"),
-            (AzureRegion::NorthEurope, "northeurope"),
-            (AzureRegion::UKSouth, "uksouth"),
-            (AzureRegion::FranceCentral, "francecentral"),
-            (AzureRegion::GermanyWestCentral, "germanywestcentral"),
-            (AzureRegion::SwitzerlandNorth, "switzerlandnorth"),
-            (AzureRegion::EastAsia, "eastasia"),
-            (AzureRegion::SoutheastAsia, "southeastasia"),
-            (AzureRegion::JapanEast, "japaneast"),
-            (AzureRegion::JapanWest, "japanwest"),
-            (AzureRegion::KoreaCentral, "koreacentral"),
-            (AzureRegion::AustraliaEast, "australiaeast"),
-            (AzureRegion::CanadaCentral, "canadacentral"),
-            (AzureRegion::BrazilSouth, "brazilsouth"),
-            (AzureRegion::IndiaCentral, "centralindia"),
-        ];
-
-        for (region, expected) in regions {
-            assert_eq!(
-                region.as_str(),
-                expected,
-                "Region {:?} should produce '{}'",
-                region,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_region_from_str_all_known_regions() {
-        // Test all known region string identifiers
-        let test_cases = vec![
-            ("eastus", AzureRegion::EastUS),
-            ("eastus2", AzureRegion::EastUS2),
-            ("westus", AzureRegion::WestUS),
-            ("westus2", AzureRegion::WestUS2),
-            ("westus3", AzureRegion::WestUS3),
-            ("centralus", AzureRegion::CentralUS),
-            ("northcentralus", AzureRegion::NorthCentralUS),
-            ("southcentralus", AzureRegion::SouthCentralUS),
-            ("westeurope", AzureRegion::WestEurope),
-            ("northeurope", AzureRegion::NorthEurope),
-            ("uksouth", AzureRegion::UKSouth),
-            ("francecentral", AzureRegion::FranceCentral),
-            ("germanywestcentral", AzureRegion::GermanyWestCentral),
-            ("switzerlandnorth", AzureRegion::SwitzerlandNorth),
-            ("eastasia", AzureRegion::EastAsia),
-            ("southeastasia", AzureRegion::SoutheastAsia),
-            ("japaneast", AzureRegion::JapanEast),
-            ("japanwest", AzureRegion::JapanWest),
-            ("koreacentral", AzureRegion::KoreaCentral),
-            ("australiaeast", AzureRegion::AustraliaEast),
-            ("canadacentral", AzureRegion::CanadaCentral),
-            ("brazilsouth", AzureRegion::BrazilSouth),
-            ("centralindia", AzureRegion::IndiaCentral),
-        ];
-
-        for (input, expected) in test_cases {
-            assert_eq!(
-                input.parse::<AzureRegion>().unwrap(),
-                expected,
-                "Parsing '{}' should produce {:?}",
-                input,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_region_from_str_case_insensitive() {
-        // All case variations should work
-        assert_eq!(
-            "EASTUS".parse::<AzureRegion>().unwrap(),
-            AzureRegion::EastUS
-        );
-        assert_eq!(
-            "EastUs".parse::<AzureRegion>().unwrap(),
-            AzureRegion::EastUS
-        );
-        assert_eq!(
-            "WESTEUROPE".parse::<AzureRegion>().unwrap(),
-            AzureRegion::WestEurope
-        );
-        assert_eq!(
-            "WestEurope".parse::<AzureRegion>().unwrap(),
-            AzureRegion::WestEurope
-        );
-    }
+    // Note: Additional region tests (as_str, FromStr, case insensitivity) are now
+    // in crate::core::providers::azure::region. Tests here focus on STT config.
 
     #[test]
     fn test_azure_stt_config_build_url_simple_format() {
