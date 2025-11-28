@@ -10,7 +10,8 @@ A high-performance real-time voice processing server built in Rust that provides
 - **Advanced Noise Filtering**: Optional DeepFilterNet integration (`noise-filter` feature)
 - **Provider Flexibility**: Pluggable architecture supporting multiple providers
   - Deepgram (STT/TTS)
-  - ElevenLabs (TTS)
+  - ElevenLabs (STT/TTS)
+  - Google Cloud (STT/TTS) - WaveNet, Neural2, and Studio voices
 - **Audio-Disabled Mode**: Development mode without API keys
 
 ## Quick Start
@@ -19,7 +20,8 @@ A high-performance real-time voice processing server built in Rust that provides
 
 - Rust 1.70+ and Cargo
 - Optional: Deepgram API key (for STT/TTS)
-- Optional: ElevenLabs API key (for TTS)
+- Optional: ElevenLabs API key (for STT/TTS)
+- Optional: Google Cloud credentials (for STT/TTS)
 - Optional: LiveKit server (for WebRTC features)
 
 ### Installation
@@ -40,6 +42,7 @@ cp .env.example .env
 # Optional - can run without these in audio-disabled mode
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 
 # Server configuration
 PORT=3001
@@ -300,6 +303,7 @@ docker run -p 3001:3001 --env-file .env sayna
 |----------|-------------|---------|----------|
 | `DEEPGRAM_API_KEY` | Deepgram API authentication | - | No* |
 | `ELEVENLABS_API_KEY` | ElevenLabs API authentication | - | No* |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google Cloud service account JSON | - | No* |
 | `LIVEKIT_URL` | LiveKit server WebSocket URL | `ws://localhost:7880` | No |
 | `LIVEKIT_API_KEY` | LiveKit API key (for webhooks and token generation) | - | No*** |
 | `LIVEKIT_API_SECRET` | LiveKit API secret (for webhooks and token generation) | - | No*** |

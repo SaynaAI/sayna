@@ -2,6 +2,9 @@ use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::core::providers::google::{
+    CredentialSource, GOOGLE_CLOUD_PLATFORM_SCOPE, GoogleAuthClient, TokenProvider,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +76,150 @@ struct DeepgramMetadata {
     accent: Option<String>,
     sample: Option<String>,
     tags: Option<Vec<String>>,
+}
+
+// Google TTS API response structures
+#[derive(Debug, Deserialize)]
+struct GoogleVoicesResponse {
+    voices: Option<Vec<GoogleVoice>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleVoice {
+    language_codes: Vec<String>,
+    name: String,
+    ssml_gender: Option<String>,
+}
+
+/// Maps a language code (e.g., "en-US") to a human-readable language name.
+fn language_code_to_name(code: &str) -> String {
+    // Extract the primary language code (e.g., "en" from "en-US")
+    let primary = code.split('-').next().unwrap_or(code);
+
+    match primary {
+        "af" => "Afrikaans",
+        "am" => "Amharic",
+        "ar" => "Arabic",
+        "bg" => "Bulgarian",
+        "bn" => "Bengali",
+        "ca" => "Catalan",
+        "cmn" | "zh" => "Chinese",
+        "cs" => "Czech",
+        "cy" => "Welsh",
+        "da" => "Danish",
+        "de" => "German",
+        "el" => "Greek",
+        "en" => "English",
+        "es" => "Spanish",
+        "et" => "Estonian",
+        "eu" => "Basque",
+        "fa" => "Persian",
+        "fi" => "Finnish",
+        "fil" => "Filipino",
+        "fr" => "French",
+        "ga" => "Irish",
+        "gl" => "Galician",
+        "gu" => "Gujarati",
+        "he" | "iw" => "Hebrew",
+        "hi" => "Hindi",
+        "hr" => "Croatian",
+        "hu" => "Hungarian",
+        "id" => "Indonesian",
+        "is" => "Icelandic",
+        "it" => "Italian",
+        "ja" => "Japanese",
+        "jv" => "Javanese",
+        "kn" => "Kannada",
+        "ko" => "Korean",
+        "lt" => "Lithuanian",
+        "lv" => "Latvian",
+        "ml" => "Malayalam",
+        "mr" => "Marathi",
+        "ms" => "Malay",
+        "nb" => "Norwegian Bokmål",
+        "nl" => "Dutch",
+        "pa" => "Punjabi",
+        "pl" => "Polish",
+        "pt" => "Portuguese",
+        "ro" => "Romanian",
+        "ru" => "Russian",
+        "sk" => "Slovak",
+        "sl" => "Slovenian",
+        "sr" => "Serbian",
+        "su" => "Sundanese",
+        "sv" => "Swedish",
+        "sw" => "Swahili",
+        "ta" => "Tamil",
+        "te" => "Telugu",
+        "th" => "Thai",
+        "tr" => "Turkish",
+        "uk" => "Ukrainian",
+        "ur" => "Urdu",
+        "vi" => "Vietnamese",
+        "yue" => "Cantonese",
+        _ => code, // Return the code itself if unknown
+    }
+    .to_string()
+}
+
+/// Extracts accent/region from a language code (e.g., "US" from "en-US").
+fn extract_accent_from_code(code: &str) -> String {
+    let parts: Vec<&str> = code.split('-').collect();
+    if parts.len() >= 2 {
+        // Map region codes to readable names
+        match parts[1].to_uppercase().as_str() {
+            "US" => "American",
+            "GB" => "British",
+            "AU" => "Australian",
+            "IN" => "Indian",
+            "CA" => "Canadian",
+            "IE" => "Irish",
+            "NZ" => "New Zealand",
+            "ZA" => "South African",
+            "ES" => "Spain",
+            "MX" => "Mexican",
+            "AR" => "Argentinian",
+            "CL" => "Chilean",
+            "CO" => "Colombian",
+            "PE" => "Peruvian",
+            "VE" => "Venezuelan",
+            "BR" => "Brazilian",
+            "PT" => "Portuguese",
+            "FR" => "French",
+            "BE" => "Belgian",
+            "CH" => "Swiss",
+            "DE" => "German",
+            "AT" => "Austrian",
+            "IT" => "Italian",
+            "CN" => "Mainland China",
+            "TW" => "Taiwanese",
+            "HK" => "Hong Kong",
+            "JP" => "Japanese",
+            "KR" => "Korean",
+            "RU" => "Russian",
+            "UA" => "Ukrainian",
+            "PL" => "Polish",
+            "NL" => "Dutch",
+            "SE" => "Swedish",
+            "NO" => "Norwegian",
+            "DK" => "Danish",
+            "FI" => "Finnish",
+            "TR" => "Turkish",
+            "SA" => "Saudi",
+            "EG" => "Egyptian",
+            "IL" => "Israeli",
+            "PH" => "Filipino",
+            "ID" => "Indonesian",
+            "MY" => "Malaysian",
+            "TH" => "Thai",
+            "VN" => "Vietnamese",
+            _ => parts[1],
+        }
+        .to_string()
+    } else {
+        "Standard".to_string()
+    }
 }
 
 // Helper function to fetch voices from ElevenLabs API
@@ -240,6 +387,81 @@ async fn fetch_deepgram_voices(
     Ok(voices)
 }
 
+// Helper function to fetch voices from Google TTS API
+async fn fetch_google_voices(
+    credentials: &str,
+) -> Result<Vec<Voice>, Box<dyn std::error::Error + Send + Sync>> {
+    // Create credential source and auth client
+    let credential_source = CredentialSource::from_api_key(credentials);
+    let auth_client = GoogleAuthClient::new(credential_source, &[GOOGLE_CLOUD_PLATFORM_SCOPE])?;
+
+    // Get OAuth2 token
+    let token = auth_client.get_token().await?;
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get("https://texttospeech.googleapis.com/v1/voices")
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Google TTS API error ({}): {}", status, error_body).into());
+    }
+
+    let google_response: GoogleVoicesResponse = response.json().await?;
+
+    let voices = google_response
+        .voices
+        .unwrap_or_default()
+        .into_iter()
+        .map(|voice| {
+            // Use first language code for language and accent
+            let primary_lang = voice.language_codes.first().cloned().unwrap_or_default();
+            let language = language_code_to_name(&primary_lang);
+            let accent = extract_accent_from_code(&primary_lang);
+
+            // Map SSML gender to our format
+            let gender = match voice.ssml_gender.as_deref() {
+                Some("MALE") => "Male".to_string(),
+                Some("FEMALE") => "Female".to_string(),
+                Some("NEUTRAL") => "Neutral".to_string(),
+                _ => "Unknown".to_string(),
+            };
+
+            // Extract display name from voice name (e.g., "en-US-Wavenet-D" -> "Wavenet D")
+            let display_name = voice
+                .name
+                .split('-')
+                .skip(2) // Skip language and region
+                .collect::<Vec<&str>>()
+                .join(" ");
+            let display_name = if display_name.is_empty() {
+                voice.name.clone()
+            } else {
+                display_name
+            };
+
+            Voice {
+                id: voice.name,
+                sample: String::new(), // Google TTS doesn't provide sample URLs
+                name: display_name,
+                accent,
+                gender,
+                language,
+            }
+        })
+        .collect();
+
+    Ok(voices)
+}
+
 /// Handler for GET /voices - returns available voices per provider
 #[cfg_attr(
     feature = "openapi",
@@ -261,32 +483,48 @@ pub async fn list_voices(
 ) -> Result<Json<VoicesResponse>, StatusCode> {
     let mut voices_response = HashMap::new();
 
-    // Fetch ElevenLabs voices from API - fail if API key not configured or API call fails
-    let api_key = state.config.get_api_key("elevenlabs").map_err(|e| {
-        tracing::error!("ElevenLabs API key not configured: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Fetch ElevenLabs voices - skip if not configured
+    if let Ok(api_key) = state.config.get_api_key("elevenlabs") {
+        match fetch_elevenlabs_voices(&api_key).await {
+            Ok(voices) => {
+                voices_response.insert("elevenlabs".to_string(), voices);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch ElevenLabs voices: {}", e);
+            }
+        }
+    } else {
+        tracing::debug!("ElevenLabs API key not configured, skipping");
+    }
 
-    let elevenlabs_voices = fetch_elevenlabs_voices(&api_key).await.map_err(|e| {
-        tracing::error!("Failed to fetch ElevenLabs voices: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Fetch Deepgram voices - skip if not configured
+    if let Ok(api_key) = state.config.get_api_key("deepgram") {
+        match fetch_deepgram_voices(&api_key).await {
+            Ok(voices) => {
+                voices_response.insert("deepgram".to_string(), voices);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch Deepgram voices: {}", e);
+            }
+        }
+    } else {
+        tracing::debug!("Deepgram API key not configured, skipping");
+    }
 
-    // Fetch Deepgram voices from API - fail if API key not configured or API call fails
-    let deepgram_api_key = state.config.get_api_key("deepgram").map_err(|e| {
-        tracing::error!("Deepgram API key not configured: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let deepgram_voices = fetch_deepgram_voices(&deepgram_api_key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch Deepgram voices: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    voices_response.insert("elevenlabs".to_string(), elevenlabs_voices);
-    voices_response.insert("deepgram".to_string(), deepgram_voices);
+    // Fetch Google TTS voices - skip if not configured
+    // Note: Google returns empty string for ADC which is valid
+    if let Ok(credentials) = state.config.get_api_key("google") {
+        match fetch_google_voices(&credentials).await {
+            Ok(voices) => {
+                voices_response.insert("google".to_string(), voices);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch Google TTS voices: {}", e);
+            }
+        }
+    } else {
+        tracing::debug!("Google credentials not configured, skipping");
+    }
 
     Ok(Json(voices_response))
 }

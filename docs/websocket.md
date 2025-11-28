@@ -948,7 +948,7 @@ Required when `audio=true`.
 
 | Field | Type | Required | Description | Example |
 |-------|------|----------|-------------|---------|
-| `provider` | string | Yes | TTS provider name. Currently supported: `"deepgram"`, `"elevenlabs"` | `"deepgram"` |
+| `provider` | string | Yes | TTS provider name. Currently supported: `"deepgram"`, `"elevenlabs"`, `"google"` | `"deepgram"` |
 | `model` | string | Yes | Provider-specific model identifier | `"aura-asteria-en"` (Deepgram), `"eleven_multilingual_v2"` (ElevenLabs) |
 | `voice_id` | string | No | Voice identifier for synthesis. Provider-specific. | `"aura-asteria-en"`, `"21m00Tcm4TlvDq8ikWAM"` |
 | `speaking_rate` | number | No | Speech speed multiplier. Range: 0.25 to 4.0. Default: 1.0 | `0.8` (slower), `1.2` (faster) |
@@ -1020,6 +1020,19 @@ When the same text is synthesized with identical configuration, cached audio is 
   "sample_rate": 44100
 }
 ```
+
+**Google Cloud TTS:**
+```json
+{
+  "provider": "google",
+  "voice_id": "en-US-Wavenet-D",
+  "speaking_rate": 1.0,
+  "audio_format": "linear16",
+  "sample_rate": 24000
+}
+```
+
+Voice names follow the pattern `{language}-{region}-{type}-{variant}`. Types include Standard, WaveNet, Neural2, and Studio (ordered by quality). See [Google TTS documentation](google-tts.md) for detailed voice selection and configuration options.
 
 ---
 
@@ -2237,6 +2250,7 @@ With this foundation, you can build sophisticated voice applications ranging fro
 
 **Additional Resources:**
 - [Google STT Integration](google-stt.md)
+- [Google TTS Integration](google-tts.md)
 - [Authentication Documentation](authentication.md)
 - [LiveKit Webhook Documentation](livekit_webhook.md)
 - [API Reference (REST Endpoints)](../CLAUDE.md#api-endpoints)

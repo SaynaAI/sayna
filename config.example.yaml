@@ -26,7 +26,7 @@ providers:
   deepgram_api_key: "your-deepgram-api-key"     # ENV: DEEPGRAM_API_KEY
   elevenlabs_api_key: "your-elevenlabs-api-key" # ENV: ELEVENLABS_API_KEY
 
-  # Google Cloud Speech-to-Text settings
+  # Google Cloud settings (used for both Speech-to-Text and Text-to-Speech)
   # Authentication options (in order of precedence):
   # 1. Path to service account JSON file
   # 2. JSON content string (starts with '{')

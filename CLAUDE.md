@@ -70,7 +70,7 @@ Always consult these rule files when implementing new features or modifying exis
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
    - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket)
-   - Current TTS providers: Deepgram, ElevenLabs
+   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS
    - Providers implement `STTProvider` or `TTSProvider` traits
 
 3. **WebSocket Handler** (`src/handlers/ws.rs`):
@@ -259,6 +259,52 @@ let config = STTConfig {
 - India: `wss://api.in.residency.elevenlabs.io`
 
 See [ElevenLabs STT API Documentation](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime) for detailed API reference.
+
+### Google Cloud TTS Integration
+
+Google Cloud Text-to-Speech provides high-quality neural voices with WaveNet, Neural2, and Studio voice technologies.
+
+**Key Features:**
+- 400+ voices across 60+ languages
+- WaveNet, Neural2, and Studio voice technologies
+- Configurable speaking rate and pitch
+- Multiple audio format outputs (LINEAR16, MP3, OGG_OPUS, MULAW, ALAW)
+- Uses the same credentials as Google STT
+
+**Configuration:**
+```rust
+let config = TTSConfig {
+    provider: "google".to_string(),
+    voice_id: "en-US-Wavenet-D".to_string(),
+    audio_format: "linear16".to_string(),
+    sample_rate: 24000,
+    speaking_rate: 1.0,
+    ..Default::default()
+};
+```
+
+**Authentication:** Uses the same `GOOGLE_APPLICATION_CREDENTIALS` environment variable or `google_credentials` config as Google STT. See [docs/google-stt.md](docs/google-stt.md) for authentication setup.
+
+**Voice Naming Convention:**
+Voice names follow the pattern: `{language}-{region}-{type}-{variant}`
+- `en-US-Wavenet-D` - English US, WaveNet technology, voice variant D
+- `en-GB-Neural2-A` - British English, Neural2 technology, voice variant A
+- `es-ES-Standard-B` - Spanish Spain, Standard technology, voice variant B
+
+**Voice Types (ordered by quality):**
+- **Standard**: Basic quality, fast synthesis, lowest cost
+- **WaveNet**: High quality, natural prosody
+- **Neural2**: Improved WaveNet, more natural intonation
+- **Studio**: Highest quality, limited languages
+
+**Supported Audio Formats:**
+- `linear16` - 16-bit PCM (recommended for real-time)
+- `mp3` - Compressed MP3
+- `ogg_opus` - Opus in Ogg container
+- `mulaw` - 8-bit μ-law (telephony, US)
+- `alaw` - 8-bit A-law (telephony, Europe)
+
+See [docs/google-tts.md](docs/google-tts.md) for detailed Google TTS integration documentation.
 
 ## API Endpoints
 
