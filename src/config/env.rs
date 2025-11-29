@@ -48,6 +48,9 @@ impl ServerConfig {
         let azure_speech_subscription_key = env::var("AZURE_SPEECH_SUBSCRIPTION_KEY").ok();
         let azure_speech_region = env::var("AZURE_SPEECH_REGION").ok();
 
+        // Cartesia API key (used for both STT and TTS)
+        let cartesia_api_key = env::var("CARTESIA_API_KEY").ok();
+
         // LiveKit recording S3 configuration
         let recording_s3_bucket = env::var("RECORDING_S3_BUCKET").ok();
         let recording_s3_region = env::var("RECORDING_S3_REGION").ok();
@@ -101,6 +104,7 @@ impl ServerConfig {
             google_credentials,
             azure_speech_subscription_key,
             azure_speech_region,
+            cartesia_api_key,
             recording_s3_bucket,
             recording_s3_region,
             recording_s3_endpoint,

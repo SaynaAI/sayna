@@ -1,5 +1,6 @@
 pub mod azure;
 mod base;
+pub mod cartesia;
 pub mod deepgram;
 pub mod elevenlabs;
 pub mod google;
@@ -25,6 +26,9 @@ pub use google::{GoogleSTT, GoogleSTTConfig, STTGoogleAuthClient};
 // Re-export Azure implementation
 pub use azure::{AzureOutputFormat, AzureProfanityOption, AzureRegion, AzureSTT, AzureSTTConfig};
 
+// Re-export Cartesia implementation
+pub use cartesia::{CartesiaAudioEncoding, CartesiaMessage, CartesiaSTT, CartesiaSTTConfig};
+
 /// Supported STT providers
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum STTProvider {
@@ -36,6 +40,8 @@ pub enum STTProvider {
     ElevenLabs,
     /// Microsoft Azure Speech-to-Text WebSocket API
     Azure,
+    /// Cartesia STT WebSocket API (ink-whisper)
+    Cartesia,
 }
 
 impl std::fmt::Display for STTProvider {
@@ -45,6 +51,7 @@ impl std::fmt::Display for STTProvider {
             STTProvider::Google => write!(f, "google"),
             STTProvider::ElevenLabs => write!(f, "elevenlabs"),
             STTProvider::Azure => write!(f, "microsoft-azure"),
+            STTProvider::Cartesia => write!(f, "cartesia"),
         }
     }
 }
@@ -58,8 +65,9 @@ impl std::str::FromStr for STTProvider {
             "google" => Ok(STTProvider::Google),
             "elevenlabs" => Ok(STTProvider::ElevenLabs),
             "microsoft-azure" | "azure" => Ok(STTProvider::Azure),
+            "cartesia" => Ok(STTProvider::Cartesia),
             _ => Err(STTError::ConfigurationError(format!(
-                "Unsupported STT provider: {s}. Supported providers: deepgram, google, elevenlabs, microsoft-azure"
+                "Unsupported STT provider: {s}. Supported providers: deepgram, google, elevenlabs, microsoft-azure, cartesia"
             ))),
         }
     }
@@ -126,6 +134,10 @@ pub fn create_stt_provider(
             let azure_stt = <AzureSTT as BaseSTT>::new(config)?;
             Ok(Box::new(azure_stt))
         }
+        STTProvider::Cartesia => {
+            let cartesia_stt = <CartesiaSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(cartesia_stt))
+        }
     }
 }
 
@@ -181,6 +193,10 @@ pub fn create_stt_provider_from_enum(
             let azure_stt = <AzureSTT as BaseSTT>::new(config)?;
             Ok(Box::new(azure_stt))
         }
+        STTProvider::Cartesia => {
+            let cartesia_stt = <CartesiaSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(cartesia_stt))
+        }
     }
 }
 
@@ -198,7 +214,13 @@ pub fn create_stt_provider_from_enum(
 /// // Output: ["deepgram", "google", "elevenlabs"]
 /// ```
 pub fn get_supported_stt_providers() -> Vec<&'static str> {
-    vec!["deepgram", "google", "elevenlabs", "microsoft-azure"]
+    vec![
+        "deepgram",
+        "google",
+        "elevenlabs",
+        "microsoft-azure",
+        "cartesia",
+    ]
 }
 
 #[cfg(test)]
@@ -280,6 +302,7 @@ mod factory_tests {
         assert_eq!(STTProvider::Google.to_string(), "google");
         assert_eq!(STTProvider::ElevenLabs.to_string(), "elevenlabs");
         assert_eq!(STTProvider::Azure.to_string(), "microsoft-azure");
+        assert_eq!(STTProvider::Cartesia.to_string(), "cartesia");
     }
 
     #[test]
@@ -287,12 +310,19 @@ mod factory_tests {
         let providers = get_supported_stt_providers();
         assert_eq!(
             providers,
-            vec!["deepgram", "google", "elevenlabs", "microsoft-azure"]
+            vec![
+                "deepgram",
+                "google",
+                "elevenlabs",
+                "microsoft-azure",
+                "cartesia"
+            ]
         );
         assert!(providers.contains(&"deepgram"));
         assert!(providers.contains(&"google"));
         assert!(providers.contains(&"elevenlabs"));
         assert!(providers.contains(&"microsoft-azure"));
+        assert!(providers.contains(&"cartesia"));
     }
 
     #[tokio::test]
@@ -493,6 +523,95 @@ mod factory_tests {
         assert!(result.is_err());
         if let Err(STTError::ConfigurationError(msg)) = result {
             assert!(msg.contains("microsoft-azure"));
+        }
+    }
+
+    // Cartesia STT provider tests
+
+    #[test]
+    fn test_stt_provider_enum_cartesia_from_string() {
+        // Test valid provider names - Cartesia
+        assert_eq!(
+            "cartesia".parse::<STTProvider>().unwrap(),
+            STTProvider::Cartesia
+        );
+        assert_eq!(
+            "Cartesia".parse::<STTProvider>().unwrap(),
+            STTProvider::Cartesia
+        );
+        assert_eq!(
+            "CARTESIA".parse::<STTProvider>().unwrap(),
+            STTProvider::Cartesia
+        );
+    }
+
+    #[test]
+    fn test_create_stt_provider_cartesia_valid() {
+        let config = STTConfig {
+            provider: "cartesia".to_string(),
+            api_key: "test_key".to_string(),
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "pcm_s16le".to_string(),
+            model: "ink-whisper".to_string(),
+        };
+
+        let result = create_stt_provider("cartesia", config);
+        assert!(result.is_ok());
+
+        let stt = result.unwrap();
+        assert_eq!(stt.get_provider_info(), "Cartesia STT (ink-whisper)");
+        assert!(!stt.is_ready()); // Not connected yet
+    }
+
+    #[test]
+    fn test_create_stt_provider_cartesia_empty_api_key() {
+        let config = STTConfig {
+            provider: "cartesia".to_string(),
+            api_key: String::new(), // Empty API key should fail
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "pcm_s16le".to_string(),
+            model: "ink-whisper".to_string(),
+        };
+
+        let result = create_stt_provider("cartesia", config);
+        assert!(result.is_err());
+
+        if let Err(STTError::AuthenticationFailed(msg)) = result {
+            assert!(msg.contains("API key is required"));
+        } else {
+            panic!("Expected AuthenticationFailed error");
+        }
+    }
+
+    #[test]
+    fn test_create_stt_provider_from_enum_cartesia() {
+        let config = STTConfig {
+            provider: "cartesia".to_string(),
+            api_key: "test_key".to_string(),
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "pcm_s16le".to_string(),
+            model: "ink-whisper".to_string(),
+        };
+
+        let result = create_stt_provider_from_enum(STTProvider::Cartesia, config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_error_message_includes_cartesia() {
+        let result = "invalid".parse::<STTProvider>();
+        assert!(result.is_err());
+        if let Err(STTError::ConfigurationError(msg)) = result {
+            assert!(msg.contains("cartesia"));
         }
     }
 }

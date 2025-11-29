@@ -44,14 +44,29 @@ providers:
   # Note: Both STT and TTS use the same region setting
   azure_speech_region: "eastus"                  # ENV: AZURE_SPEECH_REGION (default: eastus)
 
+  # Cartesia API key (used for both STT and TTS)
+  # STT uses ink-whisper model, TTS uses sonic-3 model
+  # Get from Cartesia dashboard: https://play.cartesia.ai/
+  cartesia_api_key: ""                           # ENV: CARTESIA_API_KEY
+
 # STT Provider Configuration (optional - can also be set via WebSocket config)
 # stt:
-#   provider: deepgram  # Options: "deepgram", "google", "elevenlabs", "microsoft-azure"
+#   provider: deepgram  # Options: "deepgram", "google", "elevenlabs", "microsoft-azure", "cartesia"
 #   # Google-specific settings (only used when provider is "google")
 #   google:
 #     location: global           # Options: global, us, eu, asia-southeast1, etc.
 #     recognizer_id: ""          # Optional: pre-configured recognizer ID
 #     model: latest_long         # Options: latest_long, latest_short, chirp_2, telephony
+
+# TTS Provider Configuration (optional - can also be set via WebSocket config)
+# tts:
+#   provider: elevenlabs  # Options: "deepgram", "elevenlabs", "google", "azure", "cartesia"
+#   # Cartesia-specific settings (only used when provider is "cartesia")
+#   cartesia:
+#     model: sonic-3           # Options: sonic-3, sonic-3-2025-10-27
+#     voice_id: ""             # Voice UUID from Cartesia voice library
+#     audio_format: linear16   # Options: linear16/pcm, wav, mp3
+#     sample_rate: 24000       # Options: 8000, 16000, 22050, 24000, 44100, 48000
 
 # LiveKit recording configuration (S3)
 recording:

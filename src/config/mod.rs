@@ -76,6 +76,8 @@ pub struct ServerConfig {
     /// Azure region where the Speech resource is deployed (e.g., "eastus", "westus2")
     /// The subscription key is tied to this specific region
     pub azure_speech_region: Option<String>,
+    /// Cartesia API key for both STT (ink-whisper model) and TTS (sonic-3 model)
+    pub cartesia_api_key: Option<String>,
 
     // LiveKit recording configuration
     pub recording_s3_bucket: Option<String>,
@@ -247,6 +249,12 @@ impl ServerConfig {
                             .to_string()
                     })
             }
+            "cartesia" => {
+                // Cartesia uses API key authentication for both STT and TTS
+                self.cartesia_api_key.as_ref().cloned().ok_or_else(|| {
+                    "Cartesia API key not configured in server environment".to_string()
+                })
+            }
             _ => Err(format!("Unsupported provider: {provider}")),
         }
     }
@@ -287,6 +295,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -321,6 +330,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -355,6 +365,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -392,6 +403,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -429,6 +441,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -472,6 +485,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -502,6 +516,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -534,6 +549,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -564,6 +580,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -596,6 +613,7 @@ mod tests {
             google_credentials: Some("/path/to/service-account.json".to_string()),
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -632,6 +650,7 @@ mod tests {
             google_credentials: Some(json_credentials.to_string()),
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -667,6 +686,7 @@ mod tests {
             google_credentials: None, // Not configured - will use ADC
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -702,6 +722,7 @@ mod tests {
             google_credentials: Some("/path/to/creds.json".to_string()),
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -742,6 +763,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: Some("test-azure-key".to_string()),
             azure_speech_region: Some("westus2".to_string()),
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -776,6 +798,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -813,6 +836,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: Some("test-key".to_string()),
             azure_speech_region: Some("westeurope".to_string()),
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,
@@ -845,6 +869,7 @@ mod tests {
             google_credentials: None,
             azure_speech_subscription_key: None,
             azure_speech_region: None,
+            cartesia_api_key: None,
             recording_s3_bucket: None,
             recording_s3_region: None,
             recording_s3_endpoint: None,

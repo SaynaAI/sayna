@@ -21,7 +21,7 @@ use std::sync::Arc;
 fn test_elevenlabs_in_supported_providers() {
     let providers = get_supported_stt_providers();
     assert!(providers.contains(&"elevenlabs"));
-    assert_eq!(providers.len(), 4); // deepgram, google, elevenlabs, microsoft-azure
+    assert_eq!(providers.len(), 5); // deepgram, google, elevenlabs, microsoft-azure, cartesia
 }
 
 /// Test provider creation via string name

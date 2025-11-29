@@ -69,8 +69,8 @@ Always consult these rule files when implementing new features or modifying exis
 2. **Provider System** (`src/core/stt/` and `src/core/tts/`):
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
-   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket)
-   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS
+   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket), Cartesia (WebSocket)
+   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS, Cartesia
    - Providers implement `STTProvider` or `TTSProvider` traits
 
 3. **WebSocket Handler** (`src/handlers/ws.rs`):
@@ -144,6 +144,7 @@ All configuration options can also be set via environment variables or a `.env` 
 Required for production:
 - `DEEPGRAM_API_KEY`: Deepgram API authentication
 - `ELEVENLABS_API_KEY`: ElevenLabs API authentication (used for both STT and TTS)
+- `CARTESIA_API_KEY`: Cartesia API authentication (used for both STT and TTS). STT uses ink-whisper model, TTS uses sonic-3 model. Get from Cartesia dashboard: https://play.cartesia.ai/
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
 - `AZURE_SPEECH_SUBSCRIPTION_KEY`: Azure Speech Services subscription key (for Azure STT and TTS). Get from Azure Portal → Speech resource → Keys and Endpoint.
 - `AZURE_SPEECH_REGION`: Azure region where the Speech resource is deployed (default: "eastus"). The subscription key is tied to this specific region. Used for both STT and TTS.
@@ -219,6 +220,7 @@ When adding new features:
 - **Google** (`google.rs`): gRPC bidirectional streaming, uses `tonic` with Google Cloud protos
 - **ElevenLabs** (`elevenlabs.rs`): WebSocket-based streaming with JSON messages, uses `tokio-tungstenite`
 - **Microsoft Azure** (`azure/`): WebSocket-based streaming, uses `tokio-tungstenite` with Azure Speech Services SDK protocol
+- **Cartesia** (`cartesia/`): WebSocket-based streaming with raw binary audio, uses `tokio-tungstenite`
 
 See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
 
@@ -262,6 +264,87 @@ let config = STTConfig {
 - India: `wss://api.in.residency.elevenlabs.io`
 
 See [ElevenLabs STT API Documentation](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime) for detailed API reference.
+
+### Cartesia STT Integration
+
+Cartesia Speech-to-Text is integrated using their Real-Time WebSocket API for streaming transcription.
+
+**Key Features:**
+- Real-time streaming transcription
+- ink-whisper model
+- VAD-based automatic endpointing
+- Word-level timestamps support
+- Automatic language detection
+- Raw binary PCM audio (no base64 encoding)
+
+**Configuration:**
+```rust
+let config = STTConfig {
+    provider: "cartesia".to_string(),
+    api_key: "your-cartesia-api-key".to_string(),
+    language: "en".to_string(),
+    sample_rate: 16000,
+    ..Default::default()
+};
+```
+
+**API Key:** Set `CARTESIA_API_KEY` environment variable.
+
+**Supported Audio Formats:**
+- `pcm_s16le` - PCM signed 16-bit little-endian (required)
+- Sample rates: 8000, 16000 (recommended), 22050, 24000, 44100, 48000 Hz
+
+**Supported Languages:**
+ISO-639-1 codes: `en`, `zh`, `de`, `es`, `ru`, `ko`, `fr`, `ja`, `pt`, `tr`, `pl`, and many more.
+
+See [docs/cartesia-stt.md](docs/cartesia-stt.md) for detailed API reference.
+
+### Cartesia TTS Integration
+
+Cartesia Text-to-Speech is integrated using their WebSocket API for high-quality streaming speech synthesis.
+
+**Key Features:**
+- High-quality Sonic voice models
+- Low-latency streaming synthesis
+- 40+ language support
+- Multiple audio format outputs (PCM, WAV, MP3)
+- Voice library with professional voices
+- Speed control via speaking rate
+
+**Configuration:**
+```rust
+let config = TTSConfig {
+    provider: "cartesia".to_string(),
+    api_key: "your-cartesia-api-key".to_string(),
+    voice_id: Some("a0e99841-438c-4a64-b679-ae501e7d6091".to_string()),
+    model: Some("sonic-3".to_string()),
+    audio_format: Some("linear16".to_string()),
+    sample_rate: Some(24000),
+    speaking_rate: Some(1.0),
+    ..Default::default()
+};
+```
+
+**API Key:** Uses the same `CARTESIA_API_KEY` environment variable as Cartesia STT.
+
+**Supported Audio Formats:**
+- `linear16` / `pcm` - 16-bit PCM (recommended for real-time)
+- `wav` - WAV container
+- `mp3` - Compressed MP3
+
+**Supported Sample Rates:**
+- 8000, 16000, 22050, 24000, 44100, 48000 Hz
+
+**Models:**
+- `sonic-3` - Latest stable model (recommended)
+- Pinned versions available for consistency (e.g., `sonic-3-2025-10-27`)
+
+**Speaking Rate:**
+- Range: 0.1 to 5.0 (default: 1.0)
+- Lower values produce slower speech
+- Higher values produce faster speech
+
+See [docs/cartesia-tts.md](docs/cartesia-tts.md) for detailed API reference.
 
 ### Google Cloud TTS Integration
 

@@ -1,5 +1,6 @@
 pub mod azure;
 mod base;
+pub mod cartesia;
 pub mod deepgram;
 pub mod elevenlabs;
 pub mod google;
@@ -10,6 +11,7 @@ pub use base::{
     AudioCallback, AudioData, BaseTTS, BoxedTTS, ConnectionState, Pronunciation, TTSConfig,
     TTSError, TTSFactory, TTSResult,
 };
+pub use cartesia::{CARTESIA_TTS_URL, CartesiaTTS};
 pub use deepgram::{DEEPGRAM_TTS_URL, DeepgramTTS};
 pub use elevenlabs::{ELEVENLABS_TTS_URL, ElevenLabsTTS};
 pub use google::{GOOGLE_TTS_URL, GoogleTTS};
@@ -24,6 +26,7 @@ use std::collections::HashMap;
 /// - `"elevenlabs"` - ElevenLabs TTS API
 /// - `"google"` - Google Cloud Text-to-Speech API
 /// - `"azure"` or `"microsoft-azure"` - Microsoft Azure Text-to-Speech API
+/// - `"cartesia"` - Cartesia TTS API (Sonic voice models)
 ///
 /// # Example
 ///
@@ -44,8 +47,9 @@ pub fn create_tts_provider(provider_type: &str, config: TTSConfig) -> TTSResult<
         "elevenlabs" => Ok(Box::new(ElevenLabsTTS::new(config)?)),
         "google" => Ok(Box::new(GoogleTTS::new(config)?)),
         "azure" | "microsoft-azure" => Ok(Box::new(AzureTTS::new(config)?)),
+        "cartesia" => Ok(Box::new(CartesiaTTS::new(config)?)),
         _ => Err(TTSError::InvalidConfiguration(format!(
-            "Unsupported TTS provider: {provider_type}. Supported providers: deepgram, elevenlabs, google, azure"
+            "Unsupported TTS provider: {provider_type}. Supported providers: deepgram, elevenlabs, google, azure, cartesia"
         ))),
     }
 }
@@ -60,6 +64,7 @@ pub fn get_tts_provider_urls() -> HashMap<String, String> {
     urls.insert("elevenlabs".to_string(), ELEVENLABS_TTS_URL.to_string());
     urls.insert("google".to_string(), GOOGLE_TTS_URL.to_string());
     urls.insert("azure".to_string(), AZURE_TTS_URL.to_string());
+    urls.insert("cartesia".to_string(), CARTESIA_TTS_URL.to_string());
     urls
 }
 

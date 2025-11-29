@@ -101,6 +101,8 @@ pub struct ProvidersYaml {
     /// Azure region where the Speech resource is deployed (e.g., "eastus", "westus2")
     /// The subscription key is tied to this specific region
     pub azure_speech_region: Option<String>,
+    /// Cartesia API key for STT (ink-whisper model)
+    pub cartesia_api_key: Option<String>,
 }
 
 /// Recording S3 configuration from YAML
