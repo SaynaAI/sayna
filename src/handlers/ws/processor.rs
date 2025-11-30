@@ -43,13 +43,14 @@ pub async fn handle_incoming_message(
 ) -> bool {
     match msg {
         IncomingMessage::Config {
+            stream_id,
             audio,
             stt_config,
             tts_config,
             livekit,
         } => {
             handle_config_message(
-                audio, stt_config, tts_config, livekit, state, message_tx, app_state,
+                stream_id, audio, stt_config, tts_config, livekit, state, message_tx, app_state,
             )
             .await
         }

@@ -57,6 +57,7 @@ impl ServerConfig {
         let recording_s3_endpoint = env::var("RECORDING_S3_ENDPOINT").ok();
         let recording_s3_access_key = env::var("RECORDING_S3_ACCESS_KEY").ok();
         let recording_s3_secret_key = env::var("RECORDING_S3_SECRET_KEY").ok();
+        let recording_s3_prefix = env::var("RECORDING_S3_PREFIX").ok();
 
         // Cache configuration
         let cache_path = env::var("CACHE_PATH").ok().map(PathBuf::from);
@@ -110,6 +111,7 @@ impl ServerConfig {
             recording_s3_endpoint,
             recording_s3_access_key,
             recording_s3_secret_key,
+            recording_s3_prefix,
             cache_path,
             cache_ttl_seconds,
             auth_service_url,
@@ -229,6 +231,7 @@ mod tests {
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
             env::remove_var("SIP_HOOK_SECRET");
+            env::remove_var("RECORDING_S3_PREFIX");
         }
     }
 
@@ -472,6 +475,47 @@ mod tests {
         let config = ServerConfig::from_env().expect("Should load config");
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 8080);
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_recording_s3_prefix() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-"); // Required if SIP vars present
+            env::set_var("RECORDING_S3_PREFIX", "recordings/production");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(
+            config.recording_s3_prefix,
+            Some("recordings/production".to_string())
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_recording_s3_prefix_empty_string() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("RECORDING_S3_PREFIX", "");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.recording_s3_prefix, Some(String::new()));
+
+        unsafe {
+            env::remove_var("RECORDING_S3_PREFIX");
+        }
+
+        let config_without_prefix = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config_without_prefix.recording_s3_prefix, None);
 
         cleanup_env_vars();
     }

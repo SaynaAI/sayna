@@ -43,6 +43,7 @@ use crate::handlers::{
         crate::handlers::voices::list_voices,
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
+        crate::handlers::recording::download_recording,
         crate::handlers::sip_hooks::list_sip_hooks,
         crate::handlers::sip_hooks::update_sip_hooks,
         crate::handlers::sip_hooks::delete_sip_hooks,
@@ -77,6 +78,7 @@ use crate::handlers::{
         (name = "voices", description = "TTS voice management"),
         (name = "tts", description = "Text-to-speech synthesis"),
         (name = "livekit", description = "LiveKit room and token management"),
+        (name = "recordings", description = "Recording download operations"),
         (name = "sip", description = "SIP webhook configuration management"),
         (name = "websocket", description = "WebSocket API for real-time communication")
     )

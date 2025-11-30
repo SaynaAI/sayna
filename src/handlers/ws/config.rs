@@ -83,9 +83,7 @@ pub struct LiveKitWebSocketConfig {
     /// Enable recording for this session
     #[serde(default)]
     pub enable_recording: bool,
-    /// File key for recording (required if enable_recording is true)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recording_file_key: Option<String>,
+    // recording_file_key removed; recording path now determined by stream_id + server prefix
     /// Sayna AI participant identity (defaults to "sayna-ai")
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(example = "sayna-ai"))]

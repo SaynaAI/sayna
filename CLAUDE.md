@@ -151,6 +151,7 @@ Required for production:
 - `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
 - `HOST`: Server bind address (default: 0.0.0.0)
 - `PORT`: Server port (default: 3001)
+- `RECORDING_S3_PREFIX`: Optional S3 path prefix for recordings (e.g., "recordings/production")
 
 Optional authentication:
 - `AUTH_REQUIRED`: Enable authentication (default: false, accepts: true/false/1/0/yes/no)
@@ -443,6 +444,11 @@ See [docs/azure-tts.md](docs/azure-tts.md) for detailed Azure TTS integration do
 - `POST /livekit/token` - Generate LiveKit participant token (requires auth if AUTH_REQUIRED=true)
   - Request: `{"room_name": "room-123", "participant_name": "User", "participant_identity": "user-id"}`
   - Response: `{"token": "JWT...", "room_name": "room-123", "participant_identity": "user-id", "livekit_url": "ws://..."}`
+- `GET /recording/{stream_id}` - Download OGG recording from S3-compatible storage (requires auth if AUTH_REQUIRED=true)
+  - Path: `stream_id` (string) - recording session identifier; rejects empty values, `..`, or `/`
+  - Response: binary OGG data with headers `Content-Type: audio/ogg`, `Content-Length: <bytes>`, `Content-Disposition: attachment; filename="{stream_id}.ogg"`
+  - Errors: `400` invalid `stream_id`, `404` not found, `503` storage not configured or unavailable
+  - Note: LiveKit Egress does not provide download APIs; this endpoint fetches `{recording_s3_prefix}/{stream_id}/audio.ogg` directly from storage
 - `GET /sip/hooks` - List all configured SIP hooks from cache (requires auth if AUTH_REQUIRED=true)
   - Response: `{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}`
 - `POST /sip/hooks` - Add or replace SIP hooks at runtime (requires auth if AUTH_REQUIRED=true)
@@ -462,6 +468,30 @@ See [docs/azure-tts.md](docs/azure-tts.md) for detailed Azure TTS integration do
 
 **Breaking Change (2025-10-17)**: The WebSocket Ready message no longer includes `livekit_token`. Instead, it provides `livekit_room_name`, `sayna_participant_identity`, and `sayna_participant_name`. Clients must call the `/livekit/token` endpoint to obtain participant tokens.
 
+#### Ready Message
+
+After processing the config message, the server sends a Ready message:
+
+```json
+{
+  "type": "ready",
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "livekit_room_name": "room-123",
+  "livekit_url": "ws://localhost:7880",
+  "sayna_participant_identity": "sayna-ai",
+  "sayna_participant_name": "Sayna AI"
+}
+```
+
+**Fields**:
+- `stream_id` (string, always present): Unique session identifier
+  - If provided in config, this echoes back the same value
+  - If not provided, server generates a UUID v4
+- `livekit_room_name` (optional): The LiveKit room that was created/joined
+- `livekit_url` (optional): LiveKit server URL for client connection
+- `sayna_participant_identity` (optional): AI agent's participant identity
+- `sayna_participant_name` (optional): AI agent's display name
+
 ### Webhook API
 
 - `POST /livekit/webhook` - LiveKit webhook event receiver (unauthenticated, uses LiveKit signature verification)
@@ -479,16 +509,20 @@ The LiveKit configuration in the WebSocket config message supports the following
 
 ```json
 {
+  "stream_id": "optional-uuid-or-auto-generated",
   "livekit": {
     "room_name": "my-room",
     "enable_recording": false,
-    "recording_file_key": "optional-file-key",
     "sayna_participant_identity": "sayna-ai",
     "sayna_participant_name": "Sayna AI",
     "listen_participants": ["user-123", "user-456"]
   }
 }
 ```
+
+**Recording Path**: When `enable_recording` is true, recordings are saved to `{server_s3_prefix}/{stream_id}/audio.ogg`. `stream_id` is configured at the WebSocket config message level (not inside `livekit`). If the client omits `stream_id`, the server auto-generates a UUID v4.
+
+**Breaking Change (2026-02-06)**: `recording_file_key` was removed from `LiveKitWebSocketConfig`. Clients should rely on the session-level `stream_id` plus the server-side recording prefix instead.
 
 **Participant Filtering** (`listen_participants`):
 - **Empty array (default)**: Processes audio tracks and data messages from **all participants** in the room

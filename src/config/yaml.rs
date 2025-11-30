@@ -26,6 +26,7 @@ use std::path::PathBuf;
 /// recording:
 ///   s3_bucket: "my-bucket"
 ///   s3_region: "us-west-2"
+///   s3_prefix: "recordings/production"
 ///   s3_endpoint: "https://s3.amazonaws.com"
 ///   s3_access_key: "access-key"
 ///   s3_secret_key: "secret-key"
@@ -114,6 +115,7 @@ pub struct RecordingYaml {
     pub s3_endpoint: Option<String>,
     pub s3_access_key: Option<String>,
     pub s3_secret_key: Option<String>,
+    pub s3_prefix: Option<String>,
 }
 
 /// Cache configuration from YAML
@@ -207,6 +209,7 @@ providers:
 recording:
   s3_bucket: "my-recordings"
   s3_region: "us-east-1"
+  s3_prefix: "test-prefix"
   s3_endpoint: "https://s3.amazonaws.com"
   s3_access_key: "access"
   s3_secret_key: "secret"
@@ -241,6 +244,10 @@ auth:
         assert_eq!(
             config.recording.as_ref().unwrap().s3_bucket,
             Some("my-recordings".to_string())
+        );
+        assert_eq!(
+            config.recording.as_ref().unwrap().s3_prefix,
+            Some("test-prefix".to_string())
         );
         assert_eq!(
             config.cache.as_ref().unwrap().path,
@@ -280,6 +287,27 @@ cache:
         assert!(config.recording.is_none());
         assert!(config.cache.is_none());
         assert!(config.auth.is_none());
+    }
+
+    #[test]
+    fn test_yaml_config_recording_prefix_only() {
+        let yaml = r#"
+recording:
+  s3_prefix: "recordings/production"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let recording = config.recording.expect("recording should be present");
+        assert_eq!(
+            recording.s3_prefix,
+            Some("recordings/production".to_string())
+        );
+        assert!(recording.s3_bucket.is_none());
+        assert!(recording.s3_region.is_none());
+        assert!(recording.s3_endpoint.is_none());
+        assert!(recording.s3_access_key.is_none());
+        assert!(recording.s3_secret_key.is_none());
     }
 
     #[test]

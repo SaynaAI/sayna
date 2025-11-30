@@ -1086,10 +1086,10 @@ Optional. Include to enable LiveKit integration for multi-party voice rooms.
 
 ```json
 {
+  "stream_id": "optional-uuid-or-auto-generated",
   "livekit": {
     "room_name": "conversation-room-123",
     "enable_recording": false,
-    "recording_file_key": "recordings/session-123",
     "sayna_participant_identity": "sayna-ai",
     "sayna_participant_name": "Sayna AI",
     "listen_participants": []
@@ -1103,10 +1103,11 @@ Optional. Include to enable LiveKit integration for multi-party voice rooms.
 |-------|------|----------|-------------|---------|
 | `room_name` | string | Yes | Unique room identifier. Room created if doesn't exist. | `"conversation-room-123"` |
 | `enable_recording` | boolean | No | Start LiveKit cloud recording. Default: `false` | `true`, `false` |
-| `recording_file_key` | string | Conditional | S3 file key for recording. Required if `enable_recording=true` | `"recordings/session-123"` |
 | `sayna_participant_identity` | string | No | Sayna AI's participant identity. Default: `"sayna-ai"` | `"assistant-bot"` |
 | `sayna_participant_name` | string | No | Sayna AI's display name. Default: `"Sayna AI"` | `"Support Assistant"` |
 | `listen_participants` | array | No | Participant identity filter. Default: `[]` (all participants) | `["user-123", "user-456"]` |
+
+**Recording path**: When `enable_recording` is true, recordings are saved to `{server_s3_prefix}/{stream_id}/audio.ogg`. `stream_id` is set at the top level of the WebSocket config message; if omitted, the server auto-generates a UUID.
 
 **Room Management:**
 
@@ -1142,10 +1143,10 @@ Enable cloud recording to S3-compatible storage:
 
 ```json
 {
+  "stream_id": "support-call-789",
   "livekit": {
     "room_name": "support-call-789",
-    "enable_recording": true,
-    "recording_file_key": "recordings/support/call-789.mp4"
+    "enable_recording": true
   }
 }
 ```
@@ -1153,9 +1154,10 @@ Enable cloud recording to S3-compatible storage:
 **Recording behavior:**
 - Recording starts when WebSocket config is received
 - Recording includes all room participants (not just filtered ones)
-- Recording format: MP4 with audio/video tracks
+- Recording format: audio-only OGG stored as `audio.ogg`
 - Recording automatically stops when WebSocket disconnects
 - Requires S3 configuration in server environment
+- Recording path: `{server_s3_prefix}/{stream_id}/audio.ogg`
 
 **Getting Participant Tokens:**
 
@@ -1255,13 +1257,13 @@ Sayna's WebSocket API supports multiple integration patterns. Choose based on yo
 ```json
 {
   "type": "config",
+  "stream_id": "meeting-456",
   "audio": true,
   "stt_config": { ... },
   "tts_config": { ... },
   "livekit": {
     "room_name": "meeting-room-456",
     "enable_recording": true,
-    "recording_file_key": "recordings/meeting-456",
     "sayna_participant_identity": "meeting-assistant",
     "sayna_participant_name": "Meeting Assistant",
     "listen_participants": []
@@ -1311,11 +1313,11 @@ Sayna's WebSocket API supports multiple integration patterns. Choose based on yo
 ```json
 {
   "type": "config",
+  "stream_id": "automation-session",
   "audio": false,
   "livekit": {
     "room_name": "automation-room",
-    "enable_recording": true,
-    "recording_file_key": "recordings/automated-session"
+    "enable_recording": true
   }
 }
 ```
@@ -1746,10 +1748,10 @@ Enable cloud recording to S3-compatible storage:
 
 ```json
 {
+  "stream_id": "support-call-123",
   "livekit": {
     "room_name": "support-call-123",
-    "enable_recording": true,
-    "recording_file_key": "recordings/support/2024-01-15/call-123.mp4"
+    "enable_recording": true
   }
 }
 ```
@@ -1757,17 +1759,17 @@ Enable cloud recording to S3-compatible storage:
 **Behavior:**
 - Recording starts when config received
 - Records all room audio/video (not just Sayna)
-- Format: MP4 container
+- Format: audio-only OGG saved as `audio.ogg`
 - Storage: S3-compatible (configured in server environment)
 - Stops automatically on WebSocket disconnect
+- Recording path: `{server_s3_prefix}/{stream_id}/audio.ogg`
 
 **Requirements:**
 - LiveKit egress service configured
 - S3 credentials in server environment
-- `recording_file_key` must be valid S3 key
 
 **Access Recording:**
-After session ends, download from S3 bucket using `recording_file_key`.
+After session ends, download from `{server_s3_prefix}/{stream_id}/audio.ogg`.
 
 ---
 

@@ -255,6 +255,7 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `type` | string | Yes | Always `config`. |
+| `stream_id` | string | No | Session identifier used for recording path; server generates a UUID when omitted. |
 | `audio` | boolean | No | Defaults to `true`. When `false`, STT/TTS are skipped but LiveKit messaging can still be used. |
 | `stt_config` | object | Conditional | Required when `audio=true`. See table below. |
 | `tts_config` | object | Conditional | Required when `audio=true`. Same schema as the REST `tts_config`. |
@@ -277,8 +278,7 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 | Field | Type | Description |
 | --- | --- | --- |
 | `room_name` | string | Room to join or create. |
-| `enable_recording` | boolean | Starts a room composite recording when `true`. |
-| `recording_file_key` | string | Required when recording is enabled; used for identifying the egress artifact. |
+| `enable_recording` | boolean | Starts a room composite recording to `{server_prefix}/{stream_id}/audio.ogg` when `true`. |
 | `sayna_participant_identity` | string | Override for the agent identity (default `sayna-ai`). |
 | `sayna_participant_name` | string | Override for the agent display name (default `Sayna AI`). |
 | `listen_participants` | array<string> | Restrict audio/data processing to specific participant identities (empty list listens to all). |

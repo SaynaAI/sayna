@@ -7,6 +7,8 @@ use crate::core::cache::store::CacheStore;
 use crate::livekit::room_handler::{LiveKitRoomHandler, RecordingConfig};
 use crate::livekit::sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
 use crate::utils::req_manager::ReqManager;
+use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
 
 mod sip_hooks_state;
 
@@ -20,6 +22,10 @@ pub struct AppState {
     pub core_state: Arc<CoreState>,
     /// LiveKit room handler for room and token management
     pub livekit_room_handler: Option<Arc<LiveKitRoomHandler>>,
+    /// Object store client for recording retrieval
+    pub object_store: Option<Arc<dyn ObjectStore>>,
+    /// Recording bucket name for convenience access
+    pub recording_bucket: Option<String>,
     /// LiveKit SIP handler for SIP trunk and dispatch rule management
     pub livekit_sip_handler: Option<Arc<LiveKitSipHandler>>,
     /// Authentication client for validating bearer tokens (if auth is enabled)
@@ -54,6 +60,7 @@ impl AppState {
                     endpoint: endpoint.clone(),
                     access_key: access_key.clone(),
                     secret_key: secret_key.clone(),
+                    prefix: config.recording_s3_prefix.clone().unwrap_or_default(),
                 })
             } else {
                 None
@@ -73,6 +80,59 @@ impl AppState {
             }
         } else {
             None
+        };
+
+        // Initialize object store for recording downloads if all credentials are provided
+        let (object_store, recording_bucket) = if let (
+            Some(bucket),
+            Some(region),
+            Some(endpoint),
+            Some(access_key),
+            Some(secret_key),
+        ) = (
+            &config.recording_s3_bucket,
+            &config.recording_s3_region,
+            &config.recording_s3_endpoint,
+            &config.recording_s3_access_key,
+            &config.recording_s3_secret_key,
+        ) {
+            let mut builder = AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .with_region(region)
+                .with_endpoint(endpoint)
+                .with_access_key_id(access_key)
+                .with_secret_access_key(secret_key);
+
+            if endpoint.starts_with("http://") {
+                builder = builder.with_allow_http(true);
+            }
+
+            match builder.build() {
+                Ok(store) => {
+                    tracing::info!(
+                        "Recording object store initialized for bucket={} endpoint={}",
+                        bucket,
+                        endpoint
+                    );
+                    (
+                        Some(Arc::new(store) as Arc<dyn ObjectStore>),
+                        Some(bucket.clone()),
+                    )
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize recording object store for bucket={} endpoint={}: {:?}",
+                        bucket,
+                        endpoint,
+                        e
+                    );
+                    tracing::info!("Recording downloads will be unavailable");
+                    (None, None)
+                }
+            }
+        } else {
+            tracing::info!("Recording storage not configured; recording downloads disabled");
+            (None, None)
         };
 
         // Initialize auth client if JWT-based auth is configured
@@ -191,6 +251,8 @@ impl AppState {
             config,
             core_state,
             livekit_room_handler,
+            object_store,
+            recording_bucket,
             livekit_sip_handler,
             auth_client,
         })
@@ -233,6 +295,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -272,6 +335,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,

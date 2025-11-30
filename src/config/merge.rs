@@ -158,6 +158,11 @@ pub fn merge_config(
             .and_then(|r| r.s3_secret_key.clone())
     );
 
+    let recording_s3_prefix = get_optional!(
+        "RECORDING_S3_PREFIX",
+        yaml.recording.as_ref().and_then(|r| r.s3_prefix.clone())
+    );
+
     // Cache configuration
     let cache_path = yaml
         .cache
@@ -234,6 +239,7 @@ pub fn merge_config(
         recording_s3_endpoint,
         recording_s3_access_key,
         recording_s3_secret_key,
+        recording_s3_prefix,
         cache_path,
         cache_ttl_seconds,
         auth_service_url,
@@ -376,6 +382,7 @@ mod tests {
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
             env::remove_var("SIP_HOOK_SECRET");
+            env::remove_var("RECORDING_S3_PREFIX");
         }
     }
 
@@ -501,6 +508,58 @@ mod tests {
         ); // YAML overrides ENV
         assert_eq!(config.auth_signing_key_path, Some(key_path)); // from YAML
         assert_eq!(config.auth_timeout_seconds, 10); // from YAML
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_recording_prefix_yaml_overrides_env() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            recording: Some(super::super::yaml::RecordingYaml {
+                s3_prefix: Some("yaml-prefix".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("RECORDING_S3_PREFIX", "env-prefix");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+
+        assert_eq!(config.recording_s3_prefix, Some("yaml-prefix".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_recording_prefix_env_only() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("RECORDING_S3_PREFIX", "env-only");
+        }
+
+        let config = merge_config(None).unwrap();
+
+        assert_eq!(config.recording_s3_prefix, Some("env-only".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_recording_prefix_none_when_unset() {
+        cleanup_env_vars();
+
+        let config = merge_config(None).unwrap();
+
+        assert_eq!(config.recording_s3_prefix, None);
 
         cleanup_env_vars();
     }

@@ -72,6 +72,7 @@ providers:
 recording:
   s3_bucket: "my-recordings"              # ENV: RECORDING_S3_BUCKET
   s3_region: "us-west-2"                  # ENV: RECORDING_S3_REGION
+  s3_prefix: "recordings/production"      # ENV: RECORDING_S3_PREFIX
   s3_endpoint: "https://s3.amazonaws.com" # ENV: RECORDING_S3_ENDPOINT
   s3_access_key: "your-access-key"        # ENV: RECORDING_S3_ACCESS_KEY
   s3_secret_key: "your-secret-key"        # ENV: RECORDING_S3_SECRET_KEY

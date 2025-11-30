@@ -78,6 +78,9 @@ clap = { version = "4.5", features = ["derive"] }
 # Text processing
 regex = "1.10"
 once_cell = "1.19"
+uuid = { version = "1.10", features = ["v4"] }
+
+object_store = { version = "0.12", features = ["aws"] }
 
 # OpenAPI documentation (feature-gated)
 utoipa = { version = "5.3", optional = true, features = ["axum_extras"] }

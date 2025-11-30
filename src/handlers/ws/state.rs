@@ -27,6 +27,8 @@ pub struct ConnectionState {
     pub livekit_operation_queue: Option<OperationQueue>,
     /// Whether audio processing (STT/TTS) is enabled for this connection
     pub audio_enabled: AtomicBool,
+    /// Unique identifier for this WebSocket session
+    pub stream_id: Option<String>,
     /// LiveKit room name for cleanup operations
     pub livekit_room_name: Option<String>,
     /// Recording egress ID for cleanup operations
@@ -46,6 +48,7 @@ impl ConnectionState {
             livekit_client: None,
             livekit_operation_queue: None,
             audio_enabled: AtomicBool::new(false),
+            stream_id: None,
             livekit_room_name: None,
             recording_egress_id: None,
         }
@@ -59,5 +62,39 @@ impl ConnectionState {
     /// Set audio enabled state
     pub fn set_audio_enabled(&self, enabled: bool) {
         self.audio_enabled.store(enabled, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_state_new() {
+        let state = ConnectionState::new();
+        assert!(state.stream_id.is_none());
+        assert!(state.voice_manager.is_none());
+        assert!(state.livekit_client.is_none());
+    }
+
+    #[test]
+    fn test_connection_state_stream_id_storage() {
+        let mut state = ConnectionState::new();
+        assert!(state.stream_id.is_none());
+
+        state.stream_id = Some("test-stream-123".to_string());
+        assert_eq!(state.stream_id, Some("test-stream-123".to_string()));
+    }
+
+    #[test]
+    fn test_connection_state_stream_id_with_uuid() {
+        let mut state = ConnectionState::new();
+
+        let uuid = uuid::Uuid::new_v4().to_string();
+        state.stream_id = Some(uuid.clone());
+
+        assert_eq!(state.stream_id, Some(uuid));
+        // Verify UUID format (36 chars: 8-4-4-4-12)
+        assert_eq!(state.stream_id.as_ref().unwrap().len(), 36);
     }
 }

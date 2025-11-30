@@ -85,6 +85,9 @@ pub struct ServerConfig {
     pub recording_s3_endpoint: Option<String>,
     pub recording_s3_access_key: Option<String>,
     pub recording_s3_secret_key: Option<String>,
+    /// Optional S3 path prefix for recordings.
+    /// Combined with stream_id to form full path: `{prefix}/{stream_id}/audio.ogg`
+    pub recording_s3_prefix: Option<String>,
 
     // Cache configuration (filesystem or memory)
     pub cache_path: Option<PathBuf>, // if None, use in-memory cache
@@ -301,6 +304,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: Some("recordings/base".to_string()),
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -314,6 +318,10 @@ mod tests {
         let result = config.get_api_key("deepgram");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "test-deepgram-key");
+        assert_eq!(
+            config.recording_s3_prefix,
+            Some("recordings/base".to_string())
+        );
     }
 
     #[test]
@@ -336,6 +344,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -371,6 +380,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -409,6 +419,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -447,6 +458,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -491,6 +503,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: Some("http://auth.example.com".to_string()),
@@ -522,6 +535,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -555,6 +569,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -586,6 +601,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -619,6 +635,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -656,6 +673,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -692,6 +710,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -728,6 +747,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -769,6 +789,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -804,6 +825,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -842,6 +864,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -875,6 +898,7 @@ mod tests {
             recording_s3_endpoint: None,
             recording_s3_access_key: None,
             recording_s3_secret_key: None,
+            recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -905,6 +929,7 @@ mod tests {
             env::remove_var("AUTH_SIGNING_KEY_PATH");
             env::remove_var("AUTH_API_SECRET");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
+            env::remove_var("RECORDING_S3_PREFIX");
         }
     }
 

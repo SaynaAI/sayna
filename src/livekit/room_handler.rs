@@ -57,6 +57,19 @@ pub struct RecordingConfig {
     pub access_key: String,
     /// AWS S3 secret key
     pub secret_key: String,
+    /// S3 path prefix for recordings.
+    /// Combined with stream_id to construct full path: `{prefix}/{stream_id}/audio.ogg`
+    pub prefix: String,
+}
+
+// Build the full recording file path from prefix and stream_id.
+fn build_recording_filepath(prefix: &str, stream_id: &str) -> String {
+    if prefix.is_empty() {
+        format!("{stream_id}/audio.ogg")
+    } else {
+        let prefix = prefix.trim_end_matches('/');
+        format!("{prefix}/{stream_id}/audio.ogg")
+    }
 }
 
 /// Handler for LiveKit room management and token generation
@@ -329,10 +342,19 @@ impl LiveKitRoomHandler {
     ///
     /// # Arguments
     /// * `room_name` - Name of the LiveKit room to record
-    /// * `file_key` - Unique identifier for the recording stream
+    /// * `stream_id` - Unique identifier for the recording stream
     ///
     /// # Returns
     /// * `Result<String, LiveKitError>` - Egress ID for the started recording or error
+    ///
+    /// # Path Construction
+    ///
+    /// The recording path is constructed as: `{prefix}/{stream_id}/audio.ogg`
+    ///
+    /// Examples:
+    /// - Prefix: `recordings/prod`, Stream ID: `abc-123` -> `recordings/prod/abc-123/audio.ogg`
+    /// - Prefix: `""` (empty), Stream ID: `abc-123` -> `abc-123/audio.ogg`
+    /// - Prefix: `data/` (trailing slash), Stream ID: `xyz` -> `data/xyz/audio.ogg`
     ///
     /// # Example
     /// ```rust,no_run
@@ -350,17 +372,23 @@ impl LiveKitRoomHandler {
     ///         endpoint: "https://s3.amazonaws.com".to_string(),
     ///         access_key: "access_key".to_string(),
     ///         secret_key: "secret_key".to_string(),
+    ///         prefix: "recordings/prod".to_string(),
     ///     }),
     /// )?;
     ///
-    /// let egress_id = handler.setup_room_recording("my-room", "stream-123").await?;
+    /// let egress_id = handler
+    ///     .setup_room_recording(
+    ///         "my-room",
+    ///         "550e8400-e29b-41d4-a716-446655440000",
+    ///     )
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn setup_room_recording(
         &self,
         room_name: &str,
-        file_key: &str,
+        stream_id: &str,
     ) -> Result<String, LiveKitError> {
         // Validate that recording configuration is present
         let config = self.recording_config.as_ref().ok_or_else(|| {
@@ -378,10 +406,13 @@ impl LiveKitRoomHandler {
             ..Default::default()
         };
 
+        // Construct recording path: {prefix}/{stream_id}/audio.ogg
+        let filepath = build_recording_filepath(&config.prefix, stream_id);
+
         // Create encoded file output with S3 upload
         let file_output = proto::EncodedFileOutput {
             file_type: proto::EncodedFileType::Ogg as i32,
-            filepath: file_key.to_string(),
+            filepath,
             disable_manifest: false,
             output: Some(proto::encoded_file_output::Output::S3(s3_upload)),
         };
@@ -545,6 +576,7 @@ mod tests {
             endpoint: "https://s3.amazonaws.com".to_string(),
             access_key: "access_key".to_string(),
             secret_key: "secret_key".to_string(),
+            prefix: "recordings/test".to_string(),
         };
 
         let handler_with_recording = LiveKitRoomHandler::new(
@@ -564,6 +596,47 @@ mod tests {
                 .unwrap()
                 .bucket,
             "test-bucket"
+        );
+        assert_eq!(
+            handler_with_recording
+                .recording_config
+                .as_ref()
+                .unwrap()
+                .prefix,
+            "recordings/test"
+        );
+    }
+
+    #[test]
+    fn test_recording_path_construction_with_prefix() {
+        let filepath = build_recording_filepath("recordings/prod", "abc-123");
+        assert_eq!(filepath, "recordings/prod/abc-123/audio.ogg");
+    }
+
+    #[test]
+    fn test_recording_path_construction_empty_prefix() {
+        let filepath = build_recording_filepath("", "abc-123");
+        assert_eq!(filepath, "abc-123/audio.ogg");
+    }
+
+    #[test]
+    fn test_recording_path_construction_prefix_with_trailing_slash() {
+        let filepath = build_recording_filepath("recordings/prod/", "abc-123");
+        assert_eq!(filepath, "recordings/prod/abc-123/audio.ogg");
+    }
+
+    #[test]
+    fn test_recording_path_construction_multiple_trailing_slashes() {
+        let filepath = build_recording_filepath("data///", "xyz");
+        assert_eq!(filepath, "data/xyz/audio.ogg");
+    }
+
+    #[test]
+    fn test_recording_path_construction_uuid_stream_id() {
+        let filepath = build_recording_filepath("calls", "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            filepath,
+            "calls/550e8400-e29b-41d4-a716-446655440000/audio.ogg"
         );
     }
 
@@ -599,6 +672,7 @@ mod tests {
             endpoint: "https://s3.amazonaws.com".to_string(),
             access_key: "access_key".to_string(),
             secret_key: "secret_key".to_string(),
+            prefix: "recordings/test".to_string(),
         };
 
         let handler = LiveKitRoomHandler::new(

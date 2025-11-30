@@ -47,6 +47,7 @@ fn test_ws_config_serialization() {
 fn test_incoming_message_serialization() {
     // Test config message
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(true),
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -270,6 +271,7 @@ fn test_incoming_message_serialization() {
 fn test_outgoing_message_serialization() {
     // Test ready message without LiveKit
     let ready_msg = OutgoingMessage::Ready {
+        stream_id: "test-stream".to_string(),
         livekit_room_name: None,
         livekit_url: None,
         sayna_participant_identity: None,
@@ -280,6 +282,7 @@ fn test_outgoing_message_serialization() {
 
     // Test ready message with LiveKit room info
     let ready_msg_with_livekit = OutgoingMessage::Ready {
+        stream_id: "test-stream".to_string(),
         livekit_room_name: Some("test-room".to_string()),
         livekit_url: Some("ws://localhost:7880".to_string()),
         sayna_participant_identity: Some("sayna-ai".to_string()),
@@ -412,7 +415,6 @@ fn test_livekit_ws_config_serialization() {
     let livekit_config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: true,
-        recording_file_key: Some("test-file-key".to_string()),
         sayna_participant_identity: Some("sayna-ai".to_string()),
         sayna_participant_name: Some("Sayna AI".to_string()),
         listen_participants: vec![],
@@ -421,7 +423,10 @@ fn test_livekit_ws_config_serialization() {
     let json = serde_json::to_string(&livekit_config).unwrap();
     assert!(json.contains("\"room_name\":\"test-room\""));
     assert!(json.contains("\"enable_recording\":true"));
-    assert!(json.contains("\"recording_file_key\":\"test-file-key\""));
+    assert!(
+        !json.contains("recording_file_key"),
+        "recording_file_key should not be serialized"
+    );
 }
 
 #[test]
@@ -429,7 +434,6 @@ fn test_livekit_ws_config_conversion() {
     let livekit_ws_config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: false,
-        recording_file_key: None,
         sayna_participant_identity: None,
         sayna_participant_name: None,
         listen_participants: vec![],
@@ -467,7 +471,6 @@ fn test_livekit_config_with_empty_listen_participants() {
     let livekit_ws_config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: false,
-        recording_file_key: None,
         sayna_participant_identity: None,
         sayna_participant_name: None,
         listen_participants: vec![],
@@ -502,7 +505,6 @@ fn test_livekit_config_with_listen_participants() {
     let livekit_ws_config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: false,
-        recording_file_key: None,
         sayna_participant_identity: None,
         sayna_participant_name: None,
         listen_participants: vec!["user-123".to_string(), "user-456".to_string()],
@@ -548,7 +550,6 @@ fn test_livekit_ws_config_serialization_with_listen_participants() {
     let config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: false,
-        recording_file_key: None,
         sayna_participant_identity: None,
         sayna_participant_name: None,
         listen_participants: vec!["user-1".to_string(), "user-2".to_string()],
@@ -563,7 +564,6 @@ fn test_livekit_ws_config_serialization_omits_empty_listen_participants() {
     let config = LiveKitWebSocketConfig {
         room_name: "test-room".to_string(),
         enable_recording: false,
-        recording_file_key: None,
         sayna_participant_identity: None,
         sayna_participant_name: None,
         listen_participants: vec![],
@@ -601,8 +601,24 @@ fn test_livekit_ws_config_deserialization_without_listen_participants() {
 }
 
 #[test]
+fn test_livekit_config_ignores_unknown_fields() {
+    let json = r#"{
+        "room_name": "test-room",
+        "enable_recording": true,
+        "recording_file_key": "legacy-key"
+    }"#;
+
+    let config: LiveKitWebSocketConfig =
+        serde_json::from_str(json).expect("Should parse even with legacy recording_file_key");
+
+    assert_eq!(config.room_name, "test-room");
+    assert!(config.enable_recording);
+}
+
+#[test]
 fn test_incoming_message_config_with_livekit() {
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(true),
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -627,7 +643,6 @@ fn test_incoming_message_config_with_livekit() {
         livekit: Some(LiveKitWebSocketConfig {
             room_name: "test-room".to_string(),
             enable_recording: true,
-            recording_file_key: Some("test-file-key".to_string()),
             sayna_participant_identity: None,
             sayna_participant_name: None,
             listen_participants: vec![],
@@ -643,6 +658,7 @@ fn test_incoming_message_config_with_livekit() {
 #[test]
 fn test_incoming_message_config_without_livekit() {
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(true),
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -698,13 +714,13 @@ fn test_parse_config_message_with_livekit() {
             },
             "livekit": {
                 "room_name": "test-room",
-                "enable_recording": true,
-                "recording_file_key": "test-file-key"
+                "enable_recording": true
             }
         }"#;
 
     let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
     if let IncomingMessage::Config {
+        stream_id: None,
         audio,
         stt_config,
         tts_config,
@@ -718,10 +734,6 @@ fn test_parse_config_message_with_livekit() {
         let livekit_config = livekit.unwrap();
         assert_eq!(livekit_config.room_name, "test-room");
         assert!(livekit_config.enable_recording);
-        assert_eq!(
-            livekit_config.recording_file_key,
-            Some("test-file-key".to_string())
-        );
     } else {
         panic!("Expected Config message");
     }
@@ -806,6 +818,7 @@ fn test_parse_config_message_without_livekit() {
 
     let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
     if let IncomingMessage::Config {
+        stream_id: None,
         audio,
         stt_config,
         tts_config,
@@ -818,6 +831,95 @@ fn test_parse_config_message_without_livekit() {
         assert!(livekit.is_none());
     } else {
         panic!("Expected Config message");
+    }
+}
+
+#[test]
+fn test_parse_config_with_stream_id() {
+    let json = r#"{
+        "type": "config",
+        "stream_id": "test-123",
+        "audio": true,
+        "stt_config": {
+            "provider": "deepgram",
+            "language": "en-US",
+            "sample_rate": 16000,
+            "channels": 1,
+            "punctuation": true,
+            "encoding": "linear16",
+            "model": "nova-2"
+        }
+    }"#;
+
+    let msg: IncomingMessage = serde_json::from_str(json).expect("Should parse");
+
+    match msg {
+        IncomingMessage::Config {
+            stream_id, audio, ..
+        } => {
+            assert_eq!(stream_id, Some("test-123".to_string()));
+            assert_eq!(audio, Some(true));
+        }
+        _ => panic!("Expected Config message"),
+    }
+}
+
+#[test]
+fn test_parse_config_without_stream_id() {
+    let json = r#"{
+        "type": "config",
+        "audio": true
+    }"#;
+
+    let msg: IncomingMessage = serde_json::from_str(json).expect("Should parse");
+
+    match msg {
+        IncomingMessage::Config { stream_id, .. } => {
+            assert!(
+                stream_id.is_none(),
+                "stream_id should be None when not provided"
+            );
+        }
+        _ => panic!("Expected Config message"),
+    }
+}
+
+#[test]
+fn test_parse_config_with_null_stream_id() {
+    let json = r#"{
+        "type": "config",
+        "stream_id": null,
+        "audio": true
+    }"#;
+
+    let msg: IncomingMessage = serde_json::from_str(json).expect("Should parse");
+
+    match msg {
+        IncomingMessage::Config { stream_id, .. } => {
+            assert!(stream_id.is_none(), "stream_id should be None when null");
+        }
+        _ => panic!("Expected Config message"),
+    }
+}
+
+#[test]
+fn test_parse_config_with_uuid_stream_id() {
+    let json = r#"{
+        "type": "config",
+        "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+        "audio": false
+    }"#;
+
+    let msg: IncomingMessage = serde_json::from_str(json).expect("Should parse");
+
+    match msg {
+        IncomingMessage::Config { stream_id, .. } => {
+            assert_eq!(
+                stream_id,
+                Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+            );
+        }
+        _ => panic!("Expected Config message"),
     }
 }
 
@@ -852,6 +954,7 @@ fn test_tts_ws_config_conversion_mixed_values() {
 fn test_config_message_without_livekit_routing() {
     // Test that configuration without LiveKit creates proper routing logic
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(true),
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -896,6 +999,7 @@ fn test_config_message_without_livekit_routing() {
 fn test_config_message_with_livekit_routing() {
     // Test that configuration with LiveKit creates proper routing logic
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(true),
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -920,7 +1024,6 @@ fn test_config_message_with_livekit_routing() {
         livekit: Some(LiveKitWebSocketConfig {
             room_name: "test-room".to_string(),
             enable_recording: false,
-            recording_file_key: None,
             sayna_participant_identity: None,
             sayna_participant_name: None,
             listen_participants: vec![],
@@ -1101,13 +1204,13 @@ fn test_tts_audio_routing_logic_with_livekit() {
 fn test_config_message_audio_disabled() {
     // Test configuration with audio=false (LiveKit-only mode)
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: Some(false),
         stt_config: None, // Not required when audio=false
         tts_config: None, // Not required when audio=false
         livekit: Some(LiveKitWebSocketConfig {
             room_name: "test-room".to_string(),
             enable_recording: false,
-            recording_file_key: None,
             sayna_participant_identity: None,
             sayna_participant_name: None,
             listen_participants: vec![],
@@ -1126,6 +1229,7 @@ fn test_config_message_audio_disabled() {
     // Parse back to ensure structure is correct
     let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
     if let IncomingMessage::Config {
+        stream_id: None,
         audio,
         stt_config,
         tts_config,
@@ -1145,6 +1249,7 @@ fn test_config_message_audio_disabled() {
 fn test_config_message_audio_default() {
     // Test configuration with no audio field (should default to true)
     let config_msg = IncomingMessage::Config {
+        stream_id: None,
         audio: None, // Should default to true
         stt_config: Some(STTWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -1177,6 +1282,7 @@ fn test_config_message_audio_default() {
     // Parse back to ensure structure is correct
     let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
     if let IncomingMessage::Config {
+        stream_id: None,
         audio,
         stt_config,
         tts_config,

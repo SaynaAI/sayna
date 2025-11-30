@@ -185,13 +185,13 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
      ```json
      {
        "type": "config",
+       "stream_id": "support-room-42-2024-01-31",
        "audio": true,
        "stt_config": { "...": "..." },
        "tts_config": { "...": "..." },
        "livekit": {
          "room_name": "support-room-42",
          "enable_recording": true,
-         "recording_file_key": "support-room-42-2024-01-31",
          "sayna_participant_identity": "sayna-ai",
          "sayna_participant_name": "Sayna AI",
          "listen_participants": ["agent-1", "customer-42"]
@@ -210,7 +210,7 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 ### B. LiveKit Mirroring With Recording
 - Provide `LIVEKIT_URL`, `LIVEKIT_PUBLIC_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
 - Configure `RECORDING_S3_*` so LiveKit recording egress can persist files.
-- Set `"enable_recording": true` and supply `recording_file_key` per session to tag the output.
+- Set `"enable_recording": true` and include a session-level `stream_id` to control the `{server_prefix}/{stream_id}/audio.ogg` recording path. Omit `stream_id` to let the server generate one.
 
 ### C. Text/Data-Only Sessions
 - Start Sayna with normal audio credentials but send a WebSocket `config` message where `"audio": false`.

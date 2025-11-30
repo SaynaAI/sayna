@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::{
     core::{
@@ -40,6 +41,15 @@ const LIVEKIT_POLL_INTERVAL_MS: u64 = 100;
 /// Lock timeout for LiveKit operations (in milliseconds)
 const LIVEKIT_LOCK_TIMEOUT_MS: u64 = 100;
 
+/// Resolve the stream identifier for the current session
+fn resolve_stream_id(stream_id: Option<String>) -> String {
+    stream_id.unwrap_or_else(|| {
+        let generated = Uuid::new_v4().to_string();
+        debug!("Generated stream_id: {}", generated);
+        generated
+    })
+}
+
 /// Handle configuration message and initialize providers
 ///
 /// This function sets up the voice processing pipeline including:
@@ -49,6 +59,7 @@ const LIVEKIT_LOCK_TIMEOUT_MS: u64 = 100;
 /// - Callback registration for audio routing
 ///
 /// # Arguments
+/// * `stream_id` - Optional unique identifier for the WebSocket session
 /// * `audio` - Enable/disable audio processing (default: true)
 /// * `stt_ws_config` - STT provider configuration
 /// * `tts_ws_config` - TTS provider configuration
@@ -59,7 +70,9 @@ const LIVEKIT_LOCK_TIMEOUT_MS: u64 = 100;
 ///
 /// # Returns
 /// * `bool` - true to continue processing, false to terminate connection
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_config_message(
+    stream_id: Option<String>,
     audio: Option<bool>,
     stt_ws_config: Option<STTWebSocketConfig>,
     tts_ws_config: Option<TTSWebSocketConfig>,
@@ -68,6 +81,10 @@ pub async fn handle_config_message(
     message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
 ) -> bool {
+    // Generate stream_id if not provided by client
+    let stream_id = resolve_stream_id(stream_id);
+    info!("Session stream_id: {}", stream_id);
+
     // Determine if audio processing is enabled (default to true)
     let audio_enabled = audio.unwrap_or(true);
 
@@ -84,9 +101,11 @@ pub async fn handle_config_message(
 
     // Store audio_enabled flag in connection state
     {
-        let state_guard = state.read().await;
+        let mut state_guard = state.write().await;
         state_guard.set_audio_enabled(audio_enabled);
+        state_guard.stream_id = Some(stream_id.clone());
     }
+    debug!(stream_id = %stream_id, "Stored stream_id in connection state");
 
     // Initialize voice manager if audio is enabled
     let voice_manager = if audio_enabled {
@@ -126,6 +145,7 @@ pub async fn handle_config_message(
                 voice_manager.as_ref(),
                 message_tx,
                 app_state.livekit_room_handler.as_ref(),
+                &stream_id,
             )
             .await
             {
@@ -164,6 +184,7 @@ pub async fn handle_config_message(
     // Send ready message with optional LiveKit room information
     let _ = message_tx
         .send(MessageRoute::Outgoing(OutgoingMessage::Ready {
+            stream_id: stream_id.clone(),
             livekit_room_name: livekit_room_name.clone(),
             livekit_url: Some(app_state.config.livekit_public_url.clone()),
             sayna_participant_identity: sayna_identity,
@@ -625,6 +646,7 @@ async fn initialize_livekit_client(
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
     room_handler: Option<&Arc<crate::livekit::room_handler::LiveKitRoomHandler>>,
+    stream_id: &str,
 ) -> Option<(
     Arc<RwLock<LiveKitClient>>,
     Option<crate::livekit::OperationQueue>,
@@ -699,20 +721,19 @@ async fn initialize_livekit_client(
 
     // Start recording if requested
     let egress_id = if livekit_ws_config.enable_recording {
-        let file_key = livekit_ws_config
-            .recording_file_key
-            .as_deref()
-            .unwrap_or("default");
         match room_handler
-            .setup_room_recording(&livekit_ws_config.room_name, file_key)
+            .setup_room_recording(&livekit_ws_config.room_name, stream_id)
             .await
         {
-            Ok(egress_id) => {
-                info!("Recording started with egress ID: {}", egress_id);
-                Some(egress_id)
+            Ok(id) => {
+                info!(
+                    "Room recording started with egress ID: {} for stream: {}",
+                    id, stream_id
+                );
+                Some(id)
             }
             Err(e) => {
-                warn!("Failed to start recording: {:?}", e);
+                error!("Failed to start room recording: {:?}", e);
                 // Continue without recording - not a critical error
                 None
             }
@@ -1004,5 +1025,33 @@ async fn register_audio_clear_callback(
         {
             warn!("Failed to register audio clear callback: {:?}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stream_id_generation_when_none() {
+        let stream_id = resolve_stream_id(None);
+
+        assert_eq!(stream_id.len(), 36);
+        assert!(stream_id.contains('-'));
+    }
+
+    #[test]
+    fn test_stream_id_uses_provided_value() {
+        let stream_id = resolve_stream_id(Some("my-custom-stream-id".to_string()));
+
+        assert_eq!(stream_id, "my-custom-stream-id");
+    }
+
+    #[test]
+    fn test_stream_id_generation_uniqueness() {
+        let id1 = Uuid::new_v4().to_string();
+        let id2 = Uuid::new_v4().to_string();
+
+        assert_ne!(id1, id2, "Generated UUIDs should be unique");
     }
 }
