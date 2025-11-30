@@ -695,6 +695,7 @@ async fn initialize_livekit_client(
         };
 
     info!("LiveKit agent token generated successfully");
+    info!("Enabling recording: {}", livekit_ws_config.enable_recording);
 
     // Start recording if requested
     let egress_id = if livekit_ws_config.enable_recording {
