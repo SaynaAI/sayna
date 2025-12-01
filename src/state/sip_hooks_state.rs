@@ -139,7 +139,7 @@ mod tests {
 
         assert_eq!(state.get_hooks().len(), 2);
         let hook = state.get_hook_for_domain("example.com").unwrap();
-        assert_eq!(hook.url, "https://cached.com");
+        assert_eq!(hook.url, "https://existing.com");
         assert_eq!(hook.secret.as_deref(), Some("secret-1"));
 
         let new_hook = state.get_hook_for_domain("new.com").unwrap();
@@ -184,15 +184,21 @@ mod tests {
 
         let state = SipHooksState::new(&sip_config, None).await;
         let mut state = state;
-        let updated = vec![CachedSipHook::new("example.com", "https://updated.com")];
+        let updated = vec![
+            CachedSipHook::new("example.com", "https://updated.com"),
+            CachedSipHook::new("runtime.com", "https://runtime.com"),
+        ];
 
         let result = state.update_hooks(updated, &config_hooks);
-        assert_eq!(result.len(), 1);
-        assert_eq!(state.get_hooks()[0].url, "https://updated.com");
-        assert_eq!(
-            state.get_signing_secret(&state.get_hooks()[0]),
-            Some("secret-1")
-        );
+        assert_eq!(result.len(), 2);
+
+        let config_hook = state.get_hook_for_domain("example.com").unwrap();
+        assert_eq!(config_hook.url, "https://existing.com");
+        assert_eq!(state.get_signing_secret(config_hook), Some("secret-1"));
+
+        let runtime_hook = state.get_hook_for_domain("runtime.com").unwrap();
+        assert_eq!(runtime_hook.url, "https://runtime.com");
+        assert_eq!(state.get_signing_secret(runtime_hook), Some("global"));
     }
 
     #[tokio::test]

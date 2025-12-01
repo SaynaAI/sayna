@@ -159,6 +159,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 #### `GET /sip/hooks`
 - **Purpose**: List all configured SIP webhook hooks from the runtime cache.
+- **Behavior**: Hosts defined in the application configuration always appear and override any cached host with the same name.
 - **Success** `200 OK`:
   ```json
   {
@@ -182,6 +183,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 #### `POST /sip/hooks`
 - **Purpose**: Add or replace SIP webhook hooks at runtime. Changes persist across server restarts via the cache file (`<cache_path>/sip_hooks.json`).
+- **Behavior**: Hosts defined in the application configuration are immutable and override any cached or runtime updates.
 - **Request Body**:
 
 | Field | Type | Required | Description |
@@ -208,12 +210,14 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 - **Failure**:
   - `400 Bad Request` when duplicate hosts are detected in the request.
+  - `405 Method Not Allowed` when trying to add or update a host defined in the application configuration.
   - `500 Internal Server Error` if no cache path is configured or writing fails.
 
 **Note**: Secrets are NOT stored in the runtime cache. Hooks added via this endpoint will use the global `hook_secret` from the server configuration for webhook signing.
 
 #### `DELETE /sip/hooks`
 - **Purpose**: Remove SIP webhook hooks by host name. Changes persist across server restarts. If a deleted host exists in the original server configuration, it will revert to its config value after deletion.
+- **Behavior**: Hosts defined in the application configuration are immutable and cannot be removed.
 - **Request Body**:
 
 | Field | Type | Required | Description |
@@ -234,9 +238,10 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 - **Failure**:
   - `400 Bad Request` when the `hosts` array is empty.
+  - `405 Method Not Allowed` when trying to delete a host defined in the application configuration.
   - `500 Internal Server Error` if no cache path is configured or writing fails.
 
-**Note**: Deleting a host that exists in the original server configuration will cause it to revert to its config value. This is because the runtime state is always a merge of config + cache, so removing a host from cache allows the config value to take precedence again.
+**Note**: Deleting a host that exists in the original server configuration will cause it to revert to its config value (and config-defined hosts themselves cannot be removed). The runtime state is always a merge of config + cache, so removing a host from cache only affects runtime-added entries or cached overrides.
 
 ### WebSocket Endpoint (`GET /ws`)
 

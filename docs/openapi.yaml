@@ -137,7 +137,8 @@ paths:
       summary: Updates SIP hooks.
       description: |-
         Adds or replaces SIP hooks in the cache. Hooks with matching hosts
-        (case-insensitive) will be replaced. The changes take effect immediately
+        (case-insensitive) will be replaced. Hosts defined in the application
+        configuration cannot be modified. The changes take effect immediately
         and persist across server restarts.
 
         **Note**: Secrets are NOT stored in the cache. Runtime-added hooks will
@@ -170,6 +171,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+        '405':
+          description: Host defined in application config cannot be modified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
         '500':
           description: Failed to write hooks cache
           content:
@@ -181,9 +188,10 @@ paths:
       - sip
       summary: Deletes SIP hooks by host name.
       description: |-
-        Removes the specified hosts from the cache. If a host exists in the original
-        server configuration, it will revert to its config value after deletion.
-        Hosts that only exist in cache will be completely removed.
+        Removes the specified hosts from the cache. Hosts defined in the application
+        configuration cannot be removed. If a host exists in the original server
+        configuration, it will revert to its config value after deletion of a
+        cached override. Hosts that only exist in cache will be completely removed.
 
         The changes take effect immediately and persist across server restarts.
 
@@ -210,6 +218,12 @@ paths:
                 $ref: '#/components/schemas/SipHooksResponse'
         '400':
           description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SipHooksErrorResponse'
+        '405':
+          description: Host defined in application config cannot be modified
           content:
             application/json:
               schema:

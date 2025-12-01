@@ -170,54 +170,59 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     // Clean up resources
     sender_task.abort();
 
-    // Stop voice manager and LiveKit client if they exist
-    {
+    // Snapshot state before cleanup so we can drop the read lock before awaiting
+    let (voice_manager, livekit_client, recording_egress_id, room_name) = {
         let state_guard = state.read().await;
-        if let Some(voice_manager) = &state_guard.voice_manager {
-            match voice_manager.stop().await {
-                Ok(_) => {}
-                Err(e) => error!("Failed to stop voice manager: {}", e),
-            }
-        }
+        (
+            state_guard.voice_manager.clone(),
+            state_guard.livekit_client.clone(),
+            state_guard.recording_egress_id.clone(),
+            state_guard.livekit_room_name.clone(),
+        )
+    };
 
-        // Get recording and room info before cleanup
-        let recording_egress_id = state_guard.recording_egress_id.clone();
-        let room_name = state_guard.livekit_room_name.clone();
-
-        if let Some(livekit_client) = &state_guard.livekit_client {
-            // Try to get write lock with timeout for cleanup
-            match tokio::time::timeout(Duration::from_millis(100), livekit_client.write()).await {
-                Ok(mut client) => {
-                    if let Err(e) = client.disconnect().await {
-                        error!("Failed to disconnect LiveKit client: {:?}", e);
-                    }
-                }
-                Err(_) => {
-                    warn!("Timeout acquiring LiveKit lock for cleanup - client may be busy");
+    // Disconnect LiveKit first to stop inbound audio before tearing down STT/TTS
+    if let Some(livekit_client) = livekit_client {
+        // Try to get write lock with timeout for cleanup
+        match tokio::time::timeout(Duration::from_millis(100), livekit_client.write()).await {
+            Ok(mut client) => {
+                if let Err(e) = client.disconnect().await {
+                    error!("Failed to disconnect LiveKit client: {:?}", e);
                 }
             }
-        }
-
-        // Stop recording if it was started
-        if let (Some(egress_id), Some(room_handler)) =
-            (&recording_egress_id, &app_state.livekit_room_handler)
-        {
-            info!("Stopping recording with egress ID: {}", egress_id);
-            if let Err(e) = room_handler.stop_room_recording(egress_id).await {
-                error!("Failed to stop room recording: {:?}", e);
-            } else {
-                info!("Recording stopped successfully");
+            Err(_) => {
+                warn!("Timeout acquiring LiveKit lock for cleanup - client may be busy");
             }
         }
+    }
 
-        // Delete room if it exists
-        if let (Some(room), Some(room_handler)) = (&room_name, &app_state.livekit_room_handler) {
-            info!("Deleting LiveKit room: {}", room);
-            if let Err(e) = room_handler.delete_room(room).await {
-                error!("Failed to delete room: {:?}", e);
-            } else {
-                info!("Room deleted successfully");
-            }
+    // Now stop the voice manager after audio sources are quiet
+    if let Some(voice_manager) = voice_manager {
+        match voice_manager.stop().await {
+            Ok(_) => {}
+            Err(e) => error!("Failed to stop voice manager: {}", e),
+        }
+    }
+
+    // Stop recording if it was started
+    if let (Some(egress_id), Some(room_handler)) =
+        (&recording_egress_id, &app_state.livekit_room_handler)
+    {
+        info!("Stopping recording with egress ID: {}", egress_id);
+        if let Err(e) = room_handler.stop_room_recording(egress_id).await {
+            error!("Failed to stop room recording: {:?}", e);
+        } else {
+            info!("Recording stopped successfully");
+        }
+    }
+
+    // Delete room if it exists
+    if let (Some(room), Some(room_handler)) = (&room_name, &app_state.livekit_room_handler) {
+        info!("Deleting LiveKit room: {}", room);
+        if let Err(e) = room_handler.delete_room(room).await {
+            error!("Failed to delete room: {:?}", e);
+        } else {
+            info!("Room deleted successfully");
         }
     }
 

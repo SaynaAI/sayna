@@ -180,14 +180,14 @@ pub async fn write_hooks_cache(cache_dir: &Path, hooks: &[CachedSipHook]) -> Res
     Ok(())
 }
 
-/// Merges cached hooks with existing hooks from configuration.
+/// Merges hooks, giving priority to the `cached_hooks` list when hosts match.
 ///
-/// Cached hooks override existing hooks with matching hosts (case-insensitive).
-/// This allows runtime updates to take precedence over static configuration.
+/// This helper is used for merging runtime or cached updates with another list
+/// of hooks. For merging with application configuration (where config should
+/// take precedence), use `merge_hooks_with_secrets`.
 ///
-/// Note: Cached hooks do NOT include secrets. When a cached hook overrides
-/// an existing hook, the secret is lost. The global `hook_secret` should be
-/// used for runtime-added hooks.
+/// Note: Cached hooks do NOT include secrets. When an override happens, any
+/// per-hook secret from the base list is not retained.
 ///
 /// # Arguments
 /// * `existing_hooks` - Hooks from the original configuration (with optional secrets)
@@ -247,9 +247,9 @@ where
 
 /// Merges cached hooks with existing configuration hooks while preserving secrets.
 ///
-/// This returns full `SipHookConfig` entries so downstream consumers can still
-/// access per-hook secrets from the original configuration while honoring runtime
-/// URL overrides and additions from the cache file.
+/// Application configuration hooks always take precedence over cached hooks with
+/// the same host. Cached hooks only add new entries that do not exist in the base
+/// configuration.
 pub fn merge_hooks_with_secrets(
     config_hooks: &[SipHookConfig],
     cached_hooks: &[CachedSipHook],
@@ -272,18 +272,20 @@ pub fn merge_hooks_with_secrets(
 
     for hook in cached_hooks {
         let host = hook.host.trim().to_lowercase();
-        if let Some(existing) = merged.get_mut(&host) {
-            existing.url = hook.url.clone();
-        } else {
-            merged.insert(
-                host.clone(),
-                SipHookConfig {
-                    host,
-                    url: hook.url.clone(),
-                    secret: None,
-                },
-            );
+
+        // Ignore cached values for hosts defined in application config.
+        if merged.contains_key(&host) {
+            continue;
         }
+
+        merged.insert(
+            host.clone(),
+            SipHookConfig {
+                host,
+                url: hook.url.clone(),
+                secret: None,
+            },
+        );
     }
 
     merged.into_values().collect()
@@ -313,10 +315,12 @@ impl AsRef<str> for CachedSipHook {
     }
 }
 
-/// Reads hooks from cache and merges them with existing hooks.
+/// Reads hooks from cache and merges them with existing hooks, giving priority
+/// to cached values.
 ///
-/// This is a convenience function that combines `read_hooks_cache` and `merge_hooks`.
-/// Cached hooks override existing hooks with matching hosts (case-insensitive).
+/// This is a convenience function that combines `read_hooks_cache` and
+/// `merge_hooks`. For application configuration merges, prefer
+/// `merge_hooks_with_secrets`.
 ///
 /// # Arguments
 /// * `cache_dir` - Path to the cache directory
@@ -626,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_hooks_with_secrets_overrides_url_preserves_secret() {
+    fn test_merge_hooks_with_secrets_does_not_override_config_hooks() {
         let config_hooks = vec![SipHookConfig {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
@@ -636,7 +640,7 @@ mod tests {
 
         let result = merge_hooks_with_secrets(&config_hooks, &cached_hooks);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].url, "https://cached.com");
+        assert_eq!(result[0].url, "https://existing.com");
         assert_eq!(result[0].secret.as_deref(), Some("secret-1"));
     }
 

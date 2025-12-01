@@ -6,6 +6,7 @@
 
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -60,6 +61,56 @@ pub struct SipHooksErrorResponse {
     pub error: String,
 }
 
+/// Returns the set of hosts defined in application configuration.
+fn configured_sip_hosts(state: &AppState) -> HashSet<String> {
+    state
+        .config
+        .sip
+        .as_ref()
+        .map(|sip| {
+            sip.hooks
+                .iter()
+                .map(|hook| hook.host.trim().to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reject updates that attempt to touch hosts hardcoded in application config.
+fn reject_protected_hosts<'a, I>(
+    protected_hosts: &HashSet<String>,
+    hosts: I,
+) -> Option<(StatusCode, Json<SipHooksErrorResponse>)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut blocked: Vec<String> = hosts
+        .into_iter()
+        .filter_map(|host| {
+            let normalized = host.trim().to_lowercase();
+            protected_hosts.contains(&normalized).then_some(normalized)
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if blocked.is_empty() {
+        return None;
+    }
+
+    blocked.sort();
+
+    Some((
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(SipHooksErrorResponse {
+            error: format!(
+                "Host(s) {} are hardcoded in the application config and cannot be changed.",
+                blocked.join(", ")
+            ),
+        }),
+    ))
+}
+
 /// Lists all configured SIP hooks.
 ///
 /// Returns the current list of SIP hooks from runtime state.
@@ -103,7 +154,8 @@ pub async fn list_sip_hooks(
 /// Updates SIP hooks.
 ///
 /// Adds or replaces SIP hooks in the cache. Hooks with matching hosts
-/// (case-insensitive) will be replaced. The changes take effect immediately
+/// (case-insensitive) will be replaced. Hosts defined in the application
+/// configuration cannot be modified. The changes take effect immediately
 /// and persist across server restarts.
 ///
 /// **Note**: Secrets are NOT stored in the cache. Runtime-added hooks will
@@ -125,6 +177,7 @@ pub async fn list_sip_hooks(
         responses(
             (status = 200, description = "Updated list of SIP hooks", body = SipHooksResponse),
             (status = 400, description = "Validation error", body = SipHooksErrorResponse),
+            (status = 405, description = "Host defined in application config cannot be modified", body = SipHooksErrorResponse),
             (status = 500, description = "Failed to write hooks cache", body = SipHooksErrorResponse)
         ),
         tag = "sip"
@@ -147,12 +200,21 @@ pub async fn update_sip_hooks(
         }
     };
 
+    let protected_hosts = configured_sip_hosts(&state);
+
     // Convert request entries to CachedSipHook
     let new_hooks: Vec<CachedSipHook> = request
         .hooks
         .into_iter()
         .map(|h| CachedSipHook::new(h.host, h.url))
         .collect();
+
+    if let Some(error) = reject_protected_hosts(
+        &protected_hosts,
+        new_hooks.iter().map(|hook| hook.host.as_str()),
+    ) {
+        return Err(error);
+    }
 
     // Validate for duplicates in the incoming request
     if let Err(e) = sip_hooks::validate_no_duplicate_hosts(&new_hooks) {
@@ -169,8 +231,13 @@ pub async fn update_sip_hooks(
         .await
         .unwrap_or_default();
 
+    let filtered_existing_hooks: Vec<CachedSipHook> = existing_hooks
+        .into_iter()
+        .filter(|hook| !protected_hosts.contains(&hook.host))
+        .collect();
+
     // Merge: new hooks override existing (case-insensitive host match)
-    let merged_hooks = sip_hooks::merge_hooks(&existing_hooks, &new_hooks);
+    let merged_hooks = sip_hooks::merge_hooks(&filtered_existing_hooks, &new_hooks);
 
     // Write merged hooks to cache
     sip_hooks::write_hooks_cache(&cache_path, &merged_hooks)
@@ -248,9 +315,10 @@ pub struct DeleteSipHooksRequest {
 
 /// Deletes SIP hooks by host name.
 ///
-/// Removes the specified hosts from the cache. If a host exists in the original
-/// server configuration, it will revert to its config value after deletion.
-/// Hosts that only exist in cache will be completely removed.
+/// Removes the specified hosts from the cache. Hosts defined in the application
+/// configuration cannot be removed. If a host exists in the original server
+/// configuration, it will revert to its config value after deletion of a
+/// cached override. Hosts that only exist in cache will be completely removed.
 ///
 /// The changes take effect immediately and persist across server restarts.
 ///
@@ -270,6 +338,7 @@ pub struct DeleteSipHooksRequest {
         responses(
             (status = 200, description = "Updated list of SIP hooks after deletion", body = SipHooksResponse),
             (status = 400, description = "Validation error", body = SipHooksErrorResponse),
+            (status = 405, description = "Host defined in application config cannot be modified", body = SipHooksErrorResponse),
             (status = 500, description = "Failed to write hooks cache", body = SipHooksErrorResponse)
         ),
         tag = "sip"
@@ -302,13 +371,28 @@ pub async fn delete_sip_hooks(
         }
     };
 
+    let protected_hosts = configured_sip_hosts(&state);
+
+    if let Some(error) = reject_protected_hosts(
+        &protected_hosts,
+        request.hosts.iter().map(|host| host.as_str()),
+    ) {
+        return Err(error);
+    }
+
     // Read existing hooks from cache
     let existing_hooks = sip_hooks::read_hooks_cache(&cache_path)
         .await
         .unwrap_or_default();
 
+    let filtered_existing_hooks: Vec<CachedSipHook> = existing_hooks
+        .into_iter()
+        .filter(|hook| !protected_hosts.contains(&hook.host))
+        .collect();
+
     // Remove the specified hosts from cache
-    let remaining_hooks = sip_hooks::remove_hooks_by_hosts(&existing_hooks, &request.hosts);
+    let remaining_hooks =
+        sip_hooks::remove_hooks_by_hosts(&filtered_existing_hooks, &request.hosts);
 
     // Write remaining hooks back to cache
     sip_hooks::write_hooks_cache(&cache_path, &remaining_hooks)
@@ -451,5 +535,27 @@ mod tests {
         let request: DeleteSipHooksRequest =
             serde_json::from_str(json).expect("Failed to deserialize");
         assert!(request.hosts.is_empty());
+    }
+
+    #[test]
+    fn test_reject_protected_hosts_blocks_configured_host() {
+        let protected_hosts: HashSet<String> = ["example.com".to_string()].into_iter().collect();
+
+        let result = reject_protected_hosts(&protected_hosts, ["example.com"].iter().copied());
+        assert!(result.is_some());
+        let (status, Json(error)) = result.unwrap();
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert!(
+            error.error.contains("example.com"),
+            "error message should mention blocked host"
+        );
+    }
+
+    #[test]
+    fn test_reject_protected_hosts_allows_runtime_hosts() {
+        let protected_hosts: HashSet<String> = ["example.com".to_string()].into_iter().collect();
+
+        let result = reject_protected_hosts(&protected_hosts, ["other.com"].iter().copied());
+        assert!(result.is_none());
     }
 }
