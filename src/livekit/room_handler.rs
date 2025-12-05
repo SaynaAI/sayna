@@ -469,6 +469,45 @@ impl LiveKitRoomHandler {
 
         Ok(())
     }
+
+    /// List participants in a LiveKit room
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    ///
+    /// # Returns
+    /// * `Result<Vec<proto::ParticipantInfo>, LiveKitError>` - List of participants or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// let participants = handler.list_participants("my-room").await?;
+    /// for p in participants {
+    ///     println!("Participant: {} ({})", p.name, p.identity);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_participants(
+        &self,
+        room_name: &str,
+    ) -> Result<Vec<proto::ParticipantInfo>, LiveKitError> {
+        self.room_client
+            .list_participants(room_name)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to list participants: {e}"))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -693,5 +732,24 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(!err_msg.contains("Recording configuration not provided"));
+    }
+
+    #[tokio::test]
+    async fn test_list_participants_with_invalid_server() {
+        // This test validates that list_participants fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.list_participants("test-room").await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to list participants"));
     }
 }

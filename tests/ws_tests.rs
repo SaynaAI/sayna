@@ -266,3 +266,300 @@ async fn test_websocket_invalid_message() {
     // Close connection
     write.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_websocket_sip_transfer_without_livekit_config() {
+    // Create test config without LiveKit credentials
+    let config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
+        port: 0,
+        livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
+        deepgram_api_key: Some("test_key".to_string()),
+        elevenlabs_api_key: Some("test_key".to_string()),
+        google_credentials: None,
+        azure_speech_subscription_key: None,
+        azure_speech_region: None,
+        cartesia_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
+        recording_s3_prefix: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
+        sip: None,
+    };
+
+    // Create application state
+    let app_state = AppState::new(config.clone()).await;
+
+    // Create router
+    let app = routes::api::create_api_router()
+        .merge(routes::ws::create_ws_router())
+        .with_state(app_state);
+
+    // Create listener
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == ErrorKind::PermissionDenied {
+                eprintln!("Skipping test_websocket_sip_transfer_without_livekit_config: {err}");
+                return;
+            }
+            panic!("Failed to bind WebSocket test listener: {err}");
+        }
+    };
+    let addr = listener.local_addr().unwrap();
+
+    // Start server in background
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Give server time to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Connect to WebSocket
+    let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send sip_transfer message without configuring LiveKit first
+    let sip_transfer_message = json!({
+        "type": "sip_transfer",
+        "transfer_to": "+1234567890"
+    });
+
+    write
+        .send(Message::Text(sip_transfer_message.to_string().into()))
+        .await
+        .unwrap();
+
+    // Receive error response (no room configured)
+    let response = read.next().await.unwrap().unwrap();
+
+    match response {
+        Message::Text(text) => {
+            let text_str = text.to_string();
+            let parsed: serde_json::Value = serde_json::from_str(&text_str).unwrap();
+            assert_eq!(parsed["type"].as_str(), Some("sip_transfer_error"));
+            // Should error because no room name is configured
+            let error_msg = parsed["message"].as_str().unwrap();
+            assert!(
+                error_msg.contains("Room name") || error_msg.contains("LiveKit"),
+                "Expected room/livekit error, got: {error_msg}"
+            );
+        }
+        _ => panic!("Expected text message"),
+    }
+
+    // Close connection
+    write.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_websocket_sip_transfer_invalid_phone_number() {
+    // Create test config with LiveKit credentials
+    let config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        livekit_api_key: Some("test_key".to_string()),
+        livekit_api_secret: Some("test_secret".to_string()),
+        port: 0,
+        livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
+        deepgram_api_key: Some("test_key".to_string()),
+        elevenlabs_api_key: Some("test_key".to_string()),
+        google_credentials: None,
+        azure_speech_subscription_key: None,
+        azure_speech_region: None,
+        cartesia_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
+        recording_s3_prefix: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
+        sip: None,
+    };
+
+    // Create application state
+    let app_state = AppState::new(config.clone()).await;
+
+    // Create router
+    let app = routes::api::create_api_router()
+        .merge(routes::ws::create_ws_router())
+        .with_state(app_state);
+
+    // Create listener
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == ErrorKind::PermissionDenied {
+                eprintln!("Skipping test_websocket_sip_transfer_invalid_phone_number: {err}");
+                return;
+            }
+            panic!("Failed to bind WebSocket test listener: {err}");
+        }
+    };
+    let addr = listener.local_addr().unwrap();
+
+    // Start server in background
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Give server time to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Connect to WebSocket
+    let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send sip_transfer message with invalid phone number
+    let sip_transfer_message = json!({
+        "type": "sip_transfer",
+        "transfer_to": "invalid-phone-123abc"
+    });
+
+    write
+        .send(Message::Text(sip_transfer_message.to_string().into()))
+        .await
+        .unwrap();
+
+    // Receive error response (invalid phone number)
+    let response = read.next().await.unwrap().unwrap();
+
+    match response {
+        Message::Text(text) => {
+            let text_str = text.to_string();
+            let parsed: serde_json::Value = serde_json::from_str(&text_str).unwrap();
+            assert_eq!(parsed["type"].as_str(), Some("sip_transfer_error"));
+            // Should error because phone number contains letters
+            let error_msg = parsed["message"].as_str().unwrap();
+            assert!(
+                error_msg.contains("Invalid") && error_msg.contains("phone"),
+                "Expected invalid phone error, got: {error_msg}"
+            );
+        }
+        _ => panic!("Expected text message"),
+    }
+
+    // Close connection
+    write.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_websocket_sip_transfer_empty_phone_number() {
+    // Create test config
+    let config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        livekit_api_key: Some("test_key".to_string()),
+        livekit_api_secret: Some("test_secret".to_string()),
+        port: 0,
+        livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
+        deepgram_api_key: Some("test_key".to_string()),
+        elevenlabs_api_key: Some("test_key".to_string()),
+        google_credentials: None,
+        azure_speech_subscription_key: None,
+        azure_speech_region: None,
+        cartesia_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
+        recording_s3_prefix: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secret: None,
+        auth_timeout_seconds: 5,
+        auth_required: false,
+        sip: None,
+    };
+
+    // Create application state
+    let app_state = AppState::new(config.clone()).await;
+
+    // Create router
+    let app = routes::api::create_api_router()
+        .merge(routes::ws::create_ws_router())
+        .with_state(app_state);
+
+    // Create listener
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == ErrorKind::PermissionDenied {
+                eprintln!("Skipping test_websocket_sip_transfer_empty_phone_number: {err}");
+                return;
+            }
+            panic!("Failed to bind WebSocket test listener: {err}");
+        }
+    };
+    let addr = listener.local_addr().unwrap();
+
+    // Start server in background
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Give server time to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Connect to WebSocket
+    let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send sip_transfer message with empty phone number
+    let sip_transfer_message = json!({
+        "type": "sip_transfer",
+        "transfer_to": ""
+    });
+
+    write
+        .send(Message::Text(sip_transfer_message.to_string().into()))
+        .await
+        .unwrap();
+
+    // Receive error response (empty phone number)
+    let response = read.next().await.unwrap().unwrap();
+
+    match response {
+        Message::Text(text) => {
+            let text_str = text.to_string();
+            let parsed: serde_json::Value = serde_json::from_str(&text_str).unwrap();
+            assert_eq!(parsed["type"].as_str(), Some("sip_transfer_error"));
+            // Should error because phone number is empty
+            let error_msg = parsed["message"].as_str().unwrap();
+            assert!(
+                error_msg.contains("empty") || error_msg.contains("Invalid"),
+                "Expected empty phone error, got: {error_msg}"
+            );
+        }
+        _ => panic!("Expected text message"),
+    }
+
+    // Close connection
+    write.close().await.unwrap();
+}

@@ -200,3 +200,190 @@ impl QueueStats {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_send_audio_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::SendAudio {
+            audio_data: vec![1, 2, 3],
+            response_tx: tx,
+        };
+
+        assert_eq!(op.priority(), OperationPriority::High);
+    }
+
+    #[test]
+    fn test_clear_audio_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::ClearAudio { response_tx: tx };
+
+        assert_eq!(op.priority(), OperationPriority::High);
+    }
+
+    #[test]
+    fn test_send_message_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::SendMessage {
+            message: "test".to_string(),
+            role: "user".to_string(),
+            topic: None,
+            debug: None,
+            response_tx: tx,
+            retry_count: 0,
+        };
+
+        assert_eq!(op.priority(), OperationPriority::Low);
+    }
+
+    #[test]
+    fn test_is_connected_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::IsConnected { response_tx: tx };
+
+        assert_eq!(op.priority(), OperationPriority::Medium);
+    }
+
+    #[test]
+    fn test_has_audio_source_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::HasAudioSource { response_tx: tx };
+
+        assert_eq!(op.priority(), OperationPriority::Medium);
+    }
+
+    #[test]
+    fn test_reconnect_priority() {
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::Reconnect { response_tx: tx };
+
+        assert_eq!(op.priority(), OperationPriority::High);
+    }
+
+    #[test]
+    fn test_shutdown_priority() {
+        let op = LiveKitOperation::Shutdown { ack_tx: None };
+
+        assert_eq!(op.priority(), OperationPriority::High);
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        // High should be less than Medium (higher priority = lower number)
+        assert!(OperationPriority::High < OperationPriority::Medium);
+        assert!(OperationPriority::Medium < OperationPriority::Low);
+        assert!(OperationPriority::High < OperationPriority::Low);
+    }
+
+    #[test]
+    fn test_queue_stats_default() {
+        let stats = QueueStats::default();
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.successful_operations, 0);
+        assert_eq!(stats.failed_operations, 0);
+        assert_eq!(stats.audio_operations, 0);
+        assert_eq!(stats.message_operations, 0);
+        assert_eq!(stats.average_latency_ms, 0);
+        assert_eq!(stats.max_latency_ms, 0);
+    }
+
+    #[test]
+    fn test_queue_stats_record_successful_audio_operation() {
+        let mut stats = QueueStats::default();
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::SendAudio {
+            audio_data: vec![],
+            response_tx: tx,
+        };
+
+        stats.record_operation(&op, true, Duration::from_millis(10));
+
+        assert_eq!(stats.total_operations, 1);
+        assert_eq!(stats.successful_operations, 1);
+        assert_eq!(stats.failed_operations, 0);
+        assert_eq!(stats.audio_operations, 1);
+        assert_eq!(stats.message_operations, 0);
+        assert_eq!(stats.average_latency_ms, 10);
+        assert_eq!(stats.max_latency_ms, 10);
+    }
+
+    #[test]
+    fn test_queue_stats_record_failed_message_operation() {
+        let mut stats = QueueStats::default();
+        let (tx, _rx) = oneshot::channel();
+        let op = LiveKitOperation::SendMessage {
+            message: "test".to_string(),
+            role: "user".to_string(),
+            topic: None,
+            debug: None,
+            response_tx: tx,
+            retry_count: 0,
+        };
+
+        stats.record_operation(&op, false, Duration::from_millis(50));
+
+        assert_eq!(stats.total_operations, 1);
+        assert_eq!(stats.successful_operations, 0);
+        assert_eq!(stats.failed_operations, 1);
+        assert_eq!(stats.audio_operations, 0);
+        assert_eq!(stats.message_operations, 1);
+        assert_eq!(stats.average_latency_ms, 50);
+        assert_eq!(stats.max_latency_ms, 50);
+    }
+
+    #[test]
+    fn test_queue_stats_max_latency_updates() {
+        let mut stats = QueueStats::default();
+        let (tx1, _rx1) = oneshot::channel();
+        let op1 = LiveKitOperation::ClearAudio { response_tx: tx1 };
+        let (tx2, _rx2) = oneshot::channel();
+        let op2 = LiveKitOperation::ClearAudio { response_tx: tx2 };
+
+        stats.record_operation(&op1, true, Duration::from_millis(10));
+        stats.record_operation(&op2, true, Duration::from_millis(100));
+
+        assert_eq!(stats.max_latency_ms, 100);
+    }
+
+    #[test]
+    fn test_queue_stats_average_latency() {
+        let mut stats = QueueStats::default();
+
+        // Record 3 operations with different latencies
+        let (tx1, _rx1) = oneshot::channel();
+        let op1 = LiveKitOperation::ClearAudio { response_tx: tx1 };
+        let (tx2, _rx2) = oneshot::channel();
+        let op2 = LiveKitOperation::ClearAudio { response_tx: tx2 };
+        let (tx3, _rx3) = oneshot::channel();
+        let op3 = LiveKitOperation::ClearAudio { response_tx: tx3 };
+
+        stats.record_operation(&op1, true, Duration::from_millis(10));
+        stats.record_operation(&op2, true, Duration::from_millis(20));
+        stats.record_operation(&op3, true, Duration::from_millis(30));
+
+        // Average of 10, 20, 30 = 20
+        assert_eq!(stats.average_latency_ms, 20);
+    }
+
+    #[tokio::test]
+    async fn test_operation_queue_creation() {
+        let (queue, _receiver) = OperationQueue::new(100);
+
+        // Queue should start with capacity
+        // pending_count starts at 0 when no operations are queued
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_operation_queue_clone() {
+        let (queue, _receiver) = OperationQueue::new(100);
+        let _cloned_queue = queue.clone();
+
+        // Both queues should be usable
+        assert_eq!(queue.pending_count(), 0);
+    }
+}

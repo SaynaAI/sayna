@@ -71,6 +71,30 @@ pub enum WebSocketError {
     #[error("Failed to send message via LiveKit: {0}")]
     LiveKitSend(String),
 
+    /// SIP transfer failed due to invalid phone number format.
+    /// Raised when the provided phone number doesn't match expected E.164 format.
+    /// Client should ensure the phone number starts with + followed by country code and number.
+    #[error("Invalid phone number: {0}")]
+    SIPTransferInvalidPhoneNumber(String),
+
+    /// SIP transfer API call failed.
+    /// Raised when the LiveKit SIP transfer request returns an error.
+    /// Client may retry the transfer or check the SIP configuration.
+    #[error("SIP transfer failed: {0}")]
+    SIPTransferFailed(String),
+
+    /// No SIP participant available to transfer.
+    /// Raised when attempting a SIP transfer but no SIP participant exists in the room.
+    /// Client should ensure a SIP call is active before attempting transfer.
+    #[error("No SIP participant found in room to transfer")]
+    SIPTransferNoParticipant,
+
+    /// Room name not available for SIP transfer.
+    /// Raised when the connection state lacks a room name required for SIP operations.
+    /// Client should ensure LiveKit is configured before attempting SIP transfer.
+    #[error("Room name not available. Ensure LiveKit is configured.")]
+    SIPTransferNoRoomName,
+
     /// Invalid message format
     #[error("Invalid message format: {0}")]
     InvalidMessage(String),
@@ -89,3 +113,82 @@ impl WebSocketError {
 
 /// Result type for WebSocket operations
 pub type WebSocketResult<T> = Result<T, WebSocketError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sip_transfer_invalid_phone_error() {
+        let error = WebSocketError::SIPTransferInvalidPhoneNumber("contains letters".to_string());
+        let msg = error.to_message();
+        assert!(msg.contains("Invalid phone number"));
+        assert!(msg.contains("contains letters"));
+    }
+
+    #[test]
+    fn test_sip_transfer_failed_error() {
+        let error = WebSocketError::SIPTransferFailed("connection timeout".to_string());
+        let msg = error.to_message();
+        assert!(msg.contains("SIP transfer failed"));
+        assert!(msg.contains("connection timeout"));
+    }
+
+    #[test]
+    fn test_sip_transfer_no_participant_error() {
+        let error = WebSocketError::SIPTransferNoParticipant;
+        let msg = error.to_message();
+        assert!(msg.contains("No SIP participant"));
+    }
+
+    #[test]
+    fn test_sip_transfer_no_room_error() {
+        let error = WebSocketError::SIPTransferNoRoomName;
+        let msg = error.to_message();
+        assert!(msg.contains("Room name not available"));
+    }
+
+    #[test]
+    fn test_audio_disabled_error() {
+        let error = WebSocketError::AudioDisabled;
+        let msg = error.to_message();
+        assert!(msg.contains("Audio processing is disabled"));
+    }
+
+    #[test]
+    fn test_voice_manager_not_configured_error() {
+        let error = WebSocketError::VoiceManagerNotConfigured;
+        let msg = error.to_message();
+        assert!(msg.contains("Voice manager not configured"));
+    }
+
+    #[test]
+    fn test_livekit_not_configured_error() {
+        let error = WebSocketError::LiveKitNotConfigured;
+        let msg = error.to_message();
+        assert!(msg.contains("LiveKit client not configured"));
+    }
+
+    #[test]
+    fn test_error_display_trait() {
+        // Verify that Display implementation matches to_message
+        let error = WebSocketError::SIPTransferFailed("test error".to_string());
+        assert_eq!(error.to_string(), error.to_message());
+    }
+
+    #[test]
+    fn test_api_key_error() {
+        let error = WebSocketError::APIKeyError("missing key".to_string());
+        let msg = error.to_message();
+        assert!(msg.contains("Failed to get API key"));
+        assert!(msg.contains("missing key"));
+    }
+
+    #[test]
+    fn test_invalid_message_error() {
+        let error = WebSocketError::InvalidMessage("not JSON".to_string());
+        let msg = error.to_message();
+        assert!(msg.contains("Invalid message format"));
+        assert!(msg.contains("not JSON"));
+    }
+}

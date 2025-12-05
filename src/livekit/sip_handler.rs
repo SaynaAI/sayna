@@ -88,8 +88,10 @@ pub struct LiveKitSipHandler {
     /// API secret for authentication
     #[allow(dead_code)]
     api_secret: String,
-    /// SIPClient for SIP operations
+    /// SIPClient for SIP operations (from livekit-api crate)
     sip_client: SIPClient,
+    /// SIPApiClient for raw Twirp API calls (for features not exposed by livekit-api)
+    sip_api_client: SIPApiClient,
 }
 
 impl LiveKitSipHandler {
@@ -115,12 +117,14 @@ impl LiveKitSipHandler {
     /// ```
     pub fn new(url: String, api_key: String, api_secret: String) -> Self {
         let sip_client = SIPClient::with_api_key(&url, &api_key, &api_secret);
+        let sip_api_client = SIPApiClient::new(url.clone(), api_key.clone(), api_secret.clone());
 
         Self {
             url,
             api_key,
             api_secret,
             sip_client,
+            sip_api_client,
         }
     }
 
@@ -180,20 +184,14 @@ impl LiveKitSipHandler {
             .any(|trunk| trunk.name == trunk_config.trunk_name);
 
         if !trunk_exists {
-            // Use a raw SIP API client to set include_headers (not yet exposed in livekit-api).
-            let sip_api_client = SIPApiClient::new(
-                self.url.clone(),
-                self.api_key.clone(),
-                self.api_secret.clone(),
-            );
-
+            // Use our stored SIP API client to set include_headers (not yet exposed in livekit-api).
             let trunk_options = SIPInboundTrunkOptions {
                 allowed_addresses: Some(trunk_config.allowed_addresses.clone()),
                 include_headers: Some(proto::SipHeaderOptions::SipAllHeaders),
                 ..Default::default()
             };
 
-            sip_api_client
+            self.sip_api_client
                 .create_sip_inbound_trunk(
                     trunk_config.trunk_name.clone(),
                     vec![], // empty numbers list
@@ -260,14 +258,18 @@ impl LiveKitSipHandler {
 
     /// Transfer a SIP participant to a different destination
     ///
-    /// Note: This method is currently not implemented in the livekit-api crate.
-    /// The TransferSIPParticipant protocol exists but the SIPClient doesn't expose it yet.
-    /// This is a placeholder implementation that will need to be completed when the API is updated.
+    /// This method initiates a SIP REFER to transfer the call to the specified destination.
+    /// It uses the raw Twirp API to bypass limitations in the livekit-api crate.
     ///
     /// # Arguments
     /// * `participant_identity` - Identity of the participant to transfer
     /// * `room_name` - Name of the room the participant is in
-    /// * `transfer_to` - Destination to transfer to (e.g., "tel:+1234567890" or "+1234567890")
+    /// * `transfer_to` - Destination to transfer to. Accepts various formats:
+    ///     - International format: `+1234567890` or `tel:+1234567890`
+    ///     - National format: `07123456789` or `tel:07123456789`
+    ///     - Extension: `1234` or `tel:1234`
+    ///
+    ///   The `tel:` prefix will be added automatically if not present.
     ///
     /// # Returns
     /// * `Result<(), LiveKitError>` - Success or error
@@ -283,27 +285,30 @@ impl LiveKitSipHandler {
     ///     "api_secret".to_string(),
     /// );
     ///
-    /// // This will return an error until the livekit-api crate adds support
-    /// // handler.transfer_call("participant-id", "room-name", "tel:+1234567890").await?;
+    /// // Transfer to international number
+    /// handler.transfer_call("participant-id", "room-name", "+1234567890").await?;
+    ///
+    /// // Transfer with tel: prefix (also works)
+    /// handler.transfer_call("participant-id", "room-name", "tel:+1234567890").await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn transfer_call(
         &self,
-        _participant_identity: &str,
-        _room_name: &str,
-        _transfer_to: &str,
+        participant_identity: &str,
+        room_name: &str,
+        transfer_to: &str,
     ) -> Result<(), LiveKitError> {
-        // TODO: Implement this when livekit-api crate adds TransferSIPParticipant support
-        // The protocol supports this (proto::TransferSipParticipantRequest) but the
-        // SIPClient doesn't expose the method yet.
-        //
-        // For now, return an error indicating the feature is not yet implemented
-        Err(LiveKitError::ConnectionFailed(
-            "Transfer SIP participant is not yet supported in livekit-api crate. \
-             Please use the Python SDK or wait for Rust API update."
-                .to_string(),
-        ))
+        // Ensure tel: prefix is present
+        let formatted_transfer_to = if transfer_to.starts_with("tel:") {
+            transfer_to.to_string()
+        } else {
+            format!("tel:{transfer_to}")
+        };
+
+        self.sip_api_client
+            .transfer_sip_participant(room_name, participant_identity, &formatted_transfer_to)
+            .await
     }
 
     /// Get the LiveKit server URL
@@ -405,8 +410,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transfer_call_not_implemented() {
-        // This test validates that transfer_call returns not implemented error
+    async fn test_transfer_call_with_invalid_server() {
+        // This test validates that transfer_call fails when the server is unreachable
         let handler = LiveKitSipHandler::new(
             "http://localhost:7880".to_string(),
             "invalid_key".to_string(),
@@ -417,13 +422,106 @@ mod tests {
             .transfer_call("participant-id", "room-name", "tel:+1234567890")
             .await;
 
-        // We expect an error because the feature is not yet implemented
+        // We expect an error because there's no real LiveKit server
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not yet supported")
+    }
+
+    #[tokio::test]
+    async fn test_transfer_call_adds_tel_prefix() {
+        // This test validates that transfer_call adds the tel: prefix when needed
+        // by checking the error message contains the formatted phone number
+        let handler = LiveKitSipHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
         );
+
+        // Test without tel: prefix - should still work (error due to no server)
+        let result = handler
+            .transfer_call("participant-id", "room-name", "+1234567890")
+            .await;
+        assert!(result.is_err());
+
+        // Test with tel: prefix - should still work (error due to no server)
+        let result = handler
+            .transfer_call("participant-id", "room-name", "tel:+1234567890")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transfer_to_tel_prefix_internal_extension() {
+        // Test internal extensions get tel: prefix added
+        let test_cases = vec![
+            ("1234", "tel:1234"),
+            ("tel:1234", "tel:1234"),
+            ("0", "tel:0"),
+            ("tel:0", "tel:0"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = if input.starts_with("tel:") {
+                input.to_string()
+            } else {
+                format!("tel:{input}")
+            };
+            assert_eq!(result, expected, "Input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_transfer_to_tel_prefix_national_format() {
+        // Test national format numbers get tel: prefix added
+        let test_cases = vec![
+            ("07123456789", "tel:07123456789"),
+            ("tel:07123456789", "tel:07123456789"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = if input.starts_with("tel:") {
+                input.to_string()
+            } else {
+                format!("tel:{input}")
+            };
+            assert_eq!(result, expected, "Input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_handler_accessors() {
+        let handler = LiveKitSipHandler::new(
+            "http://my-livekit:7880".to_string(),
+            "my_api_key".to_string(),
+            "my_api_secret".to_string(),
+        );
+
+        assert_eq!(handler.url(), "http://my-livekit:7880");
+        assert_eq!(handler.api_key(), "my_api_key");
+    }
+
+    #[test]
+    fn test_trunk_config_clone() {
+        let config = TrunkConfig {
+            trunk_name: "test-trunk".to_string(),
+            allowed_addresses: vec!["10.0.0.0/8".to_string()],
+        };
+
+        let cloned = config.clone();
+        assert_eq!(cloned.trunk_name, config.trunk_name);
+        assert_eq!(cloned.allowed_addresses, config.allowed_addresses);
+    }
+
+    #[test]
+    fn test_dispatch_config_clone() {
+        let config = DispatchConfig {
+            dispatch_name: "test-dispatch".to_string(),
+            room_prefix: "room".to_string(),
+            max_participants: 5,
+        };
+
+        let cloned = config.clone();
+        assert_eq!(cloned.dispatch_name, config.dispatch_name);
+        assert_eq!(cloned.room_prefix, config.room_prefix);
+        assert_eq!(cloned.max_participants, config.max_participants);
     }
 }

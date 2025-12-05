@@ -74,6 +74,24 @@ pub enum IncomingMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         debug: Option<serde_json::Value>,
     },
+    /// Transfer the current SIP call to another phone number.
+    ///
+    /// This command initiates a SIP REFER transfer for the current participant
+    /// in the LiveKit room. The participant identity and room name are derived
+    /// from the WebSocket connection state.
+    #[serde(rename = "sip_transfer")]
+    SIPTransfer {
+        /// The destination phone number to transfer the call to.
+        ///
+        /// Accepts phone numbers in various formats:
+        /// - International format with `+` prefix (e.g., "+1234567890")
+        /// - National format without prefix (e.g., "1234567890")
+        /// - Internal extensions (e.g., "1234")
+        ///
+        /// Validation is performed by the handler, not during deserialization.
+        #[cfg_attr(feature = "openapi", schema(example = "+1234567890"))]
+        transfer_to: String,
+    },
 }
 
 /// Unified message structure for all incoming messages from various sources
@@ -170,6 +188,16 @@ pub enum OutgoingMessage {
         /// Error message
         message: String,
     },
+    /// SIP transfer specific error
+    ///
+    /// This message is sent when a SIP transfer operation fails.
+    /// Clients can subscribe to this specific error type to handle
+    /// SIP transfer failures separately from other errors.
+    #[serde(rename = "sip_transfer_error")]
+    SIPTransferError {
+        /// Error message describing why the transfer failed
+        message: String,
+    },
 }
 
 /// Message routing for optimized throughput
@@ -261,5 +289,101 @@ mod tests {
             stream_id_pos < room_pos,
             "stream_id should appear before livekit_room_name in JSON"
         );
+    }
+
+    #[test]
+    fn test_sip_transfer_message_deserialization() {
+        let json = r#"{"type": "sip_transfer", "transfer_to": "+1234567890"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::SIPTransfer { transfer_to } => {
+                assert_eq!(transfer_to, "+1234567890");
+            }
+            _ => panic!("Expected SIPTransfer variant"),
+        }
+    }
+
+    #[test]
+    fn test_sip_transfer_message_without_plus_prefix() {
+        let json = r#"{"type": "sip_transfer", "transfer_to": "1234567890"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::SIPTransfer { transfer_to } => {
+                assert_eq!(transfer_to, "1234567890");
+            }
+            _ => panic!("Expected SIPTransfer variant"),
+        }
+    }
+
+    #[test]
+    fn test_sip_transfer_message_internal_extension() {
+        let json = r#"{"type": "sip_transfer", "transfer_to": "1234"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::SIPTransfer { transfer_to } => {
+                assert_eq!(transfer_to, "1234");
+            }
+            _ => panic!("Expected SIPTransfer variant"),
+        }
+    }
+
+    #[test]
+    fn test_sip_transfer_message_serialization() {
+        let msg = IncomingMessage::SIPTransfer {
+            transfer_to: "+1234567890".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"sip_transfer""#));
+        assert!(json.contains(r#""transfer_to":"+1234567890""#));
+    }
+
+    #[test]
+    fn test_sip_transfer_missing_field() {
+        let json = r#"{"type": "sip_transfer"}"#;
+        let result: Result<IncomingMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Should fail without transfer_to field");
+    }
+
+    #[test]
+    fn test_sip_transfer_empty_transfer_to() {
+        // Empty string is valid at deserialization time - validation happens later
+        let json = r#"{"type": "sip_transfer", "transfer_to": ""}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::SIPTransfer { transfer_to } => {
+                assert_eq!(transfer_to, "");
+            }
+            _ => panic!("Expected SIPTransfer variant"),
+        }
+    }
+
+    #[test]
+    fn test_sip_transfer_with_whitespace() {
+        // Whitespace is preserved at deserialization - trimming happens in validation
+        let json = r#"{"type": "sip_transfer", "transfer_to": "  +1234567890  "}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::SIPTransfer { transfer_to } => {
+                assert_eq!(transfer_to, "  +1234567890  ");
+            }
+            _ => panic!("Expected SIPTransfer variant"),
+        }
+    }
+
+    #[test]
+    fn test_sip_transfer_error_serialization() {
+        let error = OutgoingMessage::SIPTransferError {
+            message: "Invalid phone number".to_string(),
+        };
+
+        let json = serde_json::to_string(&error).expect("Should serialize");
+        assert!(json.contains(r#""type":"sip_transfer_error""#));
+        assert!(json.contains(r#""message":"Invalid phone number""#));
     }
 }

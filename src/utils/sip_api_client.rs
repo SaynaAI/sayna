@@ -158,4 +158,72 @@ impl SIPApiClient {
             )))
         }
     }
+
+    /// Transfer a SIP participant to a new destination.
+    ///
+    /// This initiates a SIP REFER to transfer the call to the specified destination.
+    /// The destination should be a phone number in tel: URI format (e.g., "tel:+1234567890").
+    ///
+    /// # Arguments
+    ///
+    /// * `room_name` - Name of the room containing the SIP participant
+    /// * `participant_identity` - Identity of the SIP participant to transfer
+    /// * `transfer_to` - Destination to transfer to (tel: URI format)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on successful transfer initiation, or an error if the transfer fails.
+    pub async fn transfer_sip_participant(
+        &self,
+        room_name: &str,
+        participant_identity: &str,
+        transfer_to: &str,
+    ) -> Result<(), LiveKitError> {
+        let url = self.twirp_endpoint("SIP", "TransferSIPParticipant");
+
+        let request = proto::TransferSipParticipantRequest {
+            room_name: room_name.to_string(),
+            participant_identity: participant_identity.to_string(),
+            transfer_to: transfer_to.to_string(),
+            play_dialtone: false,
+            headers: Default::default(),
+            ringing_timeout: None,
+        };
+
+        let auth_header = self
+            .auth_header(SIPGrants {
+                call: true,
+                ..Default::default()
+            })
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to create auth token: {e}"))
+            })?;
+
+        let mut buf = Vec::new();
+        request.encode(&mut buf).map_err(|e| {
+            LiveKitError::ConnectionFailed(format!("Failed to encode transfer request: {e}"))
+        })?;
+
+        let resp = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, "application/protobuf")
+            .header(AUTHORIZATION, auth_header)
+            .body(buf)
+            .send()
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to send transfer request: {e}"))
+            })?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(LiveKitError::ConnectionFailed(format!(
+                "LiveKit SIP transfer returned {status}: {body}"
+            )))
+        }
+    }
 }

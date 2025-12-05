@@ -19,6 +19,7 @@
 //! - `{"type": "speak", "text": "Hello world", "flush": true, "allow_interruption": true}` - Synthesize speech from text (flush and allow_interruption are optional, both default to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue (ignored if allow_interruption=false until audio finishes)
 //! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
+//! - `{"type": "sip_transfer", "transfer_to": "+1234567890"}` - Transfer active SIP call to another phone number
 //! - **Binary messages** - Raw audio data for transcription
 //!
 //! **Outgoing Messages:**
@@ -192,6 +193,15 @@
 //!   ws.send(JSON.stringify(message));
 //! }
 //!
+//! // Transfer SIP call to another phone number
+//! function transferCall(phoneNumber) {
+//!   const message = {
+//!     type: 'sip_transfer',
+//!     transfer_to: phoneNumber
+//!   };
+//!   ws.send(JSON.stringify(message));
+//! }
+//!
 //! // Play audio data from binary message
 //! function playAudioData(audioData) {
 //!   // Convert to ArrayBuffer if needed
@@ -223,7 +233,10 @@
 //!   // Send custom messages through LiveKit
 //!   sendMessage('Hello everyone in the room!', 'user');        // Send to default topic
 //!   sendMessage('This is a chat message', 'user', 'chat');     // Send to specific topic
-//!   
+//!
+//!   // Transfer SIP call (requires active SIP participant in room)
+//!   transferCall('+1234567890');  // Transfer to international number
+//!
 //!   // Send binary audio data (only if audio=true)
 //!   const mockAudio = new ArrayBuffer(1024);
 //!   sendAudio(mockAudio);
@@ -314,6 +327,13 @@
 //!                         // Send binary audio data
 //!                         let audio_data = vec![0u8; 1024]; // Mock audio data
 //!                         write.send(Message::Binary(audio_data.into())).await?;
+//!
+//!                         // Transfer SIP call (requires active SIP participant)
+//!                         let transfer_msg = json!({
+//!                             "type": "sip_transfer",
+//!                             "transfer_to": "+1234567890"
+//!                         });
+//!                         write.send(Message::Text(transfer_msg.to_string().into())).await?;
 //!                     }
 //!                     Some("stt_result") => {
 //!                         println!("STT Result: {}", parsed["transcript"]);
