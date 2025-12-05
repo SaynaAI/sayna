@@ -60,13 +60,22 @@ providers:
 
 # TTS Provider Configuration (optional - can also be set via WebSocket config)
 # tts:
-#   provider: elevenlabs  # Options: "deepgram", "elevenlabs", "google", "azure", "cartesia"
+#   provider: elevenlabs  # Options: "deepgram", "elevenlabs", "google", "azure", "cartesia", "kokoro"
 #   # Cartesia-specific settings (only used when provider is "cartesia")
 #   cartesia:
 #     model: sonic-3           # Options: sonic-3, sonic-3-2025-10-27
 #     voice_id: ""             # Voice UUID from Cartesia voice library
 #     audio_format: linear16   # Options: linear16/pcm, wav, mp3
 #     sample_rate: 24000       # Options: 8000, 16000, 22050, 24000, 44100, 48000
+#
+#   # Kokoro TTS settings (local ONNX-based, requires kokoro-tts feature and eSpeak-NG)
+#   # kokoro:
+#   #   voice_id: af_bella       # Voice: af_bella, af_nicole, af_sarah, af_sky,
+#   #                            #        am_adam, am_michael, bf_emma, bf_isabella,
+#   #                            #        bm_george, bm_lewis
+#   #   speaking_rate: 1.0       # Range: 0.1 to 5.0 (default: 1.0)
+#   #   # Voice mixing: blend voices with weighted syntax
+#   #   # Example: "af_bella.5+am_adam.5" = 50% Bella + 50% Adam
 
 # LiveKit recording configuration (S3)
 recording:

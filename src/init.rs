@@ -23,18 +23,20 @@
 //! });
 //! ```
 
-#[cfg(feature = "turn-detect")]
+#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 
-#[cfg(feature = "turn-detect")]
+#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
 use crate::config::ServerConfig;
+#[cfg(feature = "kokoro-tts")]
+use crate::core::tts::kokoro::assets as kokoro_assets;
 #[cfg(feature = "turn-detect")]
 use crate::core::turn_detect::{TurnDetectorConfig, assets};
 
 /// Download and prepare all assets required for runtime execution.
-#[cfg(feature = "turn-detect")]
+#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
 pub async fn run() -> Result<()> {
     let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
     let cache_path = config
@@ -43,26 +45,44 @@ pub async fn run() -> Result<()> {
         .context("CACHE_PATH environment variable must be set to run `sayna init`")?
         .clone();
 
-    let turn_config = TurnDetectorConfig {
-        cache_path: Some(cache_path.clone()),
-        ..Default::default()
-    };
+    #[cfg(feature = "turn-detect")]
+    {
+        let turn_config = TurnDetectorConfig {
+            cache_path: Some(cache_path.clone()),
+            ..Default::default()
+        };
 
-    tracing::info!(
-        "Preparing turn detector assets using cache path: {:?}",
-        cache_path
-    );
-    assets::download_assets(&turn_config).await?;
+        tracing::info!(
+            "Preparing turn detector assets using cache path: {:?}",
+            cache_path
+        );
+        assets::download_assets(&turn_config).await?;
+        tracing::info!("Turn detector assets downloaded successfully");
+    }
 
-    tracing::info!("Turn detector assets downloaded successfully");
+    #[cfg(feature = "kokoro-tts")]
+    {
+        let kokoro_cache = cache_path.join("kokoro");
+        let kokoro_config = kokoro_assets::KokoroAssetConfig {
+            cache_path: kokoro_cache.clone(),
+            ..Default::default()
+        };
+
+        tracing::info!(
+            "Preparing Kokoro TTS assets using cache path: {:?}",
+            kokoro_cache
+        );
+        kokoro_assets::download_assets(&kokoro_config).await?;
+        tracing::info!("Kokoro TTS assets downloaded successfully");
+    }
 
     Ok(())
 }
 
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(any(feature = "turn-detect", feature = "kokoro-tts")))]
 pub async fn run() -> Result<()> {
     Err(anyhow!(
-        "`sayna init` requires the `turn-detect` feature. \
-         Rebuild with `--features turn-detect` to download turn detector assets."
+        "`sayna init` requires the `turn-detect` or `kokoro-tts` feature. \
+         Rebuild with `--features turn-detect` or `--features kokoro-tts` to download assets."
     ))
 }

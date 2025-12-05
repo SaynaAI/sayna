@@ -18,6 +18,14 @@ noise-filter = [
 openapi = [
     "dep:utoipa",
 ]
+kokoro-tts = [
+    "dep:ort",
+    "ort/ndarray",
+    "dep:ndarray16",
+    "dep:ndarray-npy",
+    "dep:espeak-rs",
+    "dep:lazy_static",
+]
 
 [dependencies]
 async-trait = "0.1.88"
@@ -103,9 +111,17 @@ time = ">=0.3.35"
 ndarray = { version = "0.15.6", optional = true }
 num_cpus = { version = "1.17.0", optional = true }
 
-# Turn detection dependencies
+# Turn detection and Kokoro TTS dependencies (ONNX-based)
 ort = { version = "2.0.0-rc.10", features = ["load-dynamic", "download-binaries"], optional = true }
 tokenizers = { version = "0.22.1", default-features = false, features = ["onig"], optional = true }
+
+# Kokoro TTS specific dependencies
+# ndarray 0.16 is required for compatibility with ndarray-npy 0.9 and ort's ndarray feature
+# We use package renaming to avoid conflicts with ndarray 0.15.6 used by DeepFilterNet
+ndarray16 = { package = "ndarray", version = "0.16", optional = true }
+ndarray-npy = { version = "0.9", optional = true }
+espeak-rs = { version = "0.1.9", optional = true }
+lazy_static = { version = "1.5", optional = true }
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"

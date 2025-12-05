@@ -41,8 +41,9 @@ cargo run
 - `turn-detect` (default): ONNX-based turn detection. Required for `sayna init`.
 - `noise-filter` (default): DeepFilterNet noise suppression. Disable to reduce dependencies.
 - `openapi`: OpenAPI 3.1 specification generation and documentation endpoints using utoipa crate.
+- `kokoro-tts`: Local ONNX-based TTS using Kokoro 82M model. Requires eSpeak-NG system dependency.
 
-Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect,openapi`.
+Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect,openapi,kokoro-tts`.
 
 ## High-Level Architecture
 
@@ -70,7 +71,7 @@ Always consult these rule files when implementing new features or modifying exis
    - Trait-based abstraction for pluggable providers
    - Factory pattern for provider instantiation
    - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket), Cartesia (WebSocket)
-   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS, Cartesia
+   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS, Cartesia, Kokoro (local ONNX)
    - Providers implement `STTProvider` or `TTSProvider` traits
 
 3. **WebSocket Handler** (`src/handlers/ws.rs`):
@@ -433,6 +434,53 @@ Voice names follow the pattern: `{language}-{region}-{name}Neural`
 - `alaw` - 8-bit A-law (telephony, Europe)
 
 See [docs/azure-tts.md](docs/azure-tts.md) for detailed Azure TTS integration documentation.
+
+### Kokoro TTS Integration (Local ONNX)
+
+Kokoro TTS is a local ONNX-based text-to-speech provider that runs entirely on your machine without requiring cloud APIs.
+
+**Key Features:**
+- 82M parameter neural model for high-quality speech
+- Local inference using ONNX Runtime (no API keys needed)
+- 10 English voices (American and British)
+- 24kHz mono audio output
+- eSpeak-NG for text-to-phoneme conversion
+- Optional word-level timestamps
+- Voice mixing support for blending multiple voices
+
+**System Requirements:**
+- eSpeak-NG installed (`apt-get install espeak-ng libespeak-ng-dev`)
+- `kokoro-tts` feature flag enabled
+
+**Configuration:**
+```rust
+let config = TTSConfig {
+    provider: "kokoro".to_string(),
+    voice_id: Some("af_bella".to_string()),  // American Female - Bella
+    speaking_rate: Some(1.0),                 // Range: 0.1 to 5.0
+    ..Default::default()
+};
+```
+
+**Available Voices:**
+- American Female: `af_bella`, `af_nicole`, `af_sarah`, `af_sky`
+- American Male: `am_adam`, `am_michael`
+- British Female: `bf_emma`, `bf_isabella`
+- British Male: `bm_george`, `bm_lewis`
+
+**Voice Mixing:**
+Blend multiple voices using weighted syntax:
+```rust
+voice_id: Some("af_bella.5+am_adam.5".to_string())  // 50% Bella + 50% Adam
+```
+
+**Asset Download:**
+```bash
+# Download model and voice files
+CACHE_PATH=/app/cache cargo run --features kokoro-tts -- init
+```
+
+See [docs/kokoro-tts.md](docs/kokoro-tts.md) for detailed Kokoro TTS integration documentation.
 
 ## API Endpoints
 
