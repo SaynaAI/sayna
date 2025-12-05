@@ -723,6 +723,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            ..Default::default()
         };
 
         let stt = <DeepgramSTT as BaseSTT>::new(config).unwrap();
@@ -742,6 +743,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            ..Default::default()
         };
 
         let result = <DeepgramSTT as BaseSTT>::new(config);
@@ -766,6 +768,7 @@ mod tests {
                 channels: 1,
                 punctuation: false, // Set to false here for testing
                 encoding: "linear16".to_string(),
+                ..Default::default()
             },
             interim_results: true,
             smart_format: false,

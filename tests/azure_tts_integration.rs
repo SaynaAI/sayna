@@ -66,6 +66,7 @@ fn create_azure_tts_config() -> Option<TTSConfig> {
         request_timeout: Some(60),
         pronunciations: Vec::new(),
         request_pool_size: Some(4),
+        ..Default::default()
     })
 }
 

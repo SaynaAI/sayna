@@ -223,6 +223,7 @@ When adding new features:
 - **ElevenLabs** (`elevenlabs.rs`): WebSocket-based streaming with JSON messages, uses `tokio-tungstenite`
 - **Microsoft Azure** (`azure/`): WebSocket-based streaming, uses `tokio-tungstenite` with Azure Speech Services SDK protocol
 - **Cartesia** (`cartesia/`): WebSocket-based streaming with raw binary audio, uses `tokio-tungstenite`
+- **Whisper** (`whisper/`): Local ONNX-based transcription, no API required, uses `ort` ONNX Runtime
 
 See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
 
@@ -300,6 +301,51 @@ let config = STTConfig {
 ISO-639-1 codes: `en`, `zh`, `de`, `es`, `ru`, `ko`, `fr`, `ja`, `pt`, `tr`, `pl`, and many more.
 
 See [docs/cartesia-stt.md](docs/cartesia-stt.md) for detailed API reference.
+
+### Whisper STT Integration (Local ONNX)
+
+Whisper STT is a local ONNX-based speech-to-text provider that runs entirely on your machine without requiring cloud APIs.
+
+**Key Features:**
+- Local inference using ONNX Runtime (no API keys needed)
+- Support for whisper-base (~150MB) and whisper-large-v3 (~3GB) models
+- Multilingual support with 99 languages
+- Automatic language detection
+- 16kHz mono PCM audio input
+- Non-streaming (batch) transcription
+
+**System Requirements:**
+- `whisper-stt` feature flag enabled
+- Model files downloaded via `sayna init`
+
+**Configuration:**
+```rust
+let config = STTConfig {
+    provider: "whisper".to_string(),
+    api_key: String::new(),  // Not required for local model
+    language: "en".to_string(),  // Or empty for auto-detection
+    sample_rate: 16000,
+    channels: 1,
+    encoding: "linear16".to_string(),
+    model: "whisper-base".to_string(),  // Or "whisper-large-v3"
+    ..Default::default()
+};
+```
+
+**Available Models:**
+- `whisper-base` - ~150MB, good balance of speed and accuracy (default)
+- `whisper-large-v3` - ~3GB, highest accuracy for multilingual transcription
+
+**Supported Languages:**
+99 languages including: `en`, `zh`, `de`, `es`, `ru`, `ko`, `fr`, `ja`, `pt`, `tr`, `pl`, `ar`, `hi`, and many more.
+
+**Asset Download:**
+```bash
+# Download model files
+CACHE_PATH=/app/cache cargo run --features whisper-stt -- init
+```
+
+See [docs/whisper-stt.md](docs/whisper-stt.md) for detailed Whisper STT integration documentation.
 
 ### Cartesia TTS Integration
 

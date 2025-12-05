@@ -258,6 +258,8 @@ impl ServerConfig {
                     "Cartesia API key not configured in server environment".to_string()
                 })
             }
+            "whisper" => Ok(String::new()),
+            "kokoro" => Ok(String::new()),
             _ => Err(format!("Unsupported provider: {provider}")),
         }
     }

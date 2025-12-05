@@ -21,7 +21,9 @@ use std::sync::Arc;
 fn test_elevenlabs_in_supported_providers() {
     let providers = get_supported_stt_providers();
     assert!(providers.contains(&"elevenlabs"));
-    assert_eq!(providers.len(), 5); // deepgram, google, elevenlabs, microsoft-azure, cartesia
+    // At least 5 providers: deepgram, google, elevenlabs, microsoft-azure, cartesia
+    // May include more with feature flags (e.g., whisper)
+    assert!(providers.len() >= 5);
 }
 
 /// Test provider creation via string name
@@ -36,6 +38,7 @@ fn test_create_elevenlabs_provider_by_name() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        ..Default::default()
     };
 
     let result = create_stt_provider("elevenlabs", config);
@@ -61,6 +64,7 @@ fn test_create_elevenlabs_provider_by_enum() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        ..Default::default()
     };
 
     let result = create_stt_provider_from_enum(STTProvider::ElevenLabs, config);
@@ -283,6 +287,7 @@ async fn test_real_connection() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "elevenlabs".to_string(),
+        ..Default::default()
     };
 
     let mut stt = ElevenLabsSTT::new(config).unwrap();
@@ -339,6 +344,7 @@ async fn test_transcription_with_audio() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "elevenlabs".to_string(),
+        ..Default::default()
     };
 
     let mut stt = ElevenLabsSTT::new(config).unwrap();

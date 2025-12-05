@@ -611,6 +611,7 @@ mod tests {
             request_timeout: Some(60),
             pronunciations: Vec::new(),
             request_pool_size: Some(4),
+            ..Default::default()
         }
     }
 

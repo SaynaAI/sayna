@@ -32,6 +32,7 @@ fn test_google_stt_new_missing_project_id() {
         channels: 1,
         punctuation: true,
         encoding: "linear16".to_string(),
+        ..Default::default()
     };
 
     let result = <GoogleSTT as BaseSTT>::new(config);
@@ -61,6 +62,7 @@ fn test_google_stt_new_with_project_id_in_credentials() {
         channels: 1,
         punctuation: true,
         encoding: "linear16".to_string(),
+        ..Default::default()
     };
 
     let result = <GoogleSTT as BaseSTT>::new(config);
@@ -86,6 +88,7 @@ async fn test_google_stt_new_with_project_id_in_model() {
         channels: 1,
         punctuation: true,
         encoding: "linear16".to_string(),
+        ..Default::default()
     };
 
     let result = <GoogleSTT as BaseSTT>::new(config);
@@ -169,6 +172,7 @@ fn test_google_stt_create_google_config() {
         channels: 1,
         punctuation: true,
         encoding: "linear16".to_string(),
+        ..Default::default()
     };
 
     let google_config =
@@ -305,6 +309,7 @@ fn create_test_stt_config() -> STTConfig {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "latest_long".to_string(),
+        ..Default::default()
     }
 }
 

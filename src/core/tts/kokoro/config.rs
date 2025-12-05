@@ -35,8 +35,14 @@ pub struct KokoroConfig {
     #[serde(default = "default_speaking_rate")]
     pub speaking_rate: f32,
 
-    /// Cache directory for downloaded assets
-    /// If not set, uses XDG_CACHE_HOME/kokoro or ~/.cache/kokoro
+    /// Output sample rate in Hz (default: 24000, Kokoro's native rate)
+    /// Supported values: 8000, 16000, 22050, 24000, 44100, 48000
+    /// Audio will be resampled from native 24kHz to this rate.
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+
+    /// Cache directory for downloaded assets (required)
+    /// Must be set from ServerConfig.cache_path
     #[serde(default)]
     pub cache_path: Option<PathBuf>,
 }
@@ -49,11 +55,16 @@ fn default_speaking_rate() -> f32 {
     1.0
 }
 
+fn default_sample_rate() -> u32 {
+    super::KOKORO_SAMPLE_RATE
+}
+
 impl Default for KokoroConfig {
     fn default() -> Self {
         Self {
             voice_id: super::DEFAULT_VOICE.to_string(),
             speaking_rate: 1.0,
+            sample_rate: super::KOKORO_SAMPLE_RATE,
             cache_path: None,
         }
     }
@@ -93,14 +104,21 @@ impl KokoroConfig {
     }
 
     /// Get the asset configuration
-    pub fn to_asset_config(&self) -> assets::KokoroAssetConfig {
-        assets::KokoroAssetConfig {
-            cache_path: self
-                .cache_path
-                .clone()
-                .unwrap_or_else(assets::get_default_cache_path),
-        }
+    ///
+    /// Returns an error if cache_path is not configured. The cache path should be
+    /// set from ServerConfig.cache_path when creating the TTS provider.
+    pub fn to_asset_config(&self) -> TTSResult<assets::KokoroAssetConfig> {
+        let cache_path = self.cache_path.clone().ok_or_else(|| {
+            TTSError::InvalidConfiguration(
+                "Kokoro cache_path not configured. Set CACHE_PATH environment variable or configure cache.path in config.yaml".to_string()
+            )
+        })?;
+
+        Ok(assets::KokoroAssetConfig { cache_path })
     }
+
+    /// Supported output sample rates
+    const SUPPORTED_SAMPLE_RATES: [u32; 6] = [8000, 16000, 22050, 24000, 44100, 48000];
 
     /// Create a KokoroConfig from a generic TTSConfig
     pub fn from_tts_config(config: &TTSConfig) -> TTSResult<Self> {
@@ -121,6 +139,21 @@ impl KokoroConfig {
             }
             kokoro_config.speaking_rate = rate;
         }
+
+        // Sample rate with validation
+        if let Some(sample_rate) = config.sample_rate {
+            if !Self::SUPPORTED_SAMPLE_RATES.contains(&sample_rate) {
+                return Err(TTSError::InvalidConfiguration(format!(
+                    "Unsupported sample rate {}. Supported: {:?}",
+                    sample_rate,
+                    Self::SUPPORTED_SAMPLE_RATES
+                )));
+            }
+            kokoro_config.sample_rate = sample_rate;
+        }
+
+        // Get cache_path from TTSConfig - must be set for Kokoro
+        kokoro_config.cache_path = config.cache_path.clone().map(|p| p.join("kokoro"));
 
         Ok(kokoro_config)
     }
@@ -209,30 +242,37 @@ mod tests {
         // (that happens at connect time via validate_voice)
         let config = KokoroConfig {
             voice_id: "nonexistent_voice".to_string(),
+            cache_path: Some(PathBuf::from("/tmp/test-cache")),
             ..Default::default()
         };
         // Basic validation should pass (voice ID is not empty)
         assert!(config.validate().is_ok());
 
         // But validate_voice should fail when checked against asset config
-        let asset_config = config.to_asset_config();
+        let asset_config = config.to_asset_config().unwrap();
         assert!(config.validate_voice(&asset_config).is_err());
     }
 
     #[test]
-    fn test_to_asset_config_default() {
+    fn test_to_asset_config_no_cache_path_returns_error() {
         let config = KokoroConfig::default();
-        let asset_config = config.to_asset_config();
-        assert!(asset_config.cache_path.to_string_lossy().contains("kokoro"));
+        let result = config.to_asset_config();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cache_path not configured")
+        );
     }
 
     #[test]
-    fn test_to_asset_config_custom_path() {
+    fn test_to_asset_config_with_cache_path() {
         let config = KokoroConfig {
             cache_path: Some(PathBuf::from("/custom/cache")),
             ..Default::default()
         };
-        let asset_config = config.to_asset_config();
+        let asset_config = config.to_asset_config().unwrap();
         assert_eq!(asset_config.cache_path, PathBuf::from("/custom/cache"));
     }
 

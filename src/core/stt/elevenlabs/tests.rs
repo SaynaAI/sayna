@@ -985,6 +985,7 @@ mod base_stt_tests {
             encoding: "linear16".to_string(),
             model: "".to_string(),
             provider: "elevenlabs".to_string(),
+            ..Default::default()
         };
 
         let stt = <ElevenLabsSTT as BaseSTT>::new(config);
@@ -1192,6 +1193,7 @@ mod base_stt_tests {
             encoding: "opus".to_string(),
             model: "custom".to_string(),
             provider: "elevenlabs".to_string(),
+            ..Default::default()
         };
 
         let stt = <ElevenLabsSTT as BaseSTT>::new(config).unwrap();

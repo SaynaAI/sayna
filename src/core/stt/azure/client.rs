@@ -881,6 +881,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            ..Default::default()
         };
 
         let stt = <AzureSTT as BaseSTT>::new(config).unwrap();
@@ -899,6 +900,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            ..Default::default()
         };
 
         let result = <AzureSTT as BaseSTT>::new(config);
@@ -921,6 +923,7 @@ mod tests {
             punctuation: false,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            ..Default::default()
         };
 
         let stt = <AzureSTT as BaseSTT>::new(config).unwrap();

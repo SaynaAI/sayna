@@ -266,9 +266,10 @@ async fn initialize_voice_manager(
         }
     };
 
-    // Create full configs with API keys
-    let stt_config = stt_ws_config.to_stt_config(stt_api_key);
-    let tts_config = tts_ws_config.to_tts_config(tts_api_key);
+    // Create full configs with API keys and cache path
+    let cache_path = app_state.config.cache_path.clone();
+    let stt_config = stt_ws_config.to_stt_config(stt_api_key, cache_path.clone());
+    let tts_config = tts_ws_config.to_tts_config(tts_api_key, cache_path);
 
     // Create voice manager configuration with default speech final settings
     let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
@@ -559,6 +560,7 @@ async fn register_final_tts_callback(
                     if queue
                         .queue(crate::livekit::LiveKitOperation::SendAudio {
                             audio_data: audio_data.data.clone(),
+                            sample_rate: audio_data.sample_rate,
                             response_tx: tx,
                         })
                         .await
@@ -589,7 +591,7 @@ async fn register_final_tts_callback(
                         Ok(client) => {
                             // Check if LiveKit is connected before attempting to send
                             if client.is_connected() {
-                                match client.send_tts_audio(audio_data.data.clone()).await {
+                                match client.send_tts_audio(audio_data.data.clone(), audio_data.sample_rate).await {
                                     Ok(()) => {
                                         debug!(
                                             "TTS audio successfully sent to LiveKit: {} bytes",

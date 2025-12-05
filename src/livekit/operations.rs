@@ -26,6 +26,8 @@ pub enum LiveKitOperation {
     /// Send TTS audio data
     SendAudio {
         audio_data: Vec<u8>,
+        /// Sample rate of the audio data (e.g., 24000 for Kokoro TTS)
+        sample_rate: u32,
         response_tx: oneshot::Sender<Result<(), AppError>>,
     },
     /// Send a data message
@@ -211,6 +213,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let op = LiveKitOperation::SendAudio {
             audio_data: vec![1, 2, 3],
+            sample_rate: 24000,
             response_tx: tx,
         };
 
@@ -297,6 +300,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let op = LiveKitOperation::SendAudio {
             audio_data: vec![],
+            sample_rate: 24000,
             response_tx: tx,
         };
 

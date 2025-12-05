@@ -119,7 +119,7 @@ async fn test_livekit_client_send_tts_audio_not_connected() {
     let client = LiveKitClient::new(config);
 
     let audio_data = vec![0u8; 1024];
-    let result = client.send_tts_audio(audio_data).await;
+    let result = client.send_tts_audio(audio_data, 24000).await;
 
     assert!(result.is_err());
 }
@@ -131,7 +131,7 @@ async fn test_livekit_client_send_tts_audio_no_source() {
     client.set_connected(true).await;
 
     let audio_data = vec![0u8; 1024];
-    let result = client.send_tts_audio(audio_data.clone()).await;
+    let result = client.send_tts_audio(audio_data.clone(), 24000).await;
 
     assert!(result.is_ok());
     let queue_len = client.get_audio_queue_len().await;
@@ -216,7 +216,7 @@ async fn test_livekit_client_audio_queue_drain_success() {
     // Queue multiple audio frames
     let audio_data = vec![0u8, 1u8, 2u8, 3u8];
     for _ in 0..3 {
-        let _ = client.send_tts_audio(audio_data.clone()).await;
+        let _ = client.send_tts_audio(audio_data.clone(), 24000).await;
     }
 
     // Verify frames were queued
@@ -261,7 +261,7 @@ async fn test_livekit_client_reconnect_audio_queue_preservation() {
 
     // Queue audio data
     let audio_data = vec![0u8; 48];
-    let _ = client.send_tts_audio(audio_data.clone()).await;
+    let _ = client.send_tts_audio(audio_data.clone(), 24000).await;
     assert_eq!(client.get_audio_queue_len().await, 1);
 
     // Audio should remain queued after status changes

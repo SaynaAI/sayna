@@ -344,7 +344,7 @@ fn test_stt_ws_config_conversion() {
     };
 
     let api_key = "test_api_key".to_string();
-    let stt_config = stt_ws_config.to_stt_config(api_key.clone());
+    let stt_config = stt_ws_config.to_stt_config(api_key.clone(), None);
 
     assert_eq!(stt_config.provider, "deepgram");
     assert_eq!(stt_config.api_key, api_key);
@@ -369,7 +369,7 @@ fn test_tts_ws_config_conversion_with_all_values() {
     };
 
     let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config(api_key.clone(), None);
 
     assert_eq!(tts_config.provider, "deepgram");
     assert_eq!(tts_config.api_key, api_key);
@@ -396,7 +396,7 @@ fn test_tts_ws_config_conversion_with_defaults() {
     };
 
     let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config(api_key.clone(), None);
 
     assert_eq!(tts_config.provider, "deepgram");
     assert_eq!(tts_config.api_key, api_key);
@@ -938,7 +938,7 @@ fn test_tts_ws_config_conversion_mixed_values() {
     };
 
     let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config(api_key.clone(), None);
 
     assert_eq!(tts_config.provider, "deepgram");
     assert_eq!(tts_config.api_key, api_key);

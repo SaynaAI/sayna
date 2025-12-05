@@ -645,6 +645,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let stt = <CartesiaSTT as BaseSTT>::new(config).unwrap();
@@ -663,6 +664,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let result = <CartesiaSTT as BaseSTT>::new(config);
@@ -685,6 +687,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let mut stt = <CartesiaSTT as BaseSTT>::new(config).unwrap();
@@ -718,6 +721,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let mut stt = <CartesiaSTT as BaseSTT>::new(config).unwrap();
@@ -737,6 +741,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let mut stt = <CartesiaSTT as BaseSTT>::new(config).unwrap();

@@ -186,6 +186,10 @@ pub struct TTSConfig {
     pub pronunciations: Vec<Pronunciation>,
     /// Request pool size for concurrent HTTP requests
     pub request_pool_size: Option<usize>,
+    /// Cache directory for local models (e.g., Kokoro)
+    /// Must be set from ServerConfig.cache_path for local providers
+    #[serde(default)]
+    pub cache_path: Option<std::path::PathBuf>,
 }
 
 impl Default for TTSConfig {
@@ -202,6 +206,7 @@ impl Default for TTSConfig {
             request_timeout: Some(60),
             pronunciations: Vec::new(),
             request_pool_size: Some(4),
+            cache_path: None,
         }
     }
 }

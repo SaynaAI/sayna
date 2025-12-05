@@ -23,20 +23,37 @@
 //! });
 //! ```
 
-#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
+#[cfg(any(
+    feature = "turn-detect",
+    feature = "kokoro-tts",
+    feature = "whisper-stt"
+))]
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 
-#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
+#[cfg(any(
+    feature = "turn-detect",
+    feature = "kokoro-tts",
+    feature = "whisper-stt"
+))]
 use crate::config::ServerConfig;
+#[cfg(feature = "whisper-stt")]
+use crate::core::stt::whisper::{
+    DEFAULT_MODEL as WHISPER_DEFAULT_MODEL, WhisperAssetConfig,
+    download_assets as whisper_download_assets,
+};
 #[cfg(feature = "kokoro-tts")]
 use crate::core::tts::kokoro::assets as kokoro_assets;
 #[cfg(feature = "turn-detect")]
 use crate::core::turn_detect::{TurnDetectorConfig, assets};
 
 /// Download and prepare all assets required for runtime execution.
-#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
+#[cfg(any(
+    feature = "turn-detect",
+    feature = "kokoro-tts",
+    feature = "whisper-stt"
+))]
 pub async fn run() -> Result<()> {
     let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
     let cache_path = config
@@ -75,13 +92,38 @@ pub async fn run() -> Result<()> {
         tracing::info!("Kokoro TTS assets downloaded successfully");
     }
 
+    #[cfg(feature = "whisper-stt")]
+    {
+        let whisper_cache = cache_path.join("whisper");
+        // Check for WHISPER_MODEL environment variable, default to whisper-base
+        let model_name =
+            std::env::var("WHISPER_MODEL").unwrap_or_else(|_| WHISPER_DEFAULT_MODEL.to_string());
+
+        let whisper_config = WhisperAssetConfig {
+            cache_path: whisper_cache.clone(),
+            model_name: model_name.clone(),
+        };
+
+        tracing::info!(
+            "Preparing Whisper STT assets from HuggingFace using cache path: {:?}",
+            whisper_cache
+        );
+        tracing::info!("Downloading Whisper model: {}", model_name);
+        whisper_download_assets(&whisper_config).await?;
+        tracing::info!("Whisper STT assets downloaded successfully");
+    }
+
     Ok(())
 }
 
-#[cfg(not(any(feature = "turn-detect", feature = "kokoro-tts")))]
+#[cfg(not(any(
+    feature = "turn-detect",
+    feature = "kokoro-tts",
+    feature = "whisper-stt"
+)))]
 pub async fn run() -> Result<()> {
     Err(anyhow!(
-        "`sayna init` requires the `turn-detect` or `kokoro-tts` feature. \
-         Rebuild with `--features turn-detect` or `--features kokoro-tts` to download assets."
+        "`sayna init` requires the `turn-detect`, `kokoro-tts`, or `whisper-stt` feature. \
+         Rebuild with `--features turn-detect`, `--features kokoro-tts`, or `--features whisper-stt` to download assets."
     ))
 }

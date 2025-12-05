@@ -45,6 +45,10 @@ pub struct STTConfig {
     pub encoding: String,
     /// Model to use for transcription
     pub model: String,
+    /// Cache directory for local models (e.g., Whisper)
+    /// Must be set from ServerConfig.cache_path for local providers
+    #[serde(default)]
+    pub cache_path: Option<std::path::PathBuf>,
 }
 
 impl Default for STTConfig {
@@ -58,6 +62,7 @@ impl Default for STTConfig {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            cache_path: None,
         }
     }
 }
@@ -323,6 +328,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            ..Default::default()
         };
 
         let stt = MockSTT::new(config.clone()).unwrap();

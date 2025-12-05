@@ -118,6 +118,7 @@ fn test_build_config_request() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "latest_long".to_string(),
+            ..Default::default()
         },
         project_id: "test-project".to_string(),
         location: "global".to_string(),

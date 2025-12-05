@@ -27,7 +27,9 @@ use std::sync::Arc;
 fn test_azure_in_supported_providers() {
     let providers = get_supported_stt_providers();
     assert!(providers.contains(&"microsoft-azure"));
-    assert_eq!(providers.len(), 5); // deepgram, google, elevenlabs, microsoft-azure, cartesia
+    // At least 5 providers: deepgram, google, elevenlabs, microsoft-azure, cartesia
+    // May include more with feature flags (e.g., whisper)
+    assert!(providers.len() >= 5);
 }
 
 /// Test provider creation via string name
@@ -42,6 +44,7 @@ fn test_create_azure_provider_by_name() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        ..Default::default()
     };
 
     let result = create_stt_provider("microsoft-azure", config);
@@ -558,6 +561,7 @@ async fn test_azure_real_connection() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "microsoft-azure".to_string(),
+        ..Default::default()
     };
 
     let mut stt = AzureSTT::new(config).unwrap();
@@ -621,6 +625,7 @@ async fn test_azure_send_silence_audio() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "microsoft-azure".to_string(),
+        ..Default::default()
     };
 
     // Parse and set region

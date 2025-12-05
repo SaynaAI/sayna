@@ -22,34 +22,21 @@ const ONNX_DIR: &str = "onnx";
 /// Voices directory name
 const VOICES_DIR: &str = "voices";
 
-/// Default cache subdirectory
-const CACHE_SUBDIR: &str = "kokoro";
-
 /// Default voice for Kokoro TTS
 pub const DEFAULT_VOICE: &str = "af_bella";
 
 /// Kokoro asset configuration
 #[derive(Debug, Clone)]
 pub struct KokoroAssetConfig {
-    /// Path to the cache directory
+    /// Path to the cache directory (must include the "kokoro" subdirectory)
     pub cache_path: PathBuf,
 }
 
-impl Default for KokoroAssetConfig {
-    fn default() -> Self {
-        Self {
-            cache_path: get_default_cache_path(),
-        }
+impl KokoroAssetConfig {
+    /// Create a new config with the specified cache path
+    pub fn new(cache_path: PathBuf) -> Self {
+        Self { cache_path }
     }
-}
-
-/// Get the default cache path for Kokoro assets
-pub fn get_default_cache_path() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join(CACHE_SUBDIR)
 }
 
 /// Download all Kokoro assets by cloning the HuggingFace repository
@@ -183,21 +170,33 @@ pub fn list_available_voices(config: &KokoroAssetConfig) -> Vec<String> {
     voices
 }
 
+/// Check if Kokoro assets are available (model and at least one voice)
+///
+/// This is used to determine if preloading should be attempted during startup.
+pub fn are_assets_available(config: &KokoroAssetConfig) -> bool {
+    // Check if model exists
+    let model_exists = config
+        .cache_path
+        .join(ONNX_DIR)
+        .join(MODEL_FILENAME)
+        .exists();
+
+    // Check if default voice exists
+    let default_voice_exists = is_voice_available(config, DEFAULT_VOICE);
+
+    model_exists && default_voice_exists
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[test]
-    fn test_default_config() {
-        let config = KokoroAssetConfig::default();
-        assert!(config.cache_path.to_string_lossy().contains("kokoro"));
-    }
-
-    #[test]
-    fn test_default_cache_path() {
-        let path = get_default_cache_path();
-        assert!(path.to_string_lossy().contains("kokoro"));
+    fn test_new_config() {
+        let dir = tempdir().unwrap();
+        let config = KokoroAssetConfig::new(dir.path().to_path_buf());
+        assert_eq!(config.cache_path, dir.path().to_path_buf());
     }
 
     #[test]

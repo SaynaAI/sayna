@@ -1,16 +1,14 @@
 //! Voice style management for Kokoro TTS
 //!
 //! This module handles loading and managing voice style embeddings.
-//! Voice files are individual .bin files from HuggingFace (NPY format).
+//! Voice files are individual .bin files from HuggingFace containing raw float32 data.
 
 use crate::core::tts::{TTSError, TTSResult};
 use std::collections::HashMap;
 use std::path::Path;
 
 #[cfg(feature = "kokoro-tts")]
-use ndarray_npy::read_npy;
-#[cfg(feature = "kokoro-tts")]
-use ndarray16::Array3;
+use std::io::Read;
 
 /// Voice style embedding dimension
 pub const STYLE_DIM: usize = 256;
@@ -49,7 +47,10 @@ pub struct VoiceManager {
 }
 
 impl VoiceManager {
-    /// Load a single voice file (.bin in NPY format)
+    /// Load a single voice file (.bin containing raw float32 data)
+    ///
+    /// Voice files from HuggingFace contain raw little-endian float32 data
+    /// with shape [N, 256] where N is the number of token positions (~510).
     #[cfg(feature = "kokoro-tts")]
     pub fn load_single<P: AsRef<Path>>(path: P, voice_name: &str) -> TTSResult<Self> {
         let path = path.as_ref();
@@ -61,23 +62,45 @@ impl VoiceManager {
             )));
         }
 
-        let voice_data: Array3<f32> = read_npy(path)
+        // Read raw binary file
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| TTSError::InternalError(format!("Failed to open voice file: {}", e)))?;
+
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)
             .map_err(|e| TTSError::InternalError(format!("Failed to read voice file: {}", e)))?;
 
-        // Convert ndarray to our internal format
-        let shape = voice_data.shape();
-        if shape.len() != 3 || shape[1] != 1 || shape[2] != STYLE_DIM {
+        // Parse raw float32 data (little-endian)
+        if buffer.len() % 4 != 0 {
             return Err(TTSError::InvalidConfiguration(format!(
-                "Voice file has unexpected shape {:?}, expected [N, 1, {}]",
-                shape, STYLE_DIM
+                "Voice file size {} is not a multiple of 4 bytes",
+                buffer.len()
             )));
         }
 
-        let mut embeddings = vec![[[0.0f32; STYLE_DIM]; 1]; shape[0]];
+        let num_floats = buffer.len() / 4;
+        if num_floats % STYLE_DIM != 0 {
+            return Err(TTSError::InvalidConfiguration(format!(
+                "Voice file contains {} floats, not divisible by STYLE_DIM={}",
+                num_floats, STYLE_DIM
+            )));
+        }
 
-        for i in 0..shape[0] {
-            for k in 0..STYLE_DIM {
-                embeddings[i][0][k] = voice_data[[i, 0, k]];
+        let num_positions = num_floats / STYLE_DIM;
+
+        // Convert bytes to f32 array
+        let mut embeddings = vec![[[0.0f32; STYLE_DIM]; 1]; num_positions];
+
+        for (i, embedding) in embeddings.iter_mut().enumerate() {
+            for (k, slot) in embedding[0].iter_mut().enumerate() {
+                let offset = (i * STYLE_DIM + k) * 4;
+                let bytes = [
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ];
+                *slot = f32::from_le_bytes(bytes);
             }
         }
 
@@ -90,7 +113,11 @@ impl VoiceManager {
             },
         );
 
-        tracing::info!("Loaded voice style: {}", voice_name);
+        tracing::info!(
+            "Loaded voice style: {} ({} token positions)",
+            voice_name,
+            num_positions
+        );
 
         Ok(Self { styles })
     }

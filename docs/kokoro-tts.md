@@ -64,6 +64,8 @@ This clones the HuggingFace repository containing:
 
 Assets are stored in `$CACHE_PATH/kokoro/`.
 
+**Note**: The `CACHE_PATH` environment variable must be set. This matches the server configuration (`cache.path` in config.yaml).
+
 ### Requirements
 
 The `sayna init` command requires:

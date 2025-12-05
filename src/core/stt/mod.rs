@@ -5,6 +5,9 @@ pub mod deepgram;
 pub mod elevenlabs;
 pub mod google;
 
+#[cfg(feature = "whisper-stt")]
+pub mod whisper;
+
 // Re-export public types and traits
 pub use base::{
     BaseSTT, STTConfig, STTConnectionState, STTError, STTErrorCallback, STTFactory, STTHelper,
@@ -29,6 +32,10 @@ pub use azure::{AzureOutputFormat, AzureProfanityOption, AzureRegion, AzureSTT, 
 // Re-export Cartesia implementation
 pub use cartesia::{CartesiaAudioEncoding, CartesiaMessage, CartesiaSTT, CartesiaSTTConfig};
 
+// Re-export Whisper implementation (feature-gated)
+#[cfg(feature = "whisper-stt")]
+pub use whisper::{WhisperAssetConfig, WhisperSTT, WhisperSTTConfig};
+
 /// Supported STT providers
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum STTProvider {
@@ -42,6 +49,9 @@ pub enum STTProvider {
     Azure,
     /// Cartesia STT WebSocket API (ink-whisper)
     Cartesia,
+    /// Whisper ONNX local model
+    #[cfg(feature = "whisper-stt")]
+    Whisper,
 }
 
 impl std::fmt::Display for STTProvider {
@@ -52,6 +62,8 @@ impl std::fmt::Display for STTProvider {
             STTProvider::ElevenLabs => write!(f, "elevenlabs"),
             STTProvider::Azure => write!(f, "microsoft-azure"),
             STTProvider::Cartesia => write!(f, "cartesia"),
+            #[cfg(feature = "whisper-stt")]
+            STTProvider::Whisper => write!(f, "whisper"),
         }
     }
 }
@@ -66,8 +78,11 @@ impl std::str::FromStr for STTProvider {
             "elevenlabs" => Ok(STTProvider::ElevenLabs),
             "microsoft-azure" | "azure" => Ok(STTProvider::Azure),
             "cartesia" => Ok(STTProvider::Cartesia),
+            #[cfg(feature = "whisper-stt")]
+            "whisper" | "whisper-onnx" => Ok(STTProvider::Whisper),
             _ => Err(STTError::ConfigurationError(format!(
-                "Unsupported STT provider: {s}. Supported providers: deepgram, google, elevenlabs, microsoft-azure, cartesia"
+                "Unsupported STT provider: {s}. Supported providers: {}",
+                get_supported_stt_providers().join(", ")
             ))),
         }
     }
@@ -97,6 +112,7 @@ impl std::str::FromStr for STTProvider {
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
 ///         model: "nova-3".to_string(),
+///         ..Default::default()
 ///     };
 ///
 ///     // Create a Deepgram STT provider
@@ -138,6 +154,11 @@ pub fn create_stt_provider(
             let cartesia_stt = <CartesiaSTT as BaseSTT>::new(config)?;
             Ok(Box::new(cartesia_stt))
         }
+        #[cfg(feature = "whisper-stt")]
+        STTProvider::Whisper => {
+            let whisper_stt = <WhisperSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(whisper_stt))
+        }
     }
 }
 
@@ -164,6 +185,7 @@ pub fn create_stt_provider(
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
 ///         model: "nova-3".to_string(),
+///         ..Default::default()
 ///     };
 ///
 ///     // Create a Deepgram STT provider using enum
@@ -197,6 +219,11 @@ pub fn create_stt_provider_from_enum(
             let cartesia_stt = <CartesiaSTT as BaseSTT>::new(config)?;
             Ok(Box::new(cartesia_stt))
         }
+        #[cfg(feature = "whisper-stt")]
+        STTProvider::Whisper => {
+            let whisper_stt = <WhisperSTT as BaseSTT>::new(config)?;
+            Ok(Box::new(whisper_stt))
+        }
     }
 }
 
@@ -214,13 +241,19 @@ pub fn create_stt_provider_from_enum(
 /// // Output: ["deepgram", "google", "elevenlabs"]
 /// ```
 pub fn get_supported_stt_providers() -> Vec<&'static str> {
-    vec![
+    #[allow(unused_mut)]
+    let mut providers = vec![
         "deepgram",
         "google",
         "elevenlabs",
         "microsoft-azure",
         "cartesia",
-    ]
+    ];
+
+    #[cfg(feature = "whisper-stt")]
+    providers.push("whisper");
+
+    providers
 }
 
 #[cfg(test)]
@@ -308,21 +341,23 @@ mod factory_tests {
     #[test]
     fn test_get_supported_stt_providers() {
         let providers = get_supported_stt_providers();
-        assert_eq!(
-            providers,
-            vec![
-                "deepgram",
-                "google",
-                "elevenlabs",
-                "microsoft-azure",
-                "cartesia"
-            ]
-        );
+
+        // Core providers should always be present
         assert!(providers.contains(&"deepgram"));
         assert!(providers.contains(&"google"));
         assert!(providers.contains(&"elevenlabs"));
         assert!(providers.contains(&"microsoft-azure"));
         assert!(providers.contains(&"cartesia"));
+
+        // Check expected count based on feature flags
+        #[cfg(not(feature = "whisper-stt"))]
+        assert_eq!(providers.len(), 5);
+
+        #[cfg(feature = "whisper-stt")]
+        {
+            assert!(providers.contains(&"whisper"));
+            assert_eq!(providers.len(), 6);
+        }
     }
 
     #[tokio::test]
@@ -336,6 +371,7 @@ mod factory_tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("deepgram", config);
@@ -356,6 +392,7 @@ mod factory_tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Deepgram, config);
@@ -374,6 +411,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("elevenlabs", config);
@@ -397,6 +435,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("elevenlabs", config);
@@ -420,6 +459,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider_from_enum(STTProvider::ElevenLabs, config);
@@ -446,6 +486,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("microsoft-azure", config);
@@ -467,6 +508,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         // Test that "azure" shorthand also works
@@ -488,6 +530,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("microsoft-azure", config);
@@ -511,6 +554,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Azure, config);
@@ -556,6 +600,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("cartesia", config);
@@ -577,6 +622,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider("cartesia", config);
@@ -600,6 +646,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            ..Default::default()
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Cartesia, config);
@@ -612,6 +659,100 @@ mod factory_tests {
         assert!(result.is_err());
         if let Err(STTError::ConfigurationError(msg)) = result {
             assert!(msg.contains("cartesia"));
+        }
+    }
+
+    // Whisper STT provider tests (feature-gated)
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_stt_provider_enum_whisper_from_string() {
+        // Test valid provider names - Whisper
+        assert_eq!(
+            "whisper".parse::<STTProvider>().unwrap(),
+            STTProvider::Whisper
+        );
+        assert_eq!(
+            "Whisper".parse::<STTProvider>().unwrap(),
+            STTProvider::Whisper
+        );
+        assert_eq!(
+            "WHISPER".parse::<STTProvider>().unwrap(),
+            STTProvider::Whisper
+        );
+        // Test alternative name
+        assert_eq!(
+            "whisper-onnx".parse::<STTProvider>().unwrap(),
+            STTProvider::Whisper
+        );
+        assert_eq!(
+            "Whisper-ONNX".parse::<STTProvider>().unwrap(),
+            STTProvider::Whisper
+        );
+    }
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_stt_provider_enum_whisper_display() {
+        assert_eq!(STTProvider::Whisper.to_string(), "whisper");
+    }
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_get_supported_providers_includes_whisper() {
+        let providers = get_supported_stt_providers();
+        assert!(providers.contains(&"whisper"));
+    }
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_create_stt_provider_whisper_valid() {
+        let config = STTConfig {
+            provider: "whisper".to_string(),
+            api_key: String::new(), // Not required for Whisper
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "whisper-base".to_string(),
+            ..Default::default()
+        };
+
+        let result = create_stt_provider("whisper", config);
+        assert!(result.is_ok());
+
+        let stt = result.unwrap();
+        assert_eq!(stt.get_provider_info(), "Whisper ONNX (Local)");
+        assert!(!stt.is_ready()); // Not connected yet
+    }
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_create_stt_provider_from_enum_whisper() {
+        let config = STTConfig {
+            provider: "whisper".to_string(),
+            api_key: String::new(),
+            language: "en".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "whisper-base".to_string(),
+            ..Default::default()
+        };
+
+        let result = create_stt_provider_from_enum(STTProvider::Whisper, config);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "whisper-stt")]
+    #[test]
+    fn test_error_message_includes_whisper() {
+        let result = "invalid".parse::<STTProvider>();
+        assert!(result.is_err());
+        if let Err(STTError::ConfigurationError(msg)) = result {
+            assert!(msg.contains("whisper"));
         }
     }
 }
@@ -639,6 +780,7 @@ mod factory_tests {
 ///         channels: 1,
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
+///         ..Default::default()
 ///     };
 ///     
 ///     // Create provider using factory function

@@ -124,10 +124,12 @@ impl LiveKitClient {
         match operation {
             LiveKitOperation::SendAudio {
                 audio_data,
+                sample_rate,
                 response_tx,
             } => {
                 let result = LiveKitClient::process_send_audio(
                     audio_data,
+                    sample_rate,
                     &ctx.audio_queue,
                     &ctx.audio_source,
                     &ctx.is_connected,

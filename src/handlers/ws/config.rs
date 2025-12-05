@@ -56,10 +56,15 @@ impl STTWebSocketConfig {
     ///
     /// # Arguments
     /// * `api_key` - The API key to use for this provider
+    /// * `cache_path` - Optional cache path from ServerConfig for local models
     ///
     /// # Returns
     /// * `STTConfig` - Full STT configuration
-    pub fn to_stt_config(&self, api_key: String) -> STTConfig {
+    pub fn to_stt_config(
+        &self,
+        api_key: String,
+        cache_path: Option<std::path::PathBuf>,
+    ) -> STTConfig {
         STTConfig {
             provider: self.provider.clone(),
             api_key,
@@ -69,6 +74,7 @@ impl STTWebSocketConfig {
             punctuation: self.punctuation,
             encoding: self.encoding.clone(),
             model: self.model.clone(),
+            cache_path,
         }
     }
 }
@@ -173,10 +179,15 @@ impl TTSWebSocketConfig {
     ///
     /// # Arguments
     /// * `api_key` - The API key to use for this provider
+    /// * `cache_path` - Optional cache path from ServerConfig for local models
     ///
     /// # Returns
     /// * `TTSConfig` - Full TTS configuration with defaults applied
-    pub fn to_tts_config(&self, api_key: String) -> TTSConfig {
+    pub fn to_tts_config(
+        &self,
+        api_key: String,
+        cache_path: Option<std::path::PathBuf>,
+    ) -> TTSConfig {
         // Start with defaults
         let defaults = TTSConfig::default();
 
@@ -193,6 +204,7 @@ impl TTSWebSocketConfig {
             request_timeout: self.request_timeout.or(defaults.request_timeout),
             pronunciations: self.pronunciations.clone(),
             request_pool_size: defaults.request_pool_size,
+            cache_path,
         }
     }
 }

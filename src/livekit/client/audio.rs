@@ -142,14 +142,27 @@ impl LiveKitClient {
     }
 
     /// Send TTS audio data to the published LiveKit audio track.
-    pub async fn send_tts_audio(&self, audio_data: Vec<u8>) -> Result<(), AppError> {
-        debug!("send_tts_audio called with {} bytes", audio_data.len());
+    ///
+    /// # Arguments
+    /// * `audio_data` - Raw PCM audio bytes
+    /// * `sample_rate` - Sample rate of the audio data (e.g., 24000 for Kokoro TTS)
+    pub async fn send_tts_audio(
+        &self,
+        audio_data: Vec<u8>,
+        sample_rate: u32,
+    ) -> Result<(), AppError> {
+        debug!(
+            "send_tts_audio called with {} bytes at {}Hz",
+            audio_data.len(),
+            sample_rate
+        );
 
         if let Some(queue) = &self.operation_queue {
             let (tx, rx) = oneshot::channel();
             queue
                 .queue(LiveKitOperation::SendAudio {
                     audio_data,
+                    sample_rate,
                     response_tx: tx,
                 })
                 .await?;
@@ -160,6 +173,7 @@ impl LiveKitClient {
             // Use the shared helper for consistency
             Self::process_send_audio(
                 audio_data,
+                sample_rate,
                 &self.audio_queue,
                 &self.audio_source,
                 &self.is_connected,
@@ -227,6 +241,7 @@ impl LiveKitClient {
 
     pub(super) async fn process_send_audio(
         audio_data: Vec<u8>,
+        sample_rate: u32,
         audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
         audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
         is_connected: &Arc<Mutex<bool>>,
@@ -246,8 +261,8 @@ impl LiveKitClient {
 
         if let Some(source) = source {
             // Try to convert and send without holding any locks
-            match Self::convert_audio_to_frame_ref(&audio_data, config.sample_rate, config.channels)
-            {
+            // Use the sample_rate from the audio data, not config (TTS may output at different rate)
+            match Self::convert_audio_to_frame_ref(&audio_data, sample_rate, config.channels) {
                 Ok(audio_frame) => {
                     // Try up to 3 times with the current frame before queuing
                     let mut retry_count = 0;
@@ -271,10 +286,11 @@ impl LiveKitClient {
                                 };
 
                                 // Process drained items without holding locks
+                                // Use same sample_rate as current audio (queued audio is from same TTS session)
                                 for data in queued_data {
                                     if let Ok(frame) = Self::convert_audio_to_frame_ref(
                                         &data,
-                                        config.sample_rate,
+                                        sample_rate,
                                         config.channels,
                                     ) {
                                         let _ = source.capture_frame(&frame).await;

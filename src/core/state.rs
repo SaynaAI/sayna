@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "turn-detect")]
+#[cfg(any(feature = "turn-detect", feature = "kokoro-tts"))]
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(any(feature = "turn-detect", feature = "kokoro-tts")))]
 use tracing::info;
-#[cfg(feature = "turn-detect")]
+#[cfg(all(feature = "turn-detect", not(feature = "kokoro-tts")))]
 use tracing::{debug, info, warn};
+#[cfg(all(feature = "turn-detect", feature = "kokoro-tts"))]
+use tracing::{debug, info, warn};
+#[cfg(all(feature = "kokoro-tts", not(feature = "turn-detect")))]
+use tracing::{info, warn};
 
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
+#[cfg(feature = "kokoro-tts")]
+use crate::core::tts::kokoro::{KokoroModelCache, KokoroModelCacheConfig};
 #[cfg(not(feature = "turn-detect"))]
 use crate::core::turn_detect::TurnDetector;
 #[cfg(feature = "turn-detect")]
@@ -34,6 +40,9 @@ pub struct CoreState {
     pub turn_detector: Option<Arc<RwLock<TurnDetector>>>,
     /// SIP hooks runtime state with preserved secrets
     pub sip_hooks_state: Option<Arc<RwLock<SipHooksState>>>,
+    /// Preloaded Kokoro TTS model cache (when kokoro-tts feature is enabled)
+    #[cfg(feature = "kokoro-tts")]
+    pub kokoro_model: Option<Arc<KokoroModelCache>>,
 }
 
 impl CoreState {
@@ -81,6 +90,10 @@ impl CoreState {
         // Initialize and warmup Turn Detector
         let turn_detector = Self::initialize_turn_detector(config.cache_path.as_ref()).await;
 
+        // Initialize and warmup Kokoro TTS model
+        #[cfg(feature = "kokoro-tts")]
+        let kokoro_model = Self::initialize_kokoro_model(config.cache_path.as_ref()).await;
+
         let sip_hooks_state = if let Some(sip_config) = &config.sip {
             Some(Arc::new(RwLock::new(
                 SipHooksState::new(sip_config, config.cache_path.as_deref()).await,
@@ -94,6 +107,8 @@ impl CoreState {
             cache,
             turn_detector,
             sip_hooks_state,
+            #[cfg(feature = "kokoro-tts")]
+            kokoro_model,
         })
     }
 
@@ -227,5 +242,108 @@ impl CoreState {
     /// Get SIP hooks runtime state if SIP is configured.
     pub fn get_sip_hooks_state(&self) -> Option<Arc<RwLock<SipHooksState>>> {
         self.sip_hooks_state.clone()
+    }
+
+    #[cfg(feature = "kokoro-tts")]
+    /// Initialize and warmup the Kokoro TTS model
+    async fn initialize_kokoro_model(
+        cache_path: Option<&PathBuf>,
+    ) -> Option<Arc<KokoroModelCache>> {
+        let cache_path = match cache_path {
+            Some(path) => path.join("kokoro"),
+            None => {
+                info!("Kokoro TTS: No cache path configured, skipping preload");
+                return None;
+            }
+        };
+
+        // Check if assets are available
+        let asset_config = crate::core::tts::kokoro::KokoroAssetConfig {
+            cache_path: cache_path.clone(),
+        };
+
+        if !crate::core::tts::kokoro::assets::are_assets_available(&asset_config) {
+            info!(
+                "Kokoro TTS: Assets not available at {:?}, skipping preload. Run 'sayna init' to download.",
+                cache_path
+            );
+            return None;
+        }
+
+        info!("Initializing Kokoro TTS model for fast speech synthesis");
+
+        let start = Instant::now();
+
+        let config = KokoroModelCacheConfig {
+            cache_path,
+            default_voice: crate::core::tts::kokoro::DEFAULT_VOICE.to_string(),
+        };
+
+        // Add a timeout to prevent hanging forever during initialization
+        let init_timeout = Duration::from_secs(60);
+
+        match tokio::time::timeout(init_timeout, KokoroModelCache::new(config)).await {
+            Ok(Ok(cache)) => {
+                let init_elapsed = start.elapsed();
+                info!("Kokoro TTS model initialized in {:?}", init_elapsed);
+
+                // Warmup the model with a sample inference
+                let warmup_start = Instant::now();
+                let warmup_timeout = Duration::from_secs(30);
+
+                match tokio::time::timeout(warmup_timeout, cache.warmup()).await {
+                    Ok(Ok(())) => {
+                        let warmup_elapsed = warmup_start.elapsed();
+                        info!("Kokoro TTS warmup completed in {:?}", warmup_elapsed);
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Kokoro TTS warmup failed: {:?}", e);
+                    }
+                    Err(_) => {
+                        warn!("Kokoro TTS warmup timed out after {:?}", warmup_timeout);
+                    }
+                }
+
+                let total_elapsed = start.elapsed();
+                info!("Kokoro TTS fully ready in {:?}", total_elapsed);
+
+                Some(Arc::new(cache))
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "Failed to initialize Kokoro TTS: {:?}. \
+                    TTS will load model on first use.",
+                    e
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "Kokoro TTS initialization timed out after {:?}. \
+                    TTS will load model on first use.",
+                    init_timeout
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(not(feature = "kokoro-tts"))]
+    async fn initialize_kokoro_model(
+        _cache_path: Option<&PathBuf>,
+    ) -> Option<Arc<KokoroModelCache>> {
+        None
+    }
+
+    /// Get the preloaded Kokoro TTS model cache if available
+    #[cfg(feature = "kokoro-tts")]
+    pub fn get_kokoro_model(&self) -> Option<Arc<KokoroModelCache>> {
+        self.kokoro_model.clone()
+    }
+
+    /// Get the preloaded Kokoro TTS model cache (stub when feature disabled)
+    #[cfg(not(feature = "kokoro-tts"))]
+    pub fn get_kokoro_model(&self) -> Option<Arc<crate::core::tts::kokoro::KokoroModelCache>> {
+        None
     }
 }

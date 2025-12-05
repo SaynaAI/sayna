@@ -207,6 +207,7 @@ fn test_google_stt_config_with_all_options() {
             punctuation: false,
             encoding: "flac".to_string(),
             model: "chirp".to_string(),
+            ..Default::default()
         },
         project_id: "test-project".to_string(),
         location: "asia-northeast1".to_string(),
@@ -278,6 +279,7 @@ fn test_config_serialization_roundtrip() {
             punctuation: true,
             encoding: "flac".to_string(),
             model: "telephony".to_string(),
+            ..Default::default()
         },
         project_id: "roundtrip-project".to_string(),
         location: "europe-west1".to_string(),

@@ -168,8 +168,10 @@ pub async fn speak_handler(
         }
     };
 
-    // Convert WebSocket config to full TTSConfig with API key
-    let tts_config = request.tts_config.to_tts_config(api_key);
+    // Convert WebSocket config to full TTSConfig with API key and cache path
+    let tts_config = request
+        .tts_config
+        .to_tts_config(api_key, state.config.cache_path.clone());
 
     // Apply pronunciation replacements
     let mut processed_text = request.text.clone();
