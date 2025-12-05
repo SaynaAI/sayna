@@ -61,8 +61,8 @@ pub(crate) enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    #[allow(dead_code)]
-    Error(String),
+    /// Error state - variant is constructed but not pattern-matched
+    Error,
 }
 
 // =============================================================================
@@ -383,12 +383,12 @@ impl CartesiaSTT {
             }
             Ok(Err(_)) => {
                 let error_msg = "Connection channel closed".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
                 let error_msg = "Connection timeout".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
         }
@@ -402,7 +402,11 @@ impl CartesiaSTT {
     /// # Returns
     ///
     /// `Ok(())` if the command was sent, or an error if not connected.
-    #[allow(dead_code)]
+    ///
+    /// # Note
+    ///
+    /// This method is not yet fully implemented - consider disconnecting
+    /// and reconnecting for now. The public API is preserved for future use.
     pub async fn finalize(&mut self) -> Result<(), STTError> {
         if !self.is_ready() {
             return Err(STTError::ConnectionFailed(

@@ -97,8 +97,9 @@ struct GoogleVoice {
 #[serde(rename_all = "PascalCase")]
 struct AzureVoice {
     /// Full voice name, e.g., "Microsoft Server Speech Text to Speech Voice (en-US, JennyNeural)"
-    #[allow(dead_code)]
-    name: String,
+    /// Required by API response but not used in our mapping.
+    #[serde(rename = "Name")]
+    _name: String,
     /// Display name, e.g., "Jenny"
     display_name: String,
     /// Short name used as voice ID, e.g., "en-US-JennyNeural"
@@ -108,8 +109,9 @@ struct AzureVoice {
     /// Locale code, e.g., "en-US"
     locale: String,
     /// Voice type, e.g., "Neural"
-    #[allow(dead_code)]
-    voice_type: String,
+    /// Required by API response but not used in our mapping.
+    #[serde(rename = "VoiceType")]
+    _voice_type: String,
 }
 
 /// Maps a language code (e.g., "en-US") to a human-readable language name.

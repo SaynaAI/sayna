@@ -85,9 +85,6 @@ pub struct LiveKitSipHandler {
     url: String,
     /// API key for authentication
     api_key: String,
-    /// API secret for authentication
-    #[allow(dead_code)]
-    api_secret: String,
     /// SIPClient for SIP operations (from livekit-api crate)
     sip_client: SIPClient,
     /// SIPApiClient for raw Twirp API calls (for features not exposed by livekit-api)
@@ -122,7 +119,6 @@ impl LiveKitSipHandler {
         Self {
             url,
             api_key,
-            api_secret,
             sip_client,
             sip_api_client,
         }

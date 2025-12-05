@@ -116,15 +116,16 @@ pub struct RecordingCallback {
 
 /// Metadata for a received audio chunk
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AudioChunk {
     /// Session that received this chunk
+    #[allow(dead_code)]
     session_id: String,
     /// Chunk sequence number within session
     sequence: usize,
     /// Timestamp when received (relative to start)
     timestamp_ms: u64,
     /// Size of the audio data
+    #[allow(dead_code)]
     size: usize,
     /// First 50 bytes of data for identification
     data_preview: Vec<u8>,

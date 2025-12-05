@@ -33,8 +33,8 @@ enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    #[allow(dead_code)] // We store error details for debugging but don't actively use them
-    Error(String),
+    /// Error state - variant is constructed but not pattern-matched
+    Error,
 }
 
 /// Configuration specific to Deepgram STT
@@ -494,12 +494,12 @@ impl DeepgramSTT {
             }
             Ok(Err(_)) => {
                 let error_msg = "Connection channel closed".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
                 let error_msg = "Connection timeout".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
         }

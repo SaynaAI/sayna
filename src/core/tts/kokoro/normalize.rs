@@ -130,41 +130,6 @@ pub fn normalize_text(text: &str) -> String {
     text.trim().to_string()
 }
 
-/// Simple sentence splitter for chunking long text
-///
-/// Splits text by common sentence-ending punctuation.
-///
-/// # Arguments
-/// * `text` - The input text to split
-///
-/// # Returns
-/// A vector of sentence strings
-#[allow(dead_code)]
-pub fn split_sentences(text: &str) -> Vec<String> {
-    let mut sentences = Vec::new();
-    let mut current = String::new();
-
-    for c in text.chars() {
-        current.push(c);
-
-        if c == '.' || c == '!' || c == '?' || c == ';' {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                sentences.push(trimmed);
-            }
-            current.clear();
-        }
-    }
-
-    // Add remaining text
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        sentences.push(trimmed);
-    }
-
-    sentences
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,24 +175,6 @@ mod tests {
         let text = "Hello\u{3002}"; // Japanese period
         let normalized = normalize_text(text);
         assert!(normalized.contains("."));
-    }
-
-    #[test]
-    fn test_split_sentences() {
-        let text = "Hello world. How are you? I'm fine!";
-        let sentences = split_sentences(text);
-        assert_eq!(sentences.len(), 3);
-        assert_eq!(sentences[0], "Hello world.");
-        assert_eq!(sentences[1], "How are you?");
-        assert_eq!(sentences[2], "I'm fine!");
-    }
-
-    #[test]
-    fn test_split_sentences_no_ending() {
-        let text = "Hello world";
-        let sentences = split_sentences(text);
-        assert_eq!(sentences.len(), 1);
-        assert_eq!(sentences[0], "Hello world");
     }
 
     #[test]

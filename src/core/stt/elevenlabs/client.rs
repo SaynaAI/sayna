@@ -44,12 +44,12 @@ type AsyncErrorCallback = Box<
 
 /// Connection state for the WebSocket client.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Error variant will be used for connection error reporting
 pub(crate) enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    Error(String),
+    /// Error state - variant is constructed but not pattern-matched
+    Error,
 }
 
 // =============================================================================
@@ -570,12 +570,12 @@ impl ElevenLabsSTT {
             }
             Ok(Err(_)) => {
                 let error_msg = "Connection channel closed before session started".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
                 let error_msg = "Connection timeout waiting for session_started".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
         }

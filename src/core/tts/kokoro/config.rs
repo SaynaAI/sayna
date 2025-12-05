@@ -22,10 +22,6 @@ use std::path::PathBuf;
 
 use super::assets;
 
-/// Output sample rate for Kokoro TTS (fixed by model architecture)
-#[allow(dead_code)]
-pub const KOKORO_SAMPLE_RATE: u32 = 24000;
-
 /// Configuration specific to Kokoro TTS
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KokoroConfig {

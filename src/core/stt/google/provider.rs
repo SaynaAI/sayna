@@ -79,13 +79,13 @@ type AsyncErrorCallback = Box<
         + Sync,
 >;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    #[allow(dead_code)]
-    Error(String),
+    /// Error state - variant is constructed but not pattern-matched
+    Error,
 }
 
 /// Audio channel buffer size - matches Deepgram's buffer for consistent behavior.
@@ -393,12 +393,12 @@ impl GoogleSTT {
             }
             Ok(Err(_)) => {
                 let error_msg = "Connection channel closed unexpectedly".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
                 let error_msg = "Connection timeout (30s)".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
         }

@@ -208,7 +208,7 @@ fn test_connection_state_debug() {
     let disconnected = ConnectionState::Disconnected;
     let connecting = ConnectionState::Connecting;
     let connected = ConnectionState::Connected;
-    let error = ConnectionState::Error("test error".to_string());
+    let error = ConnectionState::Error;
 
     assert_eq!(format!("{:?}", disconnected), "Disconnected");
     assert_eq!(format!("{:?}", connecting), "Connecting");
@@ -222,13 +222,9 @@ fn test_connection_state_clone() {
     let cloned = original.clone();
     assert!(matches!(cloned, ConnectionState::Connected));
 
-    let error = ConnectionState::Error("test".to_string());
+    let error = ConnectionState::Error;
     let error_clone = error.clone();
-    if let ConnectionState::Error(msg) = error_clone {
-        assert_eq!(msg, "test");
-    } else {
-        panic!("Expected Error variant");
-    }
+    assert_eq!(error_clone, ConnectionState::Error);
 }
 
 #[test]

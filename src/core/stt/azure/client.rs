@@ -77,9 +77,8 @@ enum ConnectionState {
     Connecting,
     /// Connected and ready to receive audio.
     Connected,
-    /// An error occurred (stores error message for debugging).
-    #[allow(dead_code)]
-    Error(String),
+    /// An error occurred.
+    Error,
 }
 
 // =============================================================================
@@ -553,12 +552,12 @@ impl AzureSTT {
             }
             Ok(Err(_)) => {
                 let error_msg = "Connection channel closed before confirmation".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
             Err(_) => {
                 let error_msg = "Connection timeout waiting for Azure".to_string();
-                self.state = ConnectionState::Error(error_msg.clone());
+                self.state = ConnectionState::Error;
                 Err(STTError::ConnectionFailed(error_msg))
             }
         }

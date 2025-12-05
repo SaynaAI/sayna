@@ -45,8 +45,6 @@ mod schema {
     pub mod timestamped {
         pub const TOKENS: &str = "input_ids";
         pub const AUDIO: &str = "waveform";
-        #[allow(dead_code)]
-        pub const DURATIONS: &str = "durations";
     }
 }
 
@@ -72,13 +70,6 @@ impl ModelVariant {
         match self {
             ModelVariant::Standard(_) => schema::standard::TOKENS,
             ModelVariant::Timestamped(_) => schema::timestamped::TOKENS,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn session(&self) -> &Session {
-        match self {
-            ModelVariant::Standard(s) | ModelVariant::Timestamped(s) => s,
         }
     }
 
@@ -355,60 +346,6 @@ impl KokoroModel {
         ))
     }
 
-    /// Run inference with timestamps
-    #[cfg(feature = "kokoro-tts")]
-    #[allow(dead_code)]
-    pub async fn infer_with_timestamps(
-        &mut self,
-        tokens: Vec<i64>,
-        style: Vec<Vec<f32>>,
-        speed: f32,
-    ) -> TTSResult<(Vec<f32>, Option<Vec<f32>>)> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| TTSError::InternalError(format!("Failed to lock model: {}", e)))?;
-
-        let variant = &mut *guard;
-        let tokens_key = variant.tokens_key();
-        let audio_key = variant.audio_key();
-
-        // Prepare inputs
-        let inputs = Self::prepare_inputs(tokens_key, vec![tokens], style, speed)?;
-
-        // Run inference
-        let session = variant.session_mut();
-        let outputs = session
-            .run(SessionInputs::from(inputs))
-            .map_err(|e| TTSError::InternalError(format!("Inference failed: {}", e)))?;
-
-        // Extract audio
-        let (_, audio_data) = outputs[audio_key]
-            .try_extract_tensor::<f32>()
-            .map_err(|_| TTSError::InternalError("Could not extract audio output".to_string()))?;
-
-        // Try to extract durations (only available in timestamped model)
-        let durations = outputs
-            .get(schema::timestamped::DURATIONS)
-            .and_then(|v| v.try_extract_tensor::<f32>().ok())
-            .map(|(_, d)| d.to_vec());
-
-        Ok((audio_data.to_vec(), durations))
-    }
-
-    /// Run inference with timestamps (stub when feature is disabled)
-    #[cfg(not(feature = "kokoro-tts"))]
-    pub async fn infer_with_timestamps(
-        &mut self,
-        _tokens: Vec<i64>,
-        _style: Vec<Vec<f32>>,
-        _speed: f32,
-    ) -> TTSResult<(Vec<f32>, Option<Vec<f32>>)> {
-        Err(TTSError::InvalidConfiguration(
-            "Kokoro TTS feature is not enabled".to_string(),
-        ))
-    }
-
     #[cfg(feature = "kokoro-tts")]
     fn prepare_inputs(
         tokens_key: &'static str,
@@ -456,50 +393,6 @@ impl KokoroModel {
             ),
         ])
     }
-
-    /// Check if this is a timestamped model
-    #[cfg(feature = "kokoro-tts")]
-    #[allow(dead_code)]
-    pub fn supports_timestamps(&self) -> bool {
-        if let Ok(guard) = self.inner.lock() {
-            matches!(&*guard, ModelVariant::Timestamped(_))
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(feature = "kokoro-tts"))]
-    pub fn supports_timestamps(&self) -> bool {
-        false
-    }
-
-    /// Get model information
-    #[cfg(feature = "kokoro-tts")]
-    #[allow(dead_code)]
-    pub fn get_info(&self) -> serde_json::Value {
-        if let Ok(guard) = self.inner.lock() {
-            let session = guard.session();
-            let input_names: Vec<_> = session.inputs.iter().map(|i| i.name.as_str()).collect();
-            let output_names: Vec<_> = session.outputs.iter().map(|o| o.name.as_str()).collect();
-
-            serde_json::json!({
-                "inputs": input_names,
-                "outputs": output_names,
-                "timestamped": matches!(&*guard, ModelVariant::Timestamped(_)),
-            })
-        } else {
-            serde_json::json!({
-                "error": "Failed to lock model"
-            })
-        }
-    }
-
-    #[cfg(not(feature = "kokoro-tts"))]
-    pub fn get_info(&self) -> serde_json::Value {
-        serde_json::json!({
-            "error": "Kokoro TTS feature is not enabled"
-        })
-    }
 }
 
 #[cfg(test)]
@@ -515,7 +408,6 @@ mod tests {
         assert_eq!(schema::standard::AUDIO, "audio");
         assert_eq!(schema::timestamped::TOKENS, "input_ids");
         assert_eq!(schema::timestamped::AUDIO, "waveform");
-        assert_eq!(schema::timestamped::DURATIONS, "durations");
     }
 
     #[cfg(feature = "kokoro-tts")]

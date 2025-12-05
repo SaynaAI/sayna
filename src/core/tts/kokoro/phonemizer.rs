@@ -34,7 +34,6 @@ use espeak_rs::text_to_phonemes;
 
 /// Errors that can occur during phonemization
 #[derive(Debug, Error)]
-#[allow(dead_code)] // Variants are used conditionally based on feature flags
 pub enum PhonemizerError {
     /// eSpeak-NG encountered an error
     #[error("eSpeak error: {0}")]
@@ -47,12 +46,6 @@ pub enum PhonemizerError {
     /// The specified language is not supported
     #[error("Unsupported language: {0}. Supported: 'a' (American English), 'b' (British English)")]
     UnsupportedLanguage(String),
-
-    /// eSpeak-NG is not installed or not accessible
-    #[error(
-        "eSpeak-NG not available: {0}. Install with: apt-get install espeak-ng libespeak-ng-dev"
-    )]
-    EspeakNotInstalled(String),
 }
 
 /// Global mutex to serialize espeak-rs calls
@@ -186,84 +179,7 @@ impl Phonemizer {
         _language: &str,
         _normalize: bool,
     ) -> Result<String, PhonemizerError> {
-        Err(PhonemizerError::EspeakNotInstalled(
-            "Kokoro TTS feature is not enabled".to_string(),
-        ))
-    }
-
-    /// Phonemize multiple texts in a batch
-    ///
-    /// This is more efficient than calling `phonemize` multiple times because
-    /// the mutex is only acquired once for all texts.
-    ///
-    /// # Arguments
-    /// * `texts` - Slice of texts to phonemize
-    /// * `language` - Language code for all texts
-    /// * `normalize` - Whether to apply text normalization
-    ///
-    /// # Returns
-    /// A vector of phonemized strings, one for each input text
-    #[cfg(feature = "kokoro-tts")]
-    #[allow(dead_code)] // Public API for external use
-    pub fn phonemize_batch(
-        &self,
-        texts: &[&str],
-        language: &str,
-        normalize: bool,
-    ) -> Result<Vec<String>, PhonemizerError> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Map language code once
-        let espeak_lang = map_language_code(language)?;
-
-        // Acquire the lock once for all phonemizations
-        let _guard = ESPEAK_MUTEX
-            .lock()
-            .map_err(|_| PhonemizerError::LockPoisoned)?;
-
-        let mut results = Vec::with_capacity(texts.len());
-
-        for text in texts {
-            if text.is_empty() {
-                results.push(String::new());
-                continue;
-            }
-
-            // Normalize if requested
-            let normalized = if normalize {
-                normalize_text(text)
-            } else {
-                text.to_string()
-            };
-
-            if normalized.is_empty() {
-                results.push(String::new());
-                continue;
-            }
-
-            // Phonemize without re-acquiring the lock
-            let phonemes = text_to_phonemes(&normalized, espeak_lang, None, true, false)
-                .map_err(|e| PhonemizerError::EspeakError(e.to_string()))?
-                .join("");
-
-            // Apply post-processing
-            results.push(postprocess_phonemes(&phonemes, language));
-        }
-
-        Ok(results)
-    }
-
-    /// Stub for phonemize_batch when feature is disabled
-    #[cfg(not(feature = "kokoro-tts"))]
-    pub fn phonemize_batch(
-        &self,
-        _texts: &[&str],
-        _language: &str,
-        _normalize: bool,
-    ) -> Result<Vec<String>, PhonemizerError> {
-        Err(PhonemizerError::EspeakNotInstalled(
+        Err(PhonemizerError::EspeakError(
             "Kokoro TTS feature is not enabled".to_string(),
         ))
     }
@@ -579,69 +495,6 @@ mod tests {
             // Both should succeed
             assert!(with_norm.is_ok());
             assert!(without_norm.is_ok());
-        }
-
-        #[test]
-        fn test_batch_phonemization() {
-            let phonemizer = match Phonemizer::new() {
-                Ok(p) => p,
-                Err(_) => return, // Skip if espeak not installed
-            };
-
-            let texts = vec!["hello", "world", "test"];
-            let result = phonemizer.phonemize_batch(&texts, "a", true);
-
-            assert!(result.is_ok());
-            let phonemes = result.unwrap();
-            assert_eq!(phonemes.len(), 3);
-            for p in &phonemes {
-                assert!(!p.is_empty());
-            }
-        }
-
-        #[test]
-        fn test_batch_phonemization_empty_texts() {
-            let phonemizer = match Phonemizer::new() {
-                Ok(p) => p,
-                Err(_) => return, // Skip if espeak not installed
-            };
-
-            let texts: Vec<&str> = vec![];
-            let result = phonemizer.phonemize_batch(&texts, "a", true);
-
-            assert!(result.is_ok());
-            assert!(result.unwrap().is_empty());
-        }
-
-        #[test]
-        fn test_batch_phonemization_with_empty_string() {
-            let phonemizer = match Phonemizer::new() {
-                Ok(p) => p,
-                Err(_) => return, // Skip if espeak not installed
-            };
-
-            let texts = vec!["hello", "", "world"];
-            let result = phonemizer.phonemize_batch(&texts, "a", true);
-
-            assert!(result.is_ok());
-            let phonemes = result.unwrap();
-            assert_eq!(phonemes.len(), 3);
-            assert!(!phonemes[0].is_empty());
-            assert!(phonemes[1].is_empty()); // Empty input -> empty output
-            assert!(!phonemes[2].is_empty());
-        }
-
-        #[test]
-        fn test_batch_invalid_language() {
-            let phonemizer = match Phonemizer::new() {
-                Ok(p) => p,
-                Err(_) => return, // Skip if espeak not installed
-            };
-
-            let texts = vec!["hello"];
-            let result = phonemizer.phonemize_batch(&texts, "invalid", true);
-
-            assert!(result.is_err());
         }
 
         #[test]

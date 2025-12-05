@@ -22,8 +22,8 @@ pub const MAX_TOKENS: usize = 511;
 #[derive(Clone)]
 pub struct VoiceStyle {
     /// Name of the voice
-    #[allow(dead_code)]
-    pub name: String,
+    /// Stored for debugging/logging but not actively queried after construction.
+    _name: String,
     /// Style embeddings indexed by token count [0..511][1][256]
     embeddings: Vec<[[f32; STYLE_DIM]; 1]>,
 }
@@ -85,7 +85,7 @@ impl VoiceManager {
         styles.insert(
             voice_name.to_string(),
             VoiceStyle {
-                name: voice_name.to_string(),
+                _name: voice_name.to_string(),
                 embeddings,
             },
         );
@@ -123,18 +123,6 @@ impl VoiceManager {
         voices.sort();
         voices
     }
-
-    /// Check if a voice exists
-    #[allow(dead_code)]
-    pub fn has_voice(&self, name: &str) -> bool {
-        self.styles.contains_key(name)
-    }
-
-    /// Get the number of loaded voices
-    #[allow(dead_code)]
-    pub fn voice_count(&self) -> usize {
-        self.styles.len()
-    }
 }
 
 #[cfg(test)]
@@ -158,7 +146,7 @@ mod tests {
         styles.insert(
             "af_bella".to_string(),
             VoiceStyle {
-                name: "af_bella".to_string(),
+                _name: "af_bella".to_string(),
                 embeddings,
             },
         );
@@ -182,7 +170,7 @@ mod tests {
         embeddings[50][0][0] = 1.0;
 
         let style = VoiceStyle {
-            name: "test".to_string(),
+            _name: "test".to_string(),
             embeddings,
         };
 
@@ -197,7 +185,7 @@ mod tests {
     fn test_voice_style_clamp() {
         let embeddings = vec![[[0.5f32; STYLE_DIM]; 1]; 100];
         let style = VoiceStyle {
-            name: "test".to_string(),
+            _name: "test".to_string(),
             embeddings,
         };
 
@@ -209,7 +197,7 @@ mod tests {
     #[test]
     fn test_voice_style_empty_embeddings() {
         let style = VoiceStyle {
-            name: "empty".to_string(),
+            _name: "empty".to_string(),
             embeddings: vec![],
         };
 
@@ -248,19 +236,6 @@ mod tests {
         let style = result.unwrap();
         assert_eq!(style[0].len(), STYLE_DIM);
         assert_eq!(style[0][1], (MAX_TOKENS - 1) as f32);
-    }
-
-    #[test]
-    fn test_voice_manager_has_voice() {
-        let manager = create_test_manager();
-        assert!(manager.has_voice("af_bella"));
-        assert!(!manager.has_voice("nonexistent"));
-    }
-
-    #[test]
-    fn test_voice_manager_voice_count() {
-        let manager = create_test_manager();
-        assert_eq!(manager.voice_count(), 1);
     }
 
     #[test]
