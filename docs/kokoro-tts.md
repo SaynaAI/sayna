@@ -58,21 +58,41 @@ Before using Kokoro TTS, you need to download the model and voice files. Use the
 CACHE_PATH=/path/to/cache sayna init
 ```
 
-This will download:
-- `kokoro-v1.0.onnx` (~326 MB) - The ONNX model
-- `voices-v1.0.bin` (~60 MB) - Voice style embeddings
+This clones the HuggingFace repository containing:
+- `onnx/model_quantized.onnx` (~92 MB) - The quantized ONNX model
+- `voices/*.bin` (~0.5 MB each) - 60 voice style embeddings
 
 Assets are stored in `$CACHE_PATH/kokoro/`.
 
-### Manual Download
+### Requirements
 
-You can also download assets manually:
+The `sayna init` command requires:
+- **Git**: For cloning the repository
+- **Git LFS**: For downloading large binary files (model and voices)
 
-- **Model**: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
-- **Voices**: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+Install Git LFS if not already installed:
+```bash
+# Ubuntu/Debian
+sudo apt-get install git-lfs
 
-For word-level timestamps, use the timestamped model variant from HuggingFace:
-- **Timestamped Model**: https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped
+# macOS
+brew install git-lfs
+
+# Then initialize
+git lfs install
+```
+
+### Manual Clone
+
+You can also clone the repository manually:
+
+```bash
+git clone --depth=1 https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped /path/to/cache/kokoro
+```
+
+### Source Repository
+
+All assets come from: https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped
 
 ## Configuration
 
@@ -116,53 +136,38 @@ The `speaking_rate` parameter controls the speed of speech:
 
 ## Available Voices
 
-### American Female (af_)
-| Voice ID | Description |
-|----------|-------------|
-| `af_bella` | Bella - clear, friendly (default) |
-| `af_nicole` | Nicole - warm, expressive |
-| `af_sarah` | Sarah - conversational |
-| `af_sky` | Sky - bright, energetic |
+Kokoro includes 60 voices across multiple languages and accents.
 
-### American Male (am_)
-| Voice ID | Description |
-|----------|-------------|
-| `am_adam` | Adam - deep, authoritative |
-| `am_michael` | Michael - clear, professional |
+### American English (21 voices)
 
-### British Female (bf_)
-| Voice ID | Description |
-|----------|-------------|
-| `bf_emma` | Emma - modern British |
-| `bf_isabella` | Isabella - elegant |
+**Female (af_)**: `af`, `af_alloy`, `af_aoede`, `af_bella` (default), `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`
 
-### British Male (bm_)
-| Voice ID | Description |
-|----------|-------------|
-| `bm_george` | George - traditional British |
-| `bm_lewis` | Lewis - contemporary |
+**Male (am_)**: `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`
+
+### British English (8 voices)
+
+**Female (bf_)**: `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily`
+
+**Male (bm_)**: `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis`
+
+### Other Languages (31 voices)
+
+| Prefix | Language | Female | Male |
+|--------|----------|--------|------|
+| `ef_`/`em_` | Spanish/Other | `ef_dora` | `em_alex`, `em_santa` |
+| `ff_` | French | `ff_siwis` | - |
+| `hf_`/`hm_` | Hindi | `hf_alpha`, `hf_beta` | `hm_omega`, `hm_psi` |
+| `if_`/`im_` | Italian | `if_sara` | `im_nicola` |
+| `jf_`/`jm_` | Japanese | `jf_alpha`, `jf_gongitsune`, `jf_nezumi`, `jf_tebukuro` | `jm_kumo` |
+| `pf_`/`pm_` | Portuguese | `pf_dora` | `pm_alex`, `pm_santa` |
+| `zf_`/`zm_` | Chinese | `zf_xiaobei`, `zf_xiaoni`, `zf_xiaoxiao`, `zf_xiaoyi` | `zm_yunjian`, `zm_yunxi`, `zm_yunxia`, `zm_yunyang` |
 
 ### Voice Naming Convention
 
-Voice IDs follow the pattern: `{accent}{gender}_{name}`
-- First letter: `a` = American, `b` = British
+Voice IDs follow the pattern: `{language}{gender}_{name}`
+- First letter: `a` = American, `b` = British, `e` = Spanish, `f` = French, `h` = Hindi, `i` = Italian, `j` = Japanese, `p` = Portuguese, `z` = Chinese
 - Second letter: `f` = Female, `m` = Male
 - After underscore: Voice name
-
-## Voice Mixing
-
-Kokoro supports blending multiple voices for unique combinations:
-
-```rust
-let config = TTSConfig {
-    voice_id: Some("af_bella.5+am_adam.5".to_string()),  // 50% Bella, 50% Adam
-    ..Default::default()
-};
-```
-
-Format: `voice1.weight1+voice2.weight2`
-- Weights are 0-10 (5 = 50%)
-- Weights are normalized if they don't sum to 10
 
 ## Audio Output
 
@@ -286,9 +291,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Cost | Free | Per-character pricing |
 | Privacy | Local processing | Data sent to cloud |
 | Offline | Yes | No |
-| Voice variety | 10 voices | Hundreds |
-| Languages | English only | Many languages |
-| Setup complexity | Requires eSpeak-NG | API key only |
+| Voice variety | 60 voices | Hundreds |
+| Languages | 9 languages | Many languages |
+| Setup complexity | Requires eSpeak-NG + Git LFS | API key only |
 | Audio quality | High (82M params) | Very high |
 
 **When to use Kokoro:**
@@ -298,8 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - Low-volume applications
 
 **When to use Cloud TTS:**
-- Multi-language support needed
-- Maximum voice variety
+- Maximum voice variety needed
 - Highest audio quality requirements
 - Minimal server setup preferred
 

@@ -19,11 +19,12 @@ use std::path::Path;
 use std::sync::Mutex;
 
 #[cfg(feature = "kokoro-tts")]
-use super::config::GraphOptimizationLevel;
-#[cfg(feature = "kokoro-tts")]
 use ort::{
     execution_providers::CPUExecutionProvider,
-    session::{Session, SessionInputValue, SessionInputs, builder::SessionBuilder},
+    session::{
+        Session, SessionInputValue, SessionInputs,
+        builder::{GraphOptimizationLevel, SessionBuilder},
+    },
     value::{Tensor, Value},
 };
 #[cfg(feature = "kokoro-tts")]
@@ -44,6 +45,7 @@ mod schema {
     pub mod timestamped {
         pub const TOKENS: &str = "input_ids";
         pub const AUDIO: &str = "waveform";
+        #[allow(dead_code)]
         pub const DURATIONS: &str = "durations";
     }
 }
@@ -73,6 +75,7 @@ impl ModelVariant {
         }
     }
 
+    #[allow(dead_code)]
     fn session(&self) -> &Session {
         match self {
             ModelVariant::Standard(s) | ModelVariant::Timestamped(s) => s,
@@ -88,22 +91,10 @@ impl ModelVariant {
 
 /// Configuration for model loading
 #[cfg(feature = "kokoro-tts")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelConfig {
-    /// Number of threads for intra-op parallelism
+    /// Number of threads for intra-op parallelism (default: 4)
     pub num_threads: Option<usize>,
-    /// Graph optimization level
-    pub optimization_level: GraphOptimizationLevel,
-}
-
-#[cfg(feature = "kokoro-tts")]
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            num_threads: Some(4),
-            optimization_level: GraphOptimizationLevel::Level3,
-        }
-    }
 }
 
 /// Kokoro ONNX Model wrapper
@@ -184,15 +175,16 @@ impl KokoroModel {
             TTSError::InternalError(format!("Failed to create session builder: {}", e))
         })?;
 
-        // Apply optimization level
+        // Apply optimization level (always use Level3 for best performance)
         builder = builder
-            .with_optimization_level(config.optimization_level.to_ort_level())
+            .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| {
                 TTSError::InternalError(format!("Failed to set optimization level: {}", e))
             })?;
 
-        // Apply thread configuration
-        if let Some(num_threads) = config.num_threads {
+        // Apply thread configuration (default to 4 threads)
+        let num_threads = config.num_threads.unwrap_or(4);
+        if num_threads > 0 {
             builder = builder
                 .with_intra_threads(num_threads)
                 .map_err(|e| {
@@ -365,6 +357,7 @@ impl KokoroModel {
 
     /// Run inference with timestamps
     #[cfg(feature = "kokoro-tts")]
+    #[allow(dead_code)]
     pub async fn infer_with_timestamps(
         &mut self,
         tokens: Vec<i64>,
@@ -466,6 +459,7 @@ impl KokoroModel {
 
     /// Check if this is a timestamped model
     #[cfg(feature = "kokoro-tts")]
+    #[allow(dead_code)]
     pub fn supports_timestamps(&self) -> bool {
         if let Ok(guard) = self.inner.lock() {
             matches!(&*guard, ModelVariant::Timestamped(_))
@@ -481,6 +475,7 @@ impl KokoroModel {
 
     /// Get model information
     #[cfg(feature = "kokoro-tts")]
+    #[allow(dead_code)]
     pub fn get_info(&self) -> serde_json::Value {
         if let Ok(guard) = self.inner.lock() {
             let session = guard.session();
@@ -527,11 +522,7 @@ mod tests {
     #[test]
     fn test_model_config_default() {
         let config = ModelConfig::default();
-        assert_eq!(config.num_threads, Some(4));
-        assert!(matches!(
-            config.optimization_level,
-            GraphOptimizationLevel::Level3
-        ));
+        assert_eq!(config.num_threads, None);
     }
 
     #[cfg(feature = "kokoro-tts")]
@@ -539,13 +530,8 @@ mod tests {
     fn test_model_config_custom() {
         let config = ModelConfig {
             num_threads: Some(8),
-            optimization_level: GraphOptimizationLevel::Basic,
         };
         assert_eq!(config.num_threads, Some(8));
-        assert!(matches!(
-            config.optimization_level,
-            GraphOptimizationLevel::Basic
-        ));
     }
 
     #[cfg(feature = "kokoro-tts")]

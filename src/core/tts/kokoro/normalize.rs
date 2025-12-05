@@ -139,6 +139,7 @@ pub fn normalize_text(text: &str) -> String {
 ///
 /// # Returns
 /// A vector of sentence strings
+#[allow(dead_code)]
 pub fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();

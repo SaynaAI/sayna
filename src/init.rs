@@ -65,11 +65,10 @@ pub async fn run() -> Result<()> {
         let kokoro_cache = cache_path.join("kokoro");
         let kokoro_config = kokoro_assets::KokoroAssetConfig {
             cache_path: kokoro_cache.clone(),
-            ..Default::default()
         };
 
         tracing::info!(
-            "Preparing Kokoro TTS assets using cache path: {:?}",
+            "Preparing Kokoro TTS assets from HuggingFace using cache path: {:?}",
             kokoro_cache
         );
         kokoro_assets::download_assets(&kokoro_config).await?;

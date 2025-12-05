@@ -1,14 +1,15 @@
 //! Kokoro TTS - Local ONNX-based Text-to-Speech Provider
 //!
-//! This module provides a local TTS solution using the Kokoro 82M neural model.
+//! This module provides a local TTS solution using the Kokoro 82M neural model
+//! from HuggingFace (onnx-community/Kokoro-82M-v1.0-ONNX-timestamped).
+//!
 //! Kokoro runs locally using ONNX Runtime and requires no cloud API.
 //!
 //! ## Features
 //! - Local inference using ONNX Runtime
-//! - 24 English voices (American and British)
+//! - 60 voices (American, British, and other languages)
 //! - 24kHz mono audio output
 //! - eSpeak-NG for text-to-phoneme conversion
-//! - Optional word-level timestamps
 //!
 //! ## Usage
 //!
@@ -74,7 +75,11 @@ impl KokoroTTS {
         self.voice_manager
             .as_ref()
             .map(|vm| vm.get_available_voices())
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                // Fall back to listing from cache directory
+                let asset_config = self.config.to_asset_config();
+                assets::list_available_voices(&asset_config)
+            })
     }
 
     /// Convert f32 audio samples to PCM16 bytes
@@ -105,7 +110,7 @@ impl KokoroTTS {
         })?;
 
         // Get the voice name
-        let voice_name = self.config.voice_id.as_deref().unwrap_or(DEFAULT_VOICE);
+        let voice_name = &self.config.voice_id;
 
         // Get language code from voice name (first char: 'a' = American, 'b' = British)
         let language = if voice_name.starts_with('b') {
@@ -128,8 +133,9 @@ impl KokoroTTS {
         let style = voice_manager.get_style(voice_name, tokens.len())?;
 
         // Step 4: Run inference
-        let speed = self.config.speaking_rate.unwrap_or(1.0);
-        let audio = model.infer(tokens, style, speed).await?;
+        let audio = model
+            .infer(tokens, style, self.config.speaking_rate)
+            .await?;
 
         Ok(audio)
     }
@@ -156,50 +162,29 @@ impl BaseTTS for KokoroTTS {
         // Initialize the phonemizer
         self.phonemizer = Some(Phonemizer::new()?);
 
-        // Resolve model path using asset system
-        // If explicit path is configured and exists, use it; otherwise use cache path resolution
-        let model_path = if let Some(ref explicit_path) = self.config.model_path {
-            if explicit_path.exists() {
-                explicit_path.clone()
-            } else {
-                return Err(TTSError::InvalidConfiguration(format!(
-                    "Model file not found at configured path: {}. Run 'sayna init' to download.",
-                    explicit_path.display()
-                )));
-            }
-        } else {
-            // Use asset path resolution (checks cache, returns error if missing)
-            let asset_config = self.config.to_asset_config();
-            assets::model_path(&asset_config)
-                .map_err(|e| TTSError::InvalidConfiguration(e.to_string()))?
-        };
+        // Get asset configuration
+        let asset_config = self.config.to_asset_config();
+
+        // Load model
+        let model_path = assets::model_path(&asset_config)
+            .map_err(|e| TTSError::InvalidConfiguration(e.to_string()))?;
 
         self.model = Some(KokoroModel::load(&model_path).await?);
 
-        // Resolve voices path using asset system
-        let voices_path = if let Some(ref explicit_path) = self.config.voices_path {
-            if explicit_path.exists() {
-                explicit_path.clone()
-            } else {
-                return Err(TTSError::InvalidConfiguration(format!(
-                    "Voices file not found at configured path: {}. Run 'sayna init' to download.",
-                    explicit_path.display()
-                )));
-            }
-        } else {
-            // Use asset path resolution (checks cache, returns error if missing)
-            let asset_config = self.config.to_asset_config();
-            assets::voices_path(&asset_config)
-                .map_err(|e| TTSError::InvalidConfiguration(e.to_string()))?
-        };
+        // Load voice
+        let voice_path = assets::voice_path_sync(&asset_config, &self.config.voice_id)
+            .map_err(|e| TTSError::InvalidConfiguration(e.to_string()))?;
 
-        self.voice_manager = Some(VoiceManager::load(&voices_path)?);
+        self.voice_manager = Some(VoiceManager::load_single(
+            &voice_path,
+            &self.config.voice_id,
+        )?);
 
         self.connection_state = ConnectionState::Connected;
         tracing::info!(
-            "Kokoro TTS connected: model={:?}, voices={:?}",
+            "Kokoro TTS connected: model={:?}, voice={}",
             model_path,
-            voices_path
+            self.config.voice_id
         );
 
         Ok(())
@@ -292,7 +277,8 @@ impl BaseTTS for KokoroTTS {
         serde_json::json!({
             "provider": "kokoro",
             "version": "1.0.0",
-            "model": "kokoro-82m",
+            "model": "kokoro-82m-quantized",
+            "model_source": "huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped",
             "sample_rate": KOKORO_SAMPLE_RATE,
             "audio_format": "linear16",
             "available_voices": self.get_available_voices(),
@@ -345,5 +331,10 @@ mod tests {
         let tts = result.unwrap();
         assert!(!tts.is_ready());
         assert_eq!(tts.get_connection_state(), ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn test_default_voice_constant() {
+        assert_eq!(assets::DEFAULT_VOICE, "af_bella");
     }
 }
