@@ -112,68 +112,21 @@ let mut stt = WhisperSTT::new(config)?;
 stt.connect().await?;
 ```
 
-### Streaming Configuration (Rust)
+### Streaming Behavior
 
-```rust
-use sayna::core::stt::whisper::{WhisperSTTConfig, StreamingConfig, VADConfig};
+Whisper STT uses a simple but effective streaming approach:
 
-// Default streaming configuration
-let config = WhisperSTTConfig::default();
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Interim Interval | 500ms | Transcription runs every 500ms |
+| Silence Timeout | 1500ms | Speech ends after 1.5s of silence |
+| Minimum Audio | 500ms | Minimum audio before first transcription |
 
-// Low latency configuration (faster response, may sacrifice accuracy)
-let config = WhisperSTTConfig::default().low_latency();
-
-// High accuracy configuration (slower but more accurate)
-let config = WhisperSTTConfig::default().high_accuracy();
-
-// Batch mode (disable streaming, original behavior)
-let config = WhisperSTTConfig::default().batch_mode();
-
-// Custom streaming configuration
-let streaming_config = StreamingConfig {
-    min_audio_ms: 2000,        // Minimum audio before first transcription
-    max_audio_ms: 10000,       // Maximum buffer before forced transcription
-    interim_interval_ms: 500,   // Emit interim results every 500ms
-    overlap_ms: 200,            // Overlap between transcriptions
-    vad: VADConfig::default(),  // Voice activity detection settings
-    enabled: true,              // Enable streaming mode
-};
-let config = WhisperSTTConfig::default()
-    .with_streaming(streaming_config);
-```
-
-### Streaming Configuration Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `min_audio_ms` | 3000 | Minimum audio (ms) before first transcription |
-| `max_audio_ms` | 15000 | Maximum buffer (ms) before forced transcription |
-| `interim_interval_ms` | 500 | How often to emit interim results (0 = disable) |
-| `overlap_ms` | 200 | Audio overlap between transcriptions |
-| `enabled` | true | Enable/disable streaming mode |
-
-### VAD Configuration
-
-```rust
-use sayna::core::stt::whisper::VADConfig;
-
-// Default VAD settings
-let vad = VADConfig::default();
-
-// Responsive VAD (faster detection, more false positives)
-let vad = VADConfig::responsive();
-
-// Accurate VAD (slower detection, fewer false positives)
-let vad = VADConfig::accurate();
-
-// Custom VAD settings
-let vad = VADConfig {
-    energy_threshold: 0.01,      // Speech detection threshold (0.0-1.0)
-    silence_duration_ms: 500,    // Silence required to mark speech end
-    min_speech_duration_ms: 250, // Minimum speech to be valid
-    frame_size: 1600,            // Frame size for energy calculation
-};
-```
+The streaming logic:
+1. Audio chunks are accumulated in a buffer via `send_audio()`
+2. Every 500ms, the model runs and emits interim results
+3. VAD detects 1.5 seconds of silence to mark end of speech
+4. On speech end, emits final result with `is_speech_final=true` and clears buffer
 
 ## Available Models
 
@@ -258,13 +211,9 @@ Set `language` to an empty string for automatic language detection:
 
 ## Response Format
 
-Whisper supports both streaming and batch modes:
+Whisper uses Voice Activity Detection (VAD) to detect speech boundaries and emits results at appropriate times.
 
-### Streaming Mode (Default)
-
-In streaming mode, Whisper uses Voice Activity Detection (VAD) to detect speech boundaries and emits results at appropriate times:
-
-**Interim Result** (during speech):
+**Interim Result** (during speech, every 500ms):
 ```json
 {
   "type": "stt_result",
@@ -275,20 +224,7 @@ In streaming mode, Whisper uses Voice Activity Detection (VAD) to detect speech 
 }
 ```
 
-**Final Result** (when speech ends):
-```json
-{
-  "type": "stt_result",
-  "transcript": "Hello, how are you today?",
-  "is_final": true,
-  "is_speech_final": true,
-  "confidence": 0.95
-}
-```
-
-### Batch Mode
-
-In batch mode (streaming disabled), Whisper behaves like a traditional batch transcription:
+**Final Result** (when speech ends after 1.5s silence):
 ```json
 {
   "type": "stt_result",
@@ -308,22 +244,13 @@ In batch mode (streaming disabled), Whisper behaves like a traditional batch tra
 | `is_speech_final` | `true` when speech segment ends (triggers TTS response) |
 | `confidence` | `0.95` for final results, `0.7` for interim results |
 
-### Streaming Behavior
+### Transcription Flow
 
-In streaming mode (default), Whisper:
-- Uses VAD to detect when the user starts/stops speaking
-- Emits interim results periodically during speech (configurable interval)
-- Sets `is_speech_final=true` when silence is detected after speech
-- Maintains a sliding window buffer with overlap for better word boundaries
-- Supports configurable min/max audio buffer sizes
-
-### Batch Processing Behavior
-
-In batch mode, Whisper:
-- Buffers audio until max buffer size (30 seconds)
-- Processes entire buffer as single transcription
-- Returns one final result per buffer
-- Call `flush()` to process remaining audio before disconnecting
+1. Audio chunks are accumulated in a buffer via `send_audio()`
+2. Every 500ms, transcription runs and emits interim results (if transcript changed)
+3. VAD detects 1.5 seconds of silence to mark end of speech
+4. On speech end, emits final result with `is_speech_final=true` and clears buffer
+5. Call `flush()` to process remaining audio before disconnecting
 
 ## Usage Examples
 
@@ -460,9 +387,9 @@ stt.on_error(error_callback).await?;
 
 ### Latency Considerations
 
-Since Whisper is batch-based:
-- Results arrive after buffer fills (30 seconds) or `flush()` is called
-- For shorter audio, call `flush()` to get immediate results
+- Interim results are emitted every 500ms during speech
+- Final results are emitted after 1.5 seconds of silence
+- Call `flush()` to get immediate final result before disconnecting
 - Audio shorter than 0.5 seconds is skipped during flush
 
 ## Comparison with Cloud Providers
@@ -471,7 +398,7 @@ Since Whisper is batch-based:
 |---------|---------|----------|--------|------------|-------|
 | API Key | No | Yes | Yes | Yes | Yes |
 | Streaming | Yes (VAD-based) | Yes | Yes | Yes | Yes |
-| Latency | Configurable | Real-time | Real-time | Real-time | Real-time |
+| Interim Interval | 500ms | Real-time | Real-time | Real-time | Real-time |
 | Languages | 99 | 30+ | 125+ | 30+ | 100+ |
 | Cost | Free | Per-minute | Per-minute | Per-minute | Per-minute |
 | Privacy | Full | Cloud | Cloud | Cloud | Cloud |
@@ -482,7 +409,6 @@ Since Whisper is batch-based:
 - Offline/air-gapped operation
 - Zero operational costs
 - Multilingual transcription
-- Full control over streaming behavior
 
 **Choose cloud providers when you need:**
 - Lower first-result latency

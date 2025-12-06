@@ -24,7 +24,8 @@
 
 use tracing::debug;
 
-use super::mel::SAMPLE_RATE;
+/// Default sample rate for VAD (16kHz, matching Whisper requirements)
+const DEFAULT_SAMPLE_RATE: u32 = 16000;
 
 /// VAD configuration parameters
 #[derive(Debug, Clone)]
@@ -46,6 +47,10 @@ pub struct VADConfig {
     /// Frame size for energy calculation (samples)
     /// Default: 1600 (100ms at 16kHz)
     pub frame_size: usize,
+
+    /// Sample rate in Hz
+    /// Default: 16000 (required for Whisper)
+    pub sample_rate: u32,
 }
 
 impl Default for VADConfig {
@@ -55,6 +60,7 @@ impl Default for VADConfig {
             silence_duration_ms: 500,
             min_speech_duration_ms: 250,
             frame_size: 1600, // 100ms at 16kHz
+            sample_rate: DEFAULT_SAMPLE_RATE,
         }
     }
 }
@@ -67,6 +73,7 @@ impl VADConfig {
             silence_duration_ms: 300,
             min_speech_duration_ms: 150,
             frame_size: 800, // 50ms
+            sample_rate: DEFAULT_SAMPLE_RATE,
         }
     }
 
@@ -77,12 +84,21 @@ impl VADConfig {
             silence_duration_ms: 700,
             min_speech_duration_ms: 400,
             frame_size: 1600, // 100ms
+            sample_rate: DEFAULT_SAMPLE_RATE,
         }
+    }
+
+    /// Create configuration with a specific sample rate
+    pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.sample_rate = sample_rate;
+        // Adjust frame size proportionally (100ms at the given sample rate)
+        self.frame_size = (sample_rate / 10) as usize;
+        self
     }
 
     /// Convert duration in ms to sample count
     fn duration_to_samples(&self, duration_ms: u32) -> usize {
-        ((duration_ms as u64 * SAMPLE_RATE as u64) / 1000) as usize
+        ((duration_ms as u64 * self.sample_rate as u64) / 1000) as usize
     }
 }
 
@@ -291,7 +307,7 @@ impl VoiceActivityDetector {
 
     /// Get the duration of current speech segment in milliseconds
     pub fn speech_duration_ms(&self) -> u64 {
-        ((self.speech_samples as u64) * 1000) / (SAMPLE_RATE as u64)
+        ((self.speech_samples as u64) * 1000) / (self.config.sample_rate as u64)
     }
 
     /// Get the current energy threshold
@@ -340,6 +356,7 @@ mod tests {
         assert_eq!(config.silence_duration_ms, 500);
         assert_eq!(config.min_speech_duration_ms, 250);
         assert_eq!(config.frame_size, 1600);
+        assert_eq!(config.sample_rate, 16000);
     }
 
     #[test]
@@ -396,6 +413,7 @@ mod tests {
             silence_duration_ms: 100,   // Short for testing
             min_speech_duration_ms: 50, // Short for testing
             frame_size: 160,            // Small frame for testing
+            ..Default::default()
         };
         let mut vad = VoiceActivityDetector::with_config(config);
 
@@ -482,6 +500,7 @@ mod tests {
             silence_duration_ms: 100,
             min_speech_duration_ms: 500, // Require 500ms minimum
             frame_size: 160,
+            ..Default::default()
         };
         let mut vad = VoiceActivityDetector::with_config(config);
 
@@ -527,6 +546,7 @@ mod tests {
             silence_duration_ms: 100,
             min_speech_duration_ms: 50,
             frame_size: 160,
+            ..Default::default()
         };
         let mut vad = VoiceActivityDetector::with_config(config);
 

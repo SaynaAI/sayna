@@ -274,12 +274,7 @@ fn test_whisper_nova3_overridden_to_base() {
 #[test]
 fn test_whisper_stt_config_default() {
     let config = WhisperSTTConfig::default();
-    // Default uses streaming mode with 15s max buffer
-    assert_eq!(config.max_audio_ms(), 15000);
-    assert!(!config.timestamps);
     assert!(config.cache_path.is_none());
-    // Streaming is enabled by default
-    assert!(config.streaming.enabled);
 }
 
 /// Test WhisperSTTConfig from STTConfig

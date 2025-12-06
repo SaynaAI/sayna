@@ -60,7 +60,7 @@ pub use assets::{
     decoder_model_path, download_assets, encoder_model_path, get_model_url, list_available_models,
     tokenizer_path,
 };
-pub use client::{StreamingConfig, WhisperSTT, WhisperSTTConfig};
+pub use client::{WhisperSTT, WhisperSTTConfig};
 pub use mel::{
     CHUNK_LENGTH, CHUNK_LENGTH_SECONDS, DEFAULT_N_MELS, HOP_LENGTH, LARGE_V3_N_MELS, MelProcessor,
     N_FFT, N_FRAMES, SAMPLE_RATE, duration_ms_to_samples, pcm16_bytes_to_f32, pcm16_to_f32,
