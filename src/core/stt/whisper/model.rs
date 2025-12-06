@@ -170,8 +170,15 @@ pub struct InferenceConfig {
 
 impl Default for InferenceConfig {
     fn default() -> Self {
+        // Auto-detect number of CPU cores for optimal threading
+        // Use all available cores minus 1 to leave headroom, minimum 2
+        let num_cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        let num_threads = (num_cpus.saturating_sub(1)).max(2);
+
         Self {
-            num_threads: 4,
+            num_threads,
             max_length: 448,  // Whisper's default max tokens
             temperature: 0.0, // Greedy decoding by default
             suppress_blank: true,
@@ -778,7 +785,8 @@ mod tests {
     #[test]
     fn test_inference_config_default() {
         let config = InferenceConfig::default();
-        assert_eq!(config.num_threads, 4);
+        // num_threads is auto-detected based on CPU cores, minimum 2
+        assert!(config.num_threads >= 2);
         assert_eq!(config.max_length, 448);
         assert_eq!(config.temperature, 0.0);
         assert!(config.suppress_blank);

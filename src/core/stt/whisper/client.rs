@@ -51,6 +51,11 @@ const SILENCE_TIMEOUT_MS: u32 = 1500;
 /// Minimum audio duration before first transcription (milliseconds)
 const MIN_AUDIO_MS: u64 = 100;
 
+/// Maximum audio window for interim results (milliseconds)
+/// Limits transcription time by only processing recent audio for interim results
+/// Full buffer is still used for final results
+const MAX_INTERIM_WINDOW_MS: u64 = 10000;
+
 /// Type alias for the async result callback
 type AsyncSTTCallback =
     Box<dyn Fn(STTResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -289,6 +294,9 @@ impl WhisperSTT {
     }
 
     /// Transcribe audio samples and create result
+    ///
+    /// Uses spawn_blocking to avoid blocking the async runtime during CPU-intensive
+    /// model inference.
     async fn transcribe_audio(
         &self,
         audio_samples: &[f32],
@@ -297,17 +305,17 @@ impl WhisperSTT {
     ) -> Result<STTResult, STTError> {
         let model = self
             .model
-            .as_ref()
+            .clone()
             .ok_or_else(|| STTError::ConnectionFailed("Model not loaded".to_string()))?;
 
         let tokenizer = self
             .tokenizer
-            .as_ref()
+            .clone()
             .ok_or_else(|| STTError::ConnectionFailed("Tokenizer not loaded".to_string()))?;
 
         let mel_processor = self
             .mel_processor
-            .as_ref()
+            .clone()
             .ok_or_else(|| STTError::ConnectionFailed("Mel processor not loaded".to_string()))?;
 
         let config = self.config.as_ref().ok_or_else(|| {
@@ -323,34 +331,49 @@ impl WhisperSTT {
             is_speech_final
         );
 
-        // 1. Compute mel spectrogram
-        let mel_features = mel_processor.compute(audio_samples);
+        // Clone data needed for blocking task
+        let audio_samples = audio_samples.to_vec();
+        let lang_code = Self::parse_language_code(&config.base.language).to_string();
 
-        // 2. Set up tokenizer with language
-        let mut tokenizer_copy = WhisperTokenizer::new().map_err(|e| {
-            STTError::ConfigurationError(format!("Failed to create tokenizer: {}", e))
-        })?;
+        // Run CPU-intensive work in blocking thread pool
+        let raw_transcript = tokio::task::spawn_blocking(move || {
+            // 1. Compute mel spectrogram
+            let mel_features = mel_processor.compute(&audio_samples);
 
-        let lang_code = Self::parse_language_code(&config.base.language);
-        if let Err(e) = tokenizer_copy.set_language(lang_code) {
-            warn!(
-                "Failed to set language '{}', using English: {}",
-                lang_code, e
-            );
-        }
-        tokenizer_copy.set_task(Task::Transcribe);
+            // 2. Set up tokenizer with language
+            let mut tokenizer_for_prompt = match WhisperTokenizer::new() {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(STTError::ConfigurationError(format!(
+                        "Failed to create tokenizer: {}",
+                        e
+                    )));
+                }
+            };
 
-        let initial_tokens = tokenizer_copy.get_prompt_tokens();
+            if let Err(e) = tokenizer_for_prompt.set_language(&lang_code) {
+                tracing::warn!(
+                    "Failed to set language '{}', using English: {}",
+                    lang_code,
+                    e
+                );
+            }
+            tokenizer_for_prompt.set_task(Task::Transcribe);
 
-        // 3. Run model transcription
-        debug!(
-            "Running model transcription with {} initial tokens",
-            initial_tokens.len()
-        );
-        let output_tokens = model.transcribe(&mel_features, &initial_tokens)?;
+            let initial_tokens = tokenizer_for_prompt.get_prompt_tokens();
 
-        // 4. Decode tokens to text
-        let raw_transcript = tokenizer.decode(&output_tokens)?;
+            // 3. Run model transcription
+            let output_tokens = model.transcribe(&mel_features, &initial_tokens)?;
+
+            // 4. Decode tokens to text
+            let raw_transcript = tokenizer.decode(&output_tokens)?;
+
+            Ok::<String, STTError>(raw_transcript)
+        })
+        .await
+        .map_err(|e| {
+            STTError::AudioProcessingError(format!("Transcription task failed: {}", e))
+        })??;
 
         // 5. Filter out special annotations like [silence], [music], etc.
         let transcript = Self::filter_special_annotations(&raw_transcript);
@@ -421,10 +444,19 @@ impl WhisperSTT {
                 *self.last_transcription_time.lock().await = Instant::now();
             }
             VADState::Speaking | VADState::Silence => {
-                // During speech or silence, emit interim results every 500ms
+                // During speech or silence, emit interim results at interval
                 if should_transcribe_interim {
                     let buffer = self.audio_buffer.lock().await;
-                    let audio_to_process = buffer.clone();
+
+                    // Limit interim transcription to last MAX_INTERIM_WINDOW_MS
+                    // This keeps transcription fast by not processing too much audio
+                    let max_samples = duration_ms_to_samples(MAX_INTERIM_WINDOW_MS);
+                    let audio_to_process = if buffer.len() > max_samples {
+                        // Use only the last N samples for interim results
+                        buffer[buffer.len() - max_samples..].to_vec()
+                    } else {
+                        buffer.clone()
+                    };
                     drop(buffer);
 
                     if !audio_to_process.is_empty() {
@@ -1027,7 +1059,8 @@ mod tests {
     fn test_constants() {
         assert_eq!(INTERIM_INTERVAL_MS, 500);
         assert_eq!(SILENCE_TIMEOUT_MS, 1500);
-        assert_eq!(MIN_AUDIO_MS, 500);
+        assert_eq!(MIN_AUDIO_MS, 300);
+        assert_eq!(MAX_INTERIM_WINDOW_MS, 10000);
     }
 
     #[test]
