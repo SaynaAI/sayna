@@ -1,40 +1,130 @@
 ---
-description: 
-globs: 
+description: Core STT/TTS abstraction layer documentation
+globs: src/core/**/*.rs
 alwaysApply: true
 ---
-# Sayna Project
+# Sayna Core Module
 
-This Rust Axum project is a unified STT, TTS server that handles a real time websocket APIs for STT and TTS providers like Deepgram, ElevenLabs, Google, Microsoft Azure, or other providers into one unified Websocket API, that can abstract away from providers.
+This Rust Axum project is a unified STT, TTS server that handles real-time WebSocket APIs for STT and TTS providers like Deepgram, ElevenLabs, Google, Microsoft Azure, Cartesia, and others into one unified WebSocket API that abstracts away provider-specific details.
 
-The main business logic is inside [mod.rs](mdc:src/core/mod.rs) ("core" folder), that uses the abstraction concept to have a unified higher level implementations of TTS and STT separated as a dedicated folders.
+The main business logic is inside `src/core/`, which uses trait-based abstraction to have unified higher-level implementations of TTS and STT separated into dedicated folders.
 
-## STT Base Abstraction
+## STT Base Abstraction (`src/core/stt/base.rs`)
 
-`BaseSTT` abstraction should have following functions
-* "new" - Create an instance of BaseSTT with an argument of the base stt config
-* "connect" - The main function to initiate a connection to STT providers like Deepgram or ElevenLabs
-* "disconnect" - The function to disconnect from provider
-* "is_ready" - The function to indicate whenever the connection is ready with a provider to be used
-* "send_audio" - The function to send the audio bytes chunk to deliver to the provider for STT
-* "on_result" - The function to register a callback that gets triggered when there is a transcription result from STT provider
+The `BaseSTT` trait defines the interface for all STT providers:
 
-The `STTResult` Type should contain following fields
+### Required Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `fn new(config: STTConfig) -> Result<Self, STTError>` | Create a new instance with STT configuration |
+| `connect` | `async fn connect(&mut self) -> Result<(), STTError>` | Initiate connection to STT provider |
+| `disconnect` | `async fn disconnect(&mut self) -> Result<(), STTError>` | Disconnect from provider |
+| `is_ready` | `fn is_ready(&self) -> bool` | Check if connection is ready |
+| `send_audio` | `async fn send_audio(&mut self, audio_data: Vec<u8>) -> Result<(), STTError>` | Send audio bytes for transcription |
+| `on_result` | `async fn on_result(&mut self, callback: STTResultCallback) -> Result<(), STTError>` | Register transcription result callback |
+| `on_error` | `async fn on_error(&mut self, callback: STTErrorCallback) -> Result<(), STTError>` | Register error callback for streaming errors |
+| `get_config` | `fn get_config(&self) -> Option<&STTConfig>` | Get current configuration |
+| `update_config` | `async fn update_config(&mut self, config: STTConfig) -> Result<(), STTError>` | Update configuration while connected |
+| `get_provider_info` | `fn get_provider_info(&self) -> &'static str` | Get provider-specific information |
+
+### STTResult Type
+
+```rust
+pub struct STTResult {
+    pub transcript: String,      // The transcribed text
+    pub is_final: bool,          // Whether this is a final result
+    pub is_speech_final: bool,   // Whether speech segment ended
+    pub confidence: f32,         // Confidence score (0.0 to 1.0)
+}
 ```
-transcript: str
-is_final: bool
-is_speech_final: bool
-confidence: float
+
+### STTConfig Type
+
+```rust
+pub struct STTConfig {
+    pub provider: String,        // Provider name (e.g., "deepgram")
+    pub api_key: String,         // API key for the provider
+    pub language: String,        // Language code (e.g., "en-US")
+    pub sample_rate: u32,        // Audio sample rate in Hz
+    pub channels: u16,           // Number of audio channels
+    pub punctuation: bool,       // Enable punctuation
+    pub encoding: String,        // Audio encoding (e.g., "linear16")
+    pub model: String,           // Model to use (e.g., "nova-3")
+}
 ```
 
-## TTS Base Abstraction
+## TTS Base Abstraction (`src/core/tts/base.rs`)
 
-`BaseTTS` abstraction should have following functions
-* "new" - Create an instance of BaseTTS with an argument of the base tts config
-* "connect" - The main function to initiate a connection to TTS providers like Deepgram or ElevenLabs
-* "disconnect" - The function to disconnect from provider
-* "is_ready" - The function to indicate whenever the connection is ready with a provider to be used
-* "speak" - The function to send a text to the target TTS provider
-* "clear" - Send a clear command to the target provider for the active connection
-* "flush" - Flush command to the target TTS provider, that forces the TTS provider to start processing the queued text
-* "on_audio" - The function to register a callback that will be triggered when the audio provider responds with an audio data
+The `BaseTTS` trait defines the interface for all TTS providers:
+
+### Required Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `fn new(config: TTSConfig) -> TTSResult<Self>` | Create a new instance with TTS configuration |
+| `connect` | `async fn connect(&mut self) -> TTSResult<()>` | Initiate connection to TTS provider |
+| `disconnect` | `async fn disconnect(&mut self) -> TTSResult<()>` | Disconnect from provider |
+| `is_ready` | `fn is_ready(&self) -> bool` | Check if connection is ready |
+| `speak` | `async fn speak(&mut self, text: &str, flush: bool) -> TTSResult<()>` | Send text for synthesis (flush=true starts immediately) |
+| `clear` | `async fn clear(&mut self) -> TTSResult<()>` | Clear queued text |
+| `flush` | `async fn flush(&self) -> TTSResult<()>` | Force processing of queued text |
+| `on_audio` | `fn on_audio(&mut self, callback: Arc<dyn AudioCallback>) -> TTSResult<()>` | Register audio output callback |
+| `get_connection_state` | `fn get_connection_state(&self) -> ConnectionState` | Get current connection state |
+| `remove_audio_callback` | `fn remove_audio_callback(&mut self) -> TTSResult<()>` | Remove registered callback |
+| `get_provider_info` | `fn get_provider_info(&self) -> serde_json::Value` | Get provider-specific information |
+
+### AudioCallback Trait
+
+```rust
+pub trait AudioCallback: Send + Sync {
+    fn on_audio(&self, audio_data: AudioData) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn on_error(&self, error: TTSError) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn on_complete(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+```
+
+### AudioData Type
+
+```rust
+pub struct AudioData {
+    pub data: Vec<u8>,           // Audio bytes
+    pub sample_rate: u32,        // Sample rate in Hz
+    pub format: String,          // Audio format (e.g., "pcm", "wav")
+    pub duration_ms: Option<u32>, // Duration in milliseconds
+}
+```
+
+### TTSConfig Type
+
+```rust
+pub struct TTSConfig {
+    pub provider: String,              // Provider name
+    pub api_key: String,               // API key
+    pub voice_id: Option<String>,      // Voice ID or name
+    pub model: String,                 // Model to use
+    pub speaking_rate: Option<f32>,    // Speaking rate (0.25 to 4.0)
+    pub audio_format: Option<String>,  // Audio format preference
+    pub sample_rate: Option<u32>,      // Sample rate preference
+    pub connection_timeout: Option<u64>, // Connection timeout (seconds)
+    pub request_timeout: Option<u64>,  // Request timeout (seconds)
+    pub pronunciations: Vec<Pronunciation>, // Custom pronunciations
+    pub request_pool_size: Option<usize>,   // HTTP request pool size
+}
+```
+
+## Supported Providers
+
+### STT Providers (`src/core/stt/`)
+- **Deepgram** - WebSocket-based streaming STT
+- **Google** - gRPC-based Cloud Speech-to-Text V2
+- **ElevenLabs** - WebSocket-based STT
+- **Microsoft Azure** - WebSocket-based Speech Services
+- **Cartesia** - WebSocket-based STT
+
+### TTS Providers (`src/core/tts/`)
+- **Deepgram** - WebSocket/HTTP-based TTS
+- **ElevenLabs** - WebSocket-based streaming TTS
+- **Google** - HTTP-based Cloud Text-to-Speech
+- **Microsoft Azure** - WebSocket-based Speech Services
+- **Cartesia** - WebSocket-based streaming TTS

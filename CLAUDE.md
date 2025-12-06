@@ -9,557 +9,166 @@ Sayna is a real-time voice processing server built in Rust that provides unified
 ## Development Commands
 
 ```bash
-# Run the development server
-cargo run
-
-# Run all tests
-cargo test
-
-# Run a specific test
-cargo test test_name
-
-# Build for release
-cargo build --release
-
-# Check code without building
-cargo check
-
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy
-
-# Build Docker image
-docker build -t sayna .
-
-# Run with environment variables
-cargo run
+cargo run                    # Run development server
+cargo run -- -c config.yaml  # Run with YAML config file
+cargo test                   # Run all tests
+cargo test test_name         # Run specific test
+cargo build --release        # Build for release
+cargo check                  # Check without building
+cargo fmt                    # Format code
+cargo clippy                 # Run linter
+docker build -t saynaai/sayna .      # Build Docker image
 ```
 
 ### Feature Flags
 - `turn-detect` (default): ONNX-based turn detection. Required for `sayna init`.
 - `noise-filter` (default): DeepFilterNet noise suppression. Disable to reduce dependencies.
-- `openapi`: OpenAPI 3.1 specification generation and documentation endpoints using utoipa crate.
+- `openapi`: OpenAPI 3.1 specification generation using utoipa crate.
 
-Use Cargo features to enable or disable these at compile time, e.g. `cargo check --no-default-features` or `cargo build --features turn-detect,openapi`.
+```bash
+cargo check --no-default-features              # Disable all default features
+cargo build --features turn-detect,openapi     # Enable specific features
+cargo run --features openapi -- openapi -o docs/openapi.yaml  # Generate OpenAPI spec
+```
 
 ## High-Level Architecture
 
-### Project-Specific Rules and Guidelines
+### Development Rules
 
 The codebase includes detailed development rules in `.cursor/rules/`:
-- **`rust.mdc`**: Comprehensive Rust best practices including code organization, design patterns, performance optimization, security, and testing strategies
-- **`core.mdc`**: Business logic specifications for STT/TTS provider abstractions and unified API design
-- **`axum.mdc`**: Axum framework best practices for WebSocket and REST API development
-- **`livekit.mdc`**: LiveKit integration patterns and WebSocket API implementation details
-- **`openapi.mdc`**: OpenAPI 3.1 documentation guidelines using utoipa crate, including schema annotations, path documentation, and spec generation
+- **`rust.mdc`**: Rust best practices, design patterns, performance, security, testing
+- **`core.mdc`**: STT/TTS provider abstractions (`BaseSTT`, `TTSProvider` traits)
+- **`axum.mdc`**: Axum framework patterns for WebSocket and REST APIs
+- **`livekit.mdc`**: LiveKit integration patterns and WebSocket API details
+- **`openapi.mdc`**: OpenAPI 3.1 documentation guidelines using utoipa
 
-Always consult these rule files when implementing new features or modifying existing code to ensure consistency with established patterns.
-
+Always consult these rule files when implementing new features.
 
 ### Core Components
 
-1. **VoiceManager** (`src/core/voice_manager.rs`): Central coordinator for STT/TTS operations
+1. **VoiceManager** (`src/core/voice_manager/`): Central coordinator for STT/TTS
    - Manages provider lifecycle and switching
-   - Implements speech final timing control with fallback mechanisms
-   - Thread-safe with Arc<RwLock<>> for concurrent access
+   - Thread-safe with `Arc<RwLock<>>` for concurrent access
    - Handles callbacks for STT results and audio output
 
 2. **Provider System** (`src/core/stt/` and `src/core/tts/`):
    - Trait-based abstraction for pluggable providers
-   - Factory pattern for provider instantiation
-   - Current STT providers: Deepgram (WebSocket), Google Cloud Speech-to-Text v2 (gRPC), ElevenLabs (WebSocket), Cartesia (WebSocket)
-   - Current TTS providers: Deepgram, ElevenLabs, Google Cloud TTS, Microsoft Azure TTS, Cartesia
-   - Providers implement `STTProvider` or `TTSProvider` traits
+   - **STT**: Deepgram, Google (gRPC), ElevenLabs, Microsoft Azure, Cartesia
+   - **TTS**: Deepgram, ElevenLabs, Google, Microsoft Azure, Cartesia
 
-3. **WebSocket Handler** (`src/handlers/ws.rs`):
-   - Real-time bidirectional communication endpoint
-   - Processes audio streams, configuration updates, and control messages
-   - Integrates with LiveKit for room-based audio
-   - Unified message handling for different data sources
+3. **WebSocket Handler** (`src/handlers/ws/`):
+   - Real-time bidirectional communication at `/ws`
+   - Processes audio streams, config updates, control messages
 
 4. **LiveKit Integration** (`src/livekit/`):
    - WebRTC audio streaming with room/participant management
-   - Audio track subscription and processing
-   - Data message forwarding between participants
-   - Handles connection lifecycle and error recovery
+   - Audio track subscription and data message forwarding
 
 5. **DeepFilterNet** (`src/utils/noise_filter.rs`):
-   - Advanced noise reduction with adaptive processing
-   - Thread pool for CPU-intensive operations
-   - Conservative blending to preserve speech quality
-   - Lazy static initialization for model loading
+   - Advanced noise reduction with thread pool for CPU-intensive operations
 
-6. **Authentication System** (`src/auth/` and `src/middleware/auth.rs`):
-   - Optional JWT-based authentication with external validation service
-   - AuthClient for communicating with auth service
-   - JWT signing for request integrity and tamper prevention
-   - Middleware for protecting API endpoints
-   - Configurable via environment variables
+6. **Authentication** (`src/auth/` and `src/middleware/auth.rs`):
+   - Optional JWT-based auth with external validation service
 
 ### Request Flow
 
-1. **WebSocket Connection**: Client connects to `/ws` endpoint
-2. **Configuration**: Client sends config with provider selection and parameters
-3. **LiveKit Token Generation** (if using LiveKit): After receiving Ready message with room info, call `POST /livekit/token` to get participant token
-4. **Audio Processing**:
-   - Incoming audio → DeepFilterNet (optional) → STT Provider → Text results
-   - Text input → TTS Provider → Audio output → Client
-5. **LiveKit Mode**: Audio streams from LiveKit rooms processed in real-time
+1. Client connects to `/ws` WebSocket endpoint
+2. Client sends config with provider selection
+3. Server sends `Ready` message with `stream_id` and LiveKit room info
+4. Audio processing: Incoming audio → DeepFilterNet (optional) → STT → Text
+5. TTS: Text → TTS Provider → Audio → Client
+6. For LiveKit: Call `POST /livekit/token` to get participant token
 
 ### Key Design Patterns
 
 - **Factory Pattern**: Provider creation through factory functions
-- **Observer Pattern**: Callback registration for STT/TTS events  
+- **Observer Pattern**: Callback registration for STT/TTS events
 - **Singleton Pattern**: Lazy static for DeepFilterNet model
 - **Actor Pattern**: Message passing for WebSocket communication
-- **Repository Pattern**: State management with AppState
 
 ## Configuration
 
-Sayna supports two configuration methods:
+See [config.example.yaml](config.example.yaml) for all available options.
 
-### YAML Configuration File (Recommended)
+**Priority**: YAML File > Environment Variables > .env File > Defaults
 
-Use a YAML configuration file for cleaner, more maintainable configuration:
-
-```bash
-# Start server with YAML config
-sayna -c config.yaml
-```
-
-See [config.example.yaml](config.example.yaml) for all available options. The file uses logical prefixes:
-- `server`: Server settings (host, port)
-- `livekit`: LiveKit integration
-- `providers`: Provider API keys (Deepgram, ElevenLabs)
-- `recording`: S3 recording configuration
-- `cache`: Cache settings
-- `auth`: Authentication configuration
-
-### Environment Variables and .env File
-
-All configuration options can also be set via environment variables or a `.env` file. The `.env` file is always loaded if present (in both YAML and ENV-only modes). When using a YAML file, YAML values **override** environment variables, allowing flexible deployment configurations with environment variables and .env providing the base configuration.
-
-Required for production:
-- `DEEPGRAM_API_KEY`: Deepgram API authentication
-- `ELEVENLABS_API_KEY`: ElevenLabs API authentication (used for both STT and TTS)
-- `CARTESIA_API_KEY`: Cartesia API authentication (used for both STT and TTS). STT uses ink-whisper model, TTS uses sonic-3 model. Get from Cartesia dashboard: https://play.cartesia.ai/
-- `GOOGLE_APPLICATION_CREDENTIALS`: Path to Google Cloud service account JSON file (for Google STT). The `project_id` is automatically extracted from the credentials file.
-- `AZURE_SPEECH_SUBSCRIPTION_KEY`: Azure Speech Services subscription key (for Azure STT and TTS). Get from Azure Portal → Speech resource → Keys and Endpoint.
-- `AZURE_SPEECH_REGION`: Azure region where the Speech resource is deployed (default: "eastus"). The subscription key is tied to this specific region. Used for both STT and TTS.
-- `LIVEKIT_URL`: LiveKit server WebSocket URL (default: ws://localhost:7880)
-- `HOST`: Server bind address (default: 0.0.0.0)
-- `PORT`: Server port (default: 3001)
-- `RECORDING_S3_PREFIX`: Optional S3 path prefix for recordings (e.g., "recordings/production")
-
-Optional authentication:
-- `AUTH_REQUIRED`: Enable authentication (default: false, accepts: true/false/1/0/yes/no)
-- `AUTH_SERVICE_URL`: External auth service endpoint (required if auth enabled)
-- `AUTH_SIGNING_KEY_PATH`: Path to JWT signing private key (required if auth enabled)
-- `AUTH_API_SECRET`: API secret for simple token-based auth (alternative to JWT)
-- `AUTH_TIMEOUT_SECONDS`: Auth request timeout in seconds (default: 5)
-
-**Configuration Priority**: YAML File > Environment Variables > .env File > Defaults
-
-## Testing Strategy
-
-- **Unit Tests**: Embedded in modules, run with `cargo test`
-- **Integration Tests**: In `/tests/` directory, test API endpoints and WebSocket
-- **Provider Tests**: Mock external APIs to test provider implementations
-- **Performance Tests**: Audio processing benchmarks in noise filter module
-
-When adding new features:
-1. Add unit tests in the same file using `#[cfg(test)]` module
-2. For API changes, update integration tests in `/tests/`
-3. Test error cases and edge conditions explicitly
-4. Use `#[tokio::test]` for async test functions
-
-## Critical Files and Their Purposes
-
-- `src/core/voice_manager.rs`: Central orchestration of voice processing
-- `src/handlers/ws.rs`: WebSocket message handling and routing
-- `src/handlers/livekit.rs`: LiveKit token generation REST endpoint
-- `src/livekit/livekit_manager.rs`: LiveKit room and participant management
-- `src/livekit/room_handler.rs`: LiveKit room creation and JWT token generation
-- `src/utils/noise_filter.rs`: DeepFilterNet integration and audio processing
-- `src/config/`: Modular configuration system
-  - `mod.rs`: ServerConfig struct and public API
-  - `yaml.rs`: YAML file loading
-  - `env.rs`: Environment variable loading
-  - `merge.rs`: Configuration merging logic
-  - `validation.rs`: Configuration validation
-- `src/utils/sip_hooks.rs`: SIP hooks cache file operations (read/write/merge)
-- `src/errors/mod.rs`: Centralized error types using thiserror
-- `src/docs/openapi.rs`: OpenAPI 3.1 specification and documentation (feature-gated)
+Key environment variables:
+- `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `CARTESIA_API_KEY`
+- `GOOGLE_APPLICATION_CREDENTIALS` (path to service account JSON)
+- `AZURE_SPEECH_SUBSCRIPTION_KEY`, `AZURE_SPEECH_REGION`
+- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+- `AUTH_REQUIRED`, `AUTH_SERVICE_URL`, `AUTH_SIGNING_KEY_PATH`
 
 ## Adding New Providers
 
 ### STT Providers
 
-1. Implement the `BaseSTT` trait in `src/core/stt/`
-2. Create provider-specific configuration struct (e.g., `GoogleSTTConfig`)
+1. Implement `BaseSTT` trait in `src/core/stt/`
+2. Create provider-specific config struct
 3. Add factory function following existing pattern
-4. Register in `src/core/stt/mod.rs`:
-   - Add to `STTProvider` enum
-   - Update `create_stt_provider` factory function
-   - Add re-exports for public types
-5. Update WebSocket handler if needed
-6. Add tests to cover new provider functionality
+4. Register in `src/core/stt/mod.rs` (enum + factory)
+5. Add tests
 
 ### TTS Providers
 
-1. Implement the `TTSProvider` trait in `src/core/tts/`
-2. Add factory function following existing pattern
-3. Update `VoiceManager` to support the new provider in configuration
-4. Add provider-specific configuration to `WebSocketMessage::Config`
-5. Update tests to cover new provider functionality
+1. Implement `TTSProvider` trait in `src/core/tts/`
+2. Add factory function
+3. Update `VoiceManager` configuration support
+4. Add tests
 
-### Current STT Provider Implementations
-
-- **Deepgram** (`deepgram.rs`): WebSocket-based streaming, uses `tokio-tungstenite`
-- **Google** (`google.rs`): gRPC bidirectional streaming, uses `tonic` with Google Cloud protos
-- **ElevenLabs** (`elevenlabs.rs`): WebSocket-based streaming with JSON messages, uses `tokio-tungstenite`
-- **Microsoft Azure** (`azure/`): WebSocket-based streaming, uses `tokio-tungstenite` with Azure Speech Services SDK protocol
-- **Cartesia** (`cartesia/`): WebSocket-based streaming with raw binary audio, uses `tokio-tungstenite`
-
-See [docs/google-stt.md](docs/google-stt.md) for detailed Google STT integration documentation.
-
-### ElevenLabs STT Integration
-
-ElevenLabs Speech-to-Text is integrated using their Real-Time WebSocket API for streaming transcription.
-
-**Key Features:**
-- Real-time streaming transcription
-- Multiple regional endpoints (US, EU, India)
-- VAD-based automatic or manual commit strategies
-- Word-level timestamps support
-- Multiple audio format support (PCM, μ-law)
-
-**Configuration:**
-```rust
-let config = STTConfig {
-    provider: "elevenlabs".to_string(),
-    api_key: "your-elevenlabs-api-key".to_string(),
-    language: "en".to_string(),
-    sample_rate: 16000,
-    ..Default::default()
-};
-```
-
-**API Key:** Uses the same `ELEVENLABS_API_KEY` environment variable as TTS.
-
-**Supported Audio Formats:**
-- `pcm_8000` - 8kHz PCM
-- `pcm_16000` - 16kHz PCM (recommended for voice)
-- `pcm_22050` - 22.05kHz PCM
-- `pcm_24000` - 24kHz PCM
-- `pcm_44100` - 44.1kHz PCM
-- `pcm_48000` - 48kHz PCM
-- `ulaw_8000` - 8kHz μ-law (telephony)
-
-**Regional Endpoints:**
-- Default: `wss://api.elevenlabs.io`
-- US: `wss://api.us.elevenlabs.io`
-- EU: `wss://api.eu.residency.elevenlabs.io`
-- India: `wss://api.in.residency.elevenlabs.io`
-
-See [ElevenLabs STT API Documentation](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime) for detailed API reference.
-
-### Cartesia STT Integration
-
-Cartesia Speech-to-Text is integrated using their Real-Time WebSocket API for streaming transcription.
-
-**Key Features:**
-- Real-time streaming transcription
-- ink-whisper model
-- VAD-based automatic endpointing
-- Word-level timestamps support
-- Automatic language detection
-- Raw binary PCM audio (no base64 encoding)
-
-**Configuration:**
-```rust
-let config = STTConfig {
-    provider: "cartesia".to_string(),
-    api_key: "your-cartesia-api-key".to_string(),
-    language: "en".to_string(),
-    sample_rate: 16000,
-    ..Default::default()
-};
-```
-
-**API Key:** Set `CARTESIA_API_KEY` environment variable.
-
-**Supported Audio Formats:**
-- `pcm_s16le` - PCM signed 16-bit little-endian (required)
-- Sample rates: 8000, 16000 (recommended), 22050, 24000, 44100, 48000 Hz
-
-**Supported Languages:**
-ISO-639-1 codes: `en`, `zh`, `de`, `es`, `ru`, `ko`, `fr`, `ja`, `pt`, `tr`, `pl`, and many more.
-
-See [docs/cartesia-stt.md](docs/cartesia-stt.md) for detailed API reference.
-
-### Cartesia TTS Integration
-
-Cartesia Text-to-Speech is integrated using their WebSocket API for high-quality streaming speech synthesis.
-
-**Key Features:**
-- High-quality Sonic voice models
-- Low-latency streaming synthesis
-- 40+ language support
-- Multiple audio format outputs (PCM, WAV, MP3)
-- Voice library with professional voices
-- Speed control via speaking rate
-
-**Configuration:**
-```rust
-let config = TTSConfig {
-    provider: "cartesia".to_string(),
-    api_key: "your-cartesia-api-key".to_string(),
-    voice_id: Some("a0e99841-438c-4a64-b679-ae501e7d6091".to_string()),
-    model: Some("sonic-3".to_string()),
-    audio_format: Some("linear16".to_string()),
-    sample_rate: Some(24000),
-    speaking_rate: Some(1.0),
-    ..Default::default()
-};
-```
-
-**API Key:** Uses the same `CARTESIA_API_KEY` environment variable as Cartesia STT.
-
-**Supported Audio Formats:**
-- `linear16` / `pcm` - 16-bit PCM (recommended for real-time)
-- `wav` - WAV container
-- `mp3` - Compressed MP3
-
-**Supported Sample Rates:**
-- 8000, 16000, 22050, 24000, 44100, 48000 Hz
-
-**Models:**
-- `sonic-3` - Latest stable model (recommended)
-- Pinned versions available for consistency (e.g., `sonic-3-2025-10-27`)
-
-**Speaking Rate:**
-- Range: 0.1 to 5.0 (default: 1.0)
-- Lower values produce slower speech
-- Higher values produce faster speech
-
-See [docs/cartesia-tts.md](docs/cartesia-tts.md) for detailed API reference.
-
-### Google Cloud TTS Integration
-
-Google Cloud Text-to-Speech provides high-quality neural voices with WaveNet, Neural2, and Studio voice technologies.
-
-**Key Features:**
-- 400+ voices across 60+ languages
-- WaveNet, Neural2, and Studio voice technologies
-- Configurable speaking rate and pitch
-- Multiple audio format outputs (LINEAR16, MP3, OGG_OPUS, MULAW, ALAW)
-- Uses the same credentials as Google STT
-
-**Configuration:**
-```rust
-let config = TTSConfig {
-    provider: "google".to_string(),
-    voice_id: "en-US-Wavenet-D".to_string(),
-    audio_format: "linear16".to_string(),
-    sample_rate: 24000,
-    speaking_rate: 1.0,
-    ..Default::default()
-};
-```
-
-**Authentication:** Uses the same `GOOGLE_APPLICATION_CREDENTIALS` environment variable or `google_credentials` config as Google STT. See [docs/google-stt.md](docs/google-stt.md) for authentication setup.
-
-**Voice Naming Convention:**
-Voice names follow the pattern: `{language}-{region}-{type}-{variant}`
-- `en-US-Wavenet-D` - English US, WaveNet technology, voice variant D
-- `en-GB-Neural2-A` - British English, Neural2 technology, voice variant A
-- `es-ES-Standard-B` - Spanish Spain, Standard technology, voice variant B
-
-**Voice Types (ordered by quality):**
-- **Standard**: Basic quality, fast synthesis, lowest cost
-- **WaveNet**: High quality, natural prosody
-- **Neural2**: Improved WaveNet, more natural intonation
-- **Studio**: Highest quality, limited languages
-
-**Supported Audio Formats:**
-- `linear16` - 16-bit PCM (recommended for real-time)
-- `mp3` - Compressed MP3
-- `ogg_opus` - Opus in Ogg container
-- `mulaw` - 8-bit μ-law (telephony, US)
-- `alaw` - 8-bit A-law (telephony, Europe)
-
-See [docs/google-tts.md](docs/google-tts.md) for detailed Google TTS integration documentation.
-
-### Microsoft Azure TTS Integration
-
-Microsoft Azure Text-to-Speech provides high-quality neural voices across 140+ languages with natural prosody and intonation.
-
-**Key Features:**
-- 400+ neural voices across 140+ languages
-- Natural sounding speech synthesis with SSML support
-- Multiple audio output formats (PCM, MP3, Opus)
-- Uses the same credentials as Azure STT
-- Regional endpoints for optimized latency
-
-**Configuration:**
-```rust
-let config = TTSConfig {
-    provider: "azure".to_string(),
-    voice_id: Some("en-US-JennyNeural".to_string()),
-    audio_format: Some("linear16".to_string()),
-    sample_rate: Some(24000),
-    speaking_rate: Some(1.0),
-    ..Default::default()
-};
-```
-
-**Authentication:** Uses the same `AZURE_SPEECH_SUBSCRIPTION_KEY` and `AZURE_SPEECH_REGION` environment variables as Azure STT.
-
-**Voice Naming Convention:**
-Voice names follow the pattern: `{language}-{region}-{name}Neural`
-- `en-US-JennyNeural` - English US, Jenny voice
-- `en-GB-SoniaNeural` - British English, Sonia voice
-- `de-DE-ConradNeural` - German, Conrad voice
-- `fr-FR-DeniseNeural` - French, Denise voice
-
-**Supported Audio Formats:**
-- `linear16` / `pcm` - Raw 16-bit PCM (recommended for real-time)
-- `mp3` - Compressed MP3 (multiple bitrates)
-- `opus` - Low-latency Opus (for streaming)
-- `mulaw` - 8-bit μ-law (telephony, US)
-- `alaw` - 8-bit A-law (telephony, Europe)
-
-See [docs/azure-tts.md](docs/azure-tts.md) for detailed Azure TTS integration documentation.
+See existing implementations for patterns:
+- WebSocket-based: Deepgram, ElevenLabs, Cartesia, Azure
+- gRPC-based: Google
 
 ## API Endpoints
 
-### REST API
+### REST
+- `GET /` - Health check (public)
+- `GET /voices` - List TTS voices
+- `POST /speak` - Generate speech from text
+- `POST /livekit/token` - Generate LiveKit participant token
+- `GET /recording/{stream_id}` - Download recording from S3
+- `GET/POST /sip/hooks` - Manage SIP webhook hooks
 
-- `GET /` - Health check endpoint (public, no auth required)
-- `GET /voices` - List available TTS voices (requires auth if AUTH_REQUIRED=true)
-- `POST /speak` - Generate speech from text (requires auth if AUTH_REQUIRED=true)
-- `POST /livekit/token` - Generate LiveKit participant token (requires auth if AUTH_REQUIRED=true)
-  - Request: `{"room_name": "room-123", "participant_name": "User", "participant_identity": "user-id"}`
-  - Response: `{"token": "JWT...", "room_name": "room-123", "participant_identity": "user-id", "livekit_url": "ws://..."}`
-- `GET /recording/{stream_id}` - Download OGG recording from S3-compatible storage (requires auth if AUTH_REQUIRED=true)
-  - Path: `stream_id` (string) - recording session identifier; rejects empty values, `..`, or `/`
-  - Response: binary OGG data with headers `Content-Type: audio/ogg`, `Content-Length: <bytes>`, `Content-Disposition: attachment; filename="{stream_id}.ogg"`
-  - Errors: `400` invalid `stream_id`, `404` not found, `503` storage not configured or unavailable
-  - Note: LiveKit Egress does not provide download APIs; this endpoint fetches `{recording_s3_prefix}/{stream_id}/audio.ogg` directly from storage
-- `GET /sip/hooks` - List all configured SIP hooks from cache (requires auth if AUTH_REQUIRED=true)
-  - Response: `{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}`
-- `POST /sip/hooks` - Add or replace SIP hooks at runtime (requires auth if AUTH_REQUIRED=true)
-  - Request: `{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}`
-  - Response: `{"hooks": [...]}` (merged list of all hooks)
-  - Hooks are persisted to `<cache_path>/sip_hooks.json` and merged with config on startup
-  - Cached hooks override config hooks with matching hosts (case-insensitive)
-  - Note: Secrets are NOT stored in cache - runtime hooks use the global `hook_secret`
+### WebSocket
+- `/ws` - Real-time voice processing
+  - Receives: Config, audio data, speak commands
+  - Sends: Ready, STT results, TTS audio
 
-**Authentication**: When `AUTH_REQUIRED=true`, protected endpoints require a valid `Authorization: Bearer {token}` header. See [docs/authentication.md](docs/authentication.md) for setup details.
+### Webhooks
+- `POST /livekit/webhook` - LiveKit event receiver (signature verified)
 
-### WebSocket API
+See [docs/](docs/) for detailed API documentation.
 
-- `/ws` - Main WebSocket endpoint for real-time voice processing
-  - Receives: Config, audio data, speak commands, control messages
-  - Sends: Ready (with LiveKit room info), STT results, TTS audio, unified messages
+## Critical Files
 
-**Breaking Change (2025-10-17)**: The WebSocket Ready message no longer includes `livekit_token`. Instead, it provides `livekit_room_name`, `sayna_participant_identity`, and `sayna_participant_name`. Clients must call the `/livekit/token` endpoint to obtain participant tokens.
+- `src/core/voice_manager/manager.rs`: Central voice processing orchestration
+- `src/handlers/ws/handler.rs`: WebSocket message handling
+- `src/livekit/manager.rs`: LiveKit room management
+- `src/config/mod.rs`: Configuration loading and merging
+- `src/errors/mod.rs`: Centralized error types (thiserror)
+- `src/docs/openapi.rs`: OpenAPI spec generation (feature-gated)
 
-#### Ready Message
+## Testing
 
-After processing the config message, the server sends a Ready message:
-
-```json
-{
-  "type": "ready",
-  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
-  "livekit_room_name": "room-123",
-  "livekit_url": "ws://localhost:7880",
-  "sayna_participant_identity": "sayna-ai",
-  "sayna_participant_name": "Sayna AI"
-}
+```bash
+cargo test                          # All tests
+cargo test test_name                # Specific test
+cargo test -- --nocapture           # With output
 ```
 
-**Fields**:
-- `stream_id` (string, always present): Unique session identifier
-  - If provided in config, this echoes back the same value
-  - If not provided, server generates a UUID v4
-- `livekit_room_name` (optional): The LiveKit room that was created/joined
-- `livekit_url` (optional): LiveKit server URL for client connection
-- `sayna_participant_identity` (optional): AI agent's participant identity
-- `sayna_participant_name` (optional): AI agent's display name
-
-### Webhook API
-
-- `POST /livekit/webhook` - LiveKit webhook event receiver (unauthenticated, uses LiveKit signature verification)
-  - Receives webhook events from LiveKit (participant joins/leaves, room events, SIP calls, etc.)
-  - Validates requests using LiveKit's JWT signature in the `Authorization` header
-  - Logs SIP-related participant attributes for troubleshooting phone calls
-  - Returns `200 OK` on success, `401 Unauthorized` for invalid signatures, `503 Service Unavailable` if LiveKit credentials not configured
-  - See [docs/livekit_webhook.md](docs/livekit_webhook.md) for detailed implementation and design docs
-
-**Configuration Note**: The `sayna_participant_identity` and `sayna_participant_name` fields can be customized in the LiveKit config during WebSocket initialization. Defaults are "sayna-ai" and "Sayna AI" respectively.
-
-#### LiveKit Configuration Options
-
-The LiveKit configuration in the WebSocket config message supports the following fields:
-
-```json
-{
-  "stream_id": "optional-uuid-or-auto-generated",
-  "livekit": {
-    "room_name": "my-room",
-    "enable_recording": false,
-    "sayna_participant_identity": "sayna-ai",
-    "sayna_participant_name": "Sayna AI",
-    "listen_participants": ["user-123", "user-456"]
-  }
-}
-```
-
-**Recording Path**: When `enable_recording` is true, recordings are saved to `{server_s3_prefix}/{stream_id}/audio.ogg`. `stream_id` is configured at the WebSocket config message level (not inside `livekit`). If the client omits `stream_id`, the server auto-generates a UUID v4.
-
-**Breaking Change (2026-02-06)**: `recording_file_key` was removed from `LiveKitWebSocketConfig`. Clients should rely on the session-level `stream_id` plus the server-side recording prefix instead.
-
-**Participant Filtering** (`listen_participants`):
-- **Empty array (default)**: Processes audio tracks and data messages from **all participants** in the room
-- **Populated array**: Only processes audio/data from participants whose identities are in the list
-- Useful for selective audio processing in multi-participant rooms where you only want to handle specific users
-- Filtering applies to both audio tracks (STT) and data messages
-- Server-side messages (participant = None) are always processed regardless of the filter
-
-## Performance Considerations
-
-- DeepFilterNet processing is CPU-intensive; uses thread pool to avoid blocking
-- Audio buffers are processed in chunks to maintain low latency
-- Provider connections are reused when possible
-- WebSocket messages are processed asynchronously to prevent blocking
-- Memory is managed carefully in audio processing loops
+- Unit tests: Embedded in modules using `#[cfg(test)]`
+- Integration tests: In `/tests/` directory
+- Use `#[tokio::test]` for async tests
 
 ## OpenAPI Documentation
 
-When the `openapi` feature is enabled, you can generate the OpenAPI 3.1 specification:
-
 ```bash
-# Generate YAML spec to file
+# Generate YAML spec
 cargo run --features openapi -- openapi -o docs/openapi.yaml
 
 # Generate JSON spec
 cargo run --features openapi -- openapi --format json -o docs/openapi.json
 ```
 
-### Adding OpenAPI Annotations
-
-When creating new REST endpoints or types, follow the guidelines in `.cursor/rules/openapi.mdc`:
-
-1. Add `#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]` to all request/response types
-2. Add `#[cfg_attr(feature = "openapi", utoipa::path(...))]` to handler functions
-3. Provide examples for all fields using `#[cfg_attr(feature = "openapi", schema(example = "..."))]`
-4. Register all types in `src/docs/openapi.rs` under `components(schemas(...))`
-5. Register all handlers in `src/docs/openapi.rs` under `paths(...)`
-6. Regenerate spec: `cargo run --features openapi -- openapi -o docs/openapi.yaml`
-
-See `.cursor/rules/openapi.mdc` for comprehensive guidelines and examples.
+See `.cursor/rules/openapi.mdc` for annotation guidelines.

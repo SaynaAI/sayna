@@ -1,17 +1,13 @@
 ---
-description: 
-globs: 
+description: Comprehensive best practices for Axum 0.8+ development with WebSocket support
+globs: *.rs
 alwaysApply: true
 ---
----
-
-description: Comprehensive best practices for developing robust, efficient, and maintainable applications using the axum framework in Rust with WebSocket support for an atomic web service.
-globs: \*.rs
-------------
-
-# Axum Best Practices: A Comprehensive Guide
+# Axum Best Practices: A Comprehensive Guide (0.8+)
 
 This guide provides best practices for developing applications using the Axum framework in Rust, enhanced with WebSocket support for building atomic web services. It covers code organization, common patterns, performance, security, WebSocket specifics, testing, pitfalls, and tooling.
+
+**Note:** This project uses **Axum 0.8.x** (released January 2025). Minimum Rust version: 1.75.
 
 ## 1. Code Organization and Structure
 
@@ -39,7 +35,7 @@ project_root/
 │   │   ├── auth.rs
 │   │   ├── logging.rs
 │   ├── state/              # Shared application state
-│   │   ├── mod.rs          # Defines AppState struct wrapped in `Arc` or `Extension`
+│   │   ├── mod.rs          # Defines AppState struct (use `State<AppState>` extractor)
 │   ├── errors/             # Error types and conversion to responses
 │   │   ├── mod.rs
 │   │   ├── app_error.rs    # Implements `IntoResponse`
@@ -63,17 +59,27 @@ project_root/
 ### 1.2 Modular Boundaries
 
 * **Router vs. Handler:** Keep route declarations (`Router::route`) in `routes/` and logic in `handlers/` or `services/`.
-* **State via `Extension`:** Pass shared state (e.g., DB pool, cache, broadcast channels) using `Extension<AppState>`.
+* **State Management:** Use `State<AppState>` for compile-time checked shared state (DB pools, config, caches). Reserve `Extension` only for per-request data injected by middleware (e.g., authenticated user info).
 * **Separation of Concerns:** Handlers focus on HTTP/WebSocket framing; services manage business logic.
+
+### 1.3 State vs Extension (Important)
+
+* **Prefer `State<T>`** over `Extension<T>` for application-wide state:
+  - `State` is type-checked at compile time; `Extension` gives runtime errors if type mismatches
+  - `State` is faster than `Extension`
+  - Use `.with_state(app_state)` when building the router
+* **Use `Extension<T>`** only for:
+  - Per-request data set by middleware (e.g., `Extension<AuthenticatedUser>`)
+  - Dynamic data that varies per request
 
 ## 2. Common Patterns and Anti-patterns
 
 ### 2.1 Axum-Specific Patterns
 
-* **Extractors:** Use built‑in extractors (`Path`, `Query`, `Json`, `Extension`) for typed data parsing.
+* **Extractors:** Use built‑in extractors (`Path`, `Query`, `Json`, `State`) for typed data parsing.
 * **Tower Middleware:** Leverage `tower-http` layers for CORS, compression, and tracing.
 * **Error Handling:** Define custom error types implementing `IntoResponse` to standardize responses.
-* **State Management:** Wrap shared resources in `Arc` or use `tokio::sync` types (e.g., `RwLock`, `broadcast`).
+* **State Management:** Use `State<AppState>` extractor. Wrap shared resources in `Arc` within AppState and use `tokio::sync` types (e.g., `RwLock`, `broadcast`) for interior mutability.
 
 ### 2.2 Anti-patterns to Avoid
 
@@ -110,7 +116,20 @@ project_root/
 ## 6. Testing Approaches
 
 * **Unit Tests:** Test services and error types in isolation.
-* **HTTP Integration:** Use `axum::Router::oneshot` for testing handlers without running a full server.
+* **HTTP Integration:** Import `tower::ServiceExt` and use `.oneshot()` method:
+  ```rust
+  use tower::ServiceExt; // Required for oneshot()
+
+  let app = Router::new()
+      .route("/", get(handler))
+      .with_state(app_state); // MUST call with_state() before oneshot()
+
+  let response = app
+      .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+  ```
+  **Note:** `oneshot()` only works on `Router<()>`, so `.with_state()` must be called first for stateful routers.
 * **WebSocket Tests:** Employ `tokio-tungstenite` to open in-memory WS connections and assert message flows.
 * **Property-Based Testing:** Integrate `proptest` for fuzzing JSON payloads.
 * **Test Organization:** Mirror `src/` structure under `tests/` for clarity.
@@ -138,5 +157,15 @@ project_root/
 * **Auto-Scaling:** Configure pods/instances to handle WS connections gracefully.
 * **Observability:** Export metrics via `tower-http` metrics layer and scrape with Prometheus.
 * **CI/CD:** Automate builds, tests, and docker pushes in GitHub Actions or GitLab CI.
+
+## 10. Axum 0.8.x Breaking Changes
+
+When migrating from older versions or reading older tutorials, note these changes:
+
+* **Path Syntax:** Use `/{param}` and `/{*wildcard}` instead of `/:param` and `/*wildcard`
+* **async_trait:** Import from `async-trait` crate directly, not from axum (for custom extractors)
+* **Option<T> Extractors:** Now requires `OptionalFromRequestParts` or `OptionalFromRequest` trait
+* **WebSocket Messages:** Now use `Bytes` and `Utf8Bytes` instead of `Vec<u8>` and `String`
+* **State over Extension:** `State<T>` is strongly preferred over `Extension<T>` for app state (since 0.6)
 
 By following these Axum-specific guidelines—including WebSocket nuances—you can create atomic, resilient, and maintainable Rust web services tailored to modern requirements.

@@ -4,7 +4,7 @@ This document provides comprehensive guidelines for writing OpenAPI annotations 
 
 ## Overview
 
-Sayna uses `utoipa` (v5.3) for OpenAPI 3.1 specification generation. All OpenAPI-related code is feature-gated behind the `openapi` feature flag to keep dependencies minimal in production builds.
+Sayna uses `utoipa` (v5.3+, latest is v5.4) for OpenAPI 3.1 specification generation. All OpenAPI-related code is feature-gated behind the `openapi` feature flag to keep dependencies minimal in production builds.
 
 ### Key Principles
 
@@ -22,12 +22,25 @@ Sayna uses `utoipa` (v5.3) for OpenAPI 3.1 specification generation. All OpenAPI
 [features]
 openapi = [
     "dep:utoipa",
-    "dep:serde_yaml",
 ]
 
 [dependencies]
 utoipa = { version = "5.3", optional = true, features = ["axum_extras"] }
-serde_yaml = { version = "0.9", optional = true }
+
+# Optional: For more ergonomic route registration
+# utoipa-axum = { version = "0.2", optional = true }
+```
+
+### Optional: Enhanced Axum Integration
+
+Consider adding `utoipa-axum` for more ergonomic route registration:
+
+```rust
+use utoipa_axum::{routes, router::OpenApiRouter};
+
+let (router, api) = OpenApiRouter::new()
+    .routes(routes!(health_check, list_voices, speak_handler))
+    .split_for_parts();
 ```
 
 ### Running with OpenAPI
@@ -610,6 +623,46 @@ mod tests {
 }
 ```
 
+## Validating OpenAPI Specs
+
+### Using Schemathesis (Recommended)
+
+Schemathesis performs property-based testing and validates your API implementation against the OpenAPI spec:
+
+```bash
+# Install
+pip install schemathesis
+
+# Generate the spec first
+cargo run --features openapi -- openapi -o docs/openapi.yaml
+
+# Validate against running server
+schemathesis run docs/openapi.yaml --base-url http://localhost:3001
+
+# Run in CI (stateless validation)
+schemathesis run docs/openapi.yaml --dry-run
+```
+
+### Using Online Validators
+
+- **Swagger Editor**: Upload to https://editor.swagger.io/
+- **Redocly CLI**: `npx @redocly/cli lint docs/openapi.yaml`
+- **Spectral**: `npx @stoplight/spectral-cli lint docs/openapi.yaml`
+
+### CI Integration Example
+
+```yaml
+# GitHub Actions
+validate-openapi:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - name: Generate OpenAPI spec
+      run: cargo run --features openapi -- openapi -o docs/openapi.yaml
+    - name: Validate with Redocly
+      run: npx @redocly/cli lint docs/openapi.yaml
+```
+
 ## CLI Usage
 
 ### Generate OpenAPI Spec
@@ -727,6 +780,10 @@ When adding a new endpoint, ensure:
 
 ## Version History
 
+- **v0.2.0**: Updated guidelines for utoipa 5.3+/5.4
+  - Added Schemathesis validation guidance
+  - Added utoipa-axum integration notes
+  - Added CI integration examples
 - **v0.1.0**: Initial OpenAPI documentation setup with utoipa 5.3
 - Uses OpenAPI 3.1 specification
 - Feature-gated to keep production builds lean

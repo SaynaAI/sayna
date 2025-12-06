@@ -1,15 +1,13 @@
 ---
-description: 
-globs: 
+description: Comprehensive best practices for Rust development (Edition 2024)
+globs: *.rs
 alwaysApply: true
 ---
----
-description: This rule provides comprehensive best practices for Rust development, covering code organization, common patterns, performance, security, testing, pitfalls, and tooling. It aims to guide developers in writing idiomatic, efficient, secure, and maintainable Rust code.
-globs: *.rs
----
-# Rust Best Practices
+# Rust Best Practices (2024-2025)
 
 This document outlines a comprehensive set of best practices for Rust development, covering various aspects from code organization to security and tooling. Adhering to these guidelines will help you write idiomatic, efficient, secure, and maintainable Rust code.
+
+**Note:** This project uses **Rust Edition 2024** (released Feb 2025 with Rust 1.85).
 
 ## 1. Code Organization and Structure
 
@@ -136,8 +134,16 @@ pub fn my_function() {
 
 ### 3.1. Optimization Techniques
 
--   **Profiling**: Use profiling tools (e.g., `perf`, `cargo flamegraph`) to identify performance bottlenecks.
--   **Benchmarking**: Use benchmarking tools (e.g., `criterion`) to measure the performance of code changes.
+-   **Profiling**: Use profiling tools to identify performance bottlenecks:
+    -   **Samply**: Modern profiler with Firefox Profiler UI (recommended for 2024+)
+    -   **pprof-rs**: CPU profiler with Criterion integration
+    -   **cargo-flamegraph**: Classic flamegraph generation
+    -   **Bytehound**: Best available memory profiling tool for Rust
+    -   **DHAT/dhat-rs**: Memory profiling and allocation tracking
+-   **Benchmarking**: Use benchmarking tools to measure performance:
+    -   **Divan**: Modern go-to benchmark framework (simpler API than Criterion)
+    -   **Criterion**: Mature statistical benchmarking
+    -   **Iai-Callgrind**: Instruction-count based (reliable in CI environments)
 -   **Zero-Cost Abstractions**: Leverage Rust's zero-cost abstractions, such as iterators, closures, and generics.
 -   **Inlining**: Use the `#[inline]` attribute to encourage the compiler to inline functions.
 -   **LTO (Link-Time Optimization)**: Enable LTO to improve performance by optimizing across crate boundaries.
@@ -171,19 +177,29 @@ pub fn my_function() {
 
 ## 4. Security Best Practices
 
-### 4.1. Common Vulnerabilities
+### 4.1. Security Auditing Tools
+
+-   **cargo-audit**: Audit dependencies for known vulnerabilities (uses RustSec Advisory Database)
+    ```bash
+    cargo install cargo-audit
+    cargo audit
+    ```
+-   **cargo-deny**: Check dependencies for licenses, bans, and advisories
+-   Run security audits in CI pipelines and pre-commit hooks
+
+### 4.2. Common Vulnerabilities
 
 -   **Buffer Overflows**: Prevent buffer overflows by using safe indexing methods (e.g., `get()`, `get_mut()`) and validating input sizes.
 -   **SQL Injection**: Prevent SQL injection by using parameterized queries and escaping user input.
 -   **Cross-Site Scripting (XSS)**: Prevent XSS by escaping user input when rendering HTML.
 -   **Command Injection**: Prevent command injection by avoiding the use of `std::process::Command` with user-supplied arguments.
 -   **Denial of Service (DoS)**: Protect against DoS attacks by limiting resource usage (e.g., memory, CPU, network connections).
--   **Integer Overflows**:  Use the `checked_add`, `checked_sub`, `checked_mul`, etc. methods on integers to prevent overflows.
+-   **Integer Overflows**: Use `checked_add`, `checked_sub`, `checked_mul`, etc. Enable `overflow-checks = true` in Cargo.toml for release builds.
 -   **Use-After-Free**:  Rust's ownership system largely prevents this, but be cautious when using `unsafe` code or dealing with raw pointers.
 -   **Data Races**:  Avoid data races by using appropriate synchronization primitives (`Mutex`, `RwLock`, channels).
 -   **Uninitialized Memory**: Rust generally initializes memory, but `unsafe` code can bypass this.  Be careful when working with uninitialized memory.
 
-### 4.2. Input Validation
+### 4.3. Input Validation
 
 -   **Validate All Input**: Validate all input from external sources, including user input, network data, and file contents.
 -   **Use a Whitelist Approach**: Define a set of allowed values and reject any input that does not match.
@@ -200,6 +216,13 @@ pub fn my_function() {
 -   **Use `assert!` and `assert_eq!`**: Use `assert!` and `assert_eq!` macros to check that the code behaves as expected.
 -   **Test Driven Development (TDD)**: Consider writing tests before writing code.
 -   **Table-Driven Tests**:  Use parameterized tests or table-driven tests for testing multiple scenarios with different inputs.
+
+### 5.1.1. Modern Testing Tools
+
+-   **cargo-nextest**: Next-generation test runner with better performance and output
+-   **rstest**: Fixture-based testing (like pytest fixtures) with `#[rstest]` macro
+-   **proptest**: Property-based testing with automatic shrinking
+-   **QuickCheck**: Alternative property-based testing framework
 
 ```rust
 #[cfg(test)]
@@ -270,12 +293,16 @@ mod tests {
 
 ### 6.5. Debugging Strategies
 
--   **Use `println!`**: Use `println!` statements to print debugging information.
+-   **Use `println!`**: Use `println!` statements for quick debugging (remove before committing).
 -   **Use a Debugger**: Use a debugger (e.g., `gdb`, `lldb`) to step through the code and inspect variables.
 -   **Use `assert!`**: Use `assert!` to check that the code behaves as expected.
--   **Use Logging**: Use a logging library (e.g., `log`, `tracing`) to record debugging information.
+-   **Use Structured Logging**: Prefer `tracing` over `log` for structured, async-aware logging:
+    -   Use `#[instrument]` macro to automatically capture function arguments
+    -   Use `tracing-subscriber` for log formatting and filtering
+    -   Configure via `RUST_LOG` environment variable
+    -   Integrate with OpenTelemetry via `tracing-opentelemetry` for production observability
 -   **Clippy**: Use Clippy to catch common mistakes and improve code quality.
--   **cargo-flamegraph**: Use cargo-flamegraph to profile and visualize the execution of your code.
+-   **Profiling**: Use Samply or cargo-flamegraph to profile and visualize the execution of your code.
 
 ## 7. Tooling and Environment
 
@@ -300,7 +327,7 @@ toml
 [package]
 name = "sayna"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
