@@ -1,6 +1,9 @@
 ARG RUST_VERSION=1.88.0
 FROM debian:bookworm-slim AS builder
 
+# Target architecture for multi-arch builds
+ARG TARGETARCH
+
 # ——— Build dependencies for a static musl release ———
 RUN apt-get update && \
     apt-get install -y \
@@ -18,11 +21,16 @@ ENV CARGO_PROFILE_RELEASE_LTO=thin
 
 WORKDIR /app
 
-# Download ONNX Runtime
+# Download ONNX Runtime (architecture-specific)
 ARG ONNX_VERSION=1.23.2
-RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz -o onnxruntime.tgz && \
+RUN ONNX_ARCH=$(case "${TARGETARCH:-amd64}" in \
+        amd64) echo "x64" ;; \
+        arm64) echo "aarch64" ;; \
+        *) echo "x64" ;; \
+    esac) && \
+    curl -L "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" -o onnxruntime.tgz && \
     tar -xzf onnxruntime.tgz && \
-    mv onnxruntime-linux-x64-${ONNX_VERSION} onnxruntime && \
+    mv onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION} onnxruntime && \
     rm onnxruntime.tgz
 
 # ---------- 1a. Cache dependencies ----------
