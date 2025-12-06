@@ -258,6 +258,7 @@ These are messages your application sends to Sayna.
 ```json
 {
   "type": "config",
+  "stream_id": "optional-session-identifier",
   "audio": true,
   "stt_config": { ... },
   "tts_config": { ... },
@@ -270,6 +271,7 @@ These are messages your application sends to Sayna.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `"config"` |
+| `stream_id` | string | No | Auto-generated UUID v4 | Unique session identifier. Used for recording paths and session tracking. |
 | `audio` | boolean | No | `true` | Enable audio processing (STT/TTS). Set to `false` for LiveKit control-only mode. |
 | `stt_config` | object | Conditional | - | Required when `audio=true`. Speech-to-text configuration. |
 | `tts_config` | object | Conditional | - | Required when `audio=true`. Text-to-speech configuration. |
@@ -434,6 +436,64 @@ See [Configuration](#configuration) section for detailed field specifications.
 
 // Send structured data
 {"type": "send_message", "message": "{\"action\":\"navigate\",\"url\":\"/home\"}", "role": "system", "topic": "commands"}
+```
+
+---
+
+#### 6. SIP Transfer Message
+
+**Purpose:** Transfer an active SIP call to another phone number using SIP REFER.
+
+**Structure:**
+```json
+{
+  "type": "sip_transfer",
+  "transfer_to": "+1234567890"
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Must be `"sip_transfer"` |
+| `transfer_to` | string | Yes | Destination phone number to transfer the call to |
+
+**Phone Number Formats:**
+- International format with `+` prefix (e.g., `"+1234567890"`) - recommended
+- National format without prefix (e.g., `"1234567890"`)
+- Internal extensions (e.g., `"1234"`)
+
+**Requirements:**
+- LiveKit must be configured in initial config
+- An active SIP participant must exist in the room
+- The SIP handler must be configured on the server
+
+**Behavior:**
+1. Server validates the phone number format
+2. Retrieves the room name from connection state
+3. Fetches participants from the room via LiveKit API
+4. Initiates a SIP REFER transfer using the first SIP participant found
+5. On success, the call is transferred and the SIP participant leaves the room
+6. On failure, a `sip_transfer_error` message is sent back to the client
+
+**Error Handling:**
+- Invalid phone number format → `sip_transfer_error` message
+- No room configured → `sip_transfer_error` message
+- No SIP participant in room → `sip_transfer_error` message
+- SIP handler not configured → `sip_transfer_error` message
+- Transfer API failure → `sip_transfer_error` message
+
+**Use Cases:**
+```json
+// Transfer to international number
+{"type": "sip_transfer", "transfer_to": "+1234567890"}
+
+// Transfer to national number
+{"type": "sip_transfer", "transfer_to": "5551234567"}
+
+// Transfer to internal extension
+{"type": "sip_transfer", "transfer_to": "1001"}
 ```
 
 ---
@@ -674,7 +734,9 @@ if (msg.message.topic === "chat") {
   "type": "participant_disconnected",
   "participant": {
     "identity": "user-123",
-    "name": "John Doe"
+    "name": "John Doe",
+    "room": "conversation-room-123",
+    "timestamp": 1700000000000
   }
 }
 ```
@@ -685,7 +747,9 @@ if (msg.message.topic === "chat") {
 |-------|------|-------------|
 | `type` | string | Always `"participant_disconnected"` |
 | `participant.identity` | string | Participant's unique identity |
-| `participant.name` | string | Participant's display name |
+| `participant.name` | string | Participant's display name (optional, may be null) |
+| `participant.room` | string | Room name where disconnection occurred |
+| `participant.timestamp` | number | Unix timestamp in milliseconds when disconnection occurred |
 
 **Important Behavior:**
 - Server waits 100ms after sending this message
@@ -697,7 +761,9 @@ if (msg.message.topic === "chat") {
 ```javascript
 // Update UI when participant leaves
 if (message.type === "participant_disconnected") {
-  removeParticipantFromUI(message.participant.identity);
+  const participant = message.participant;
+  console.log(`${participant.identity} left room ${participant.room} at ${new Date(participant.timestamp)}`);
+  removeParticipantFromUI(participant.identity);
 
   // Prepare for connection close
   showReconnectPrompt();
@@ -756,7 +822,52 @@ if (message.type === "error") {
 
 ---
 
-#### 7. Binary Audio Message
+#### 7. SIP Transfer Error Message
+
+**Purpose:** Communicate SIP transfer-specific errors, allowing clients to handle transfer failures separately from general errors.
+
+**Structure:**
+```json
+{
+  "type": "sip_transfer_error",
+  "message": "No SIP participant found in room to transfer"
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"sip_transfer_error"` |
+| `message` | string | Human-readable error description |
+
+**Common SIP Transfer Errors:**
+- `"Invalid phone number: {details}"` - Phone number format validation failed
+- `"No SIP participant found in room to transfer"` - No active SIP call in the room
+- `"Room name not available. Ensure LiveKit is configured."` - LiveKit room not set up
+- `"LiveKit client not configured..."` - SIP handler not available on server
+- `"SIP transfer failed: {details}"` - Transfer API call failed
+
+**Use Cases:**
+```javascript
+// Handle SIP transfer errors specifically
+if (message.type === "sip_transfer_error") {
+  console.error("SIP Transfer failed:", message.message);
+
+  // Check for specific error conditions
+  if (message.message.includes("Invalid phone number")) {
+    showPhoneNumberFormatError();
+  } else if (message.message.includes("No SIP participant")) {
+    showNoActiveCallError();
+  } else {
+    showGenericTransferError(message.message);
+  }
+}
+```
+
+---
+
+#### 8. Binary Audio Message
 
 **Purpose:** Deliver synthesized TTS audio.
 
@@ -2268,8 +2379,8 @@ The Sayna WebSocket API provides a powerful foundation for real-time voice appli
 - Optional LiveKit integration for multi-party voice
 
 **Message Types:**
-- **Incoming:** config, speak, binary audio, clear, send_message
-- **Outgoing:** ready, stt_result, tts_playback_complete, message, participant_disconnected, error, binary audio
+- **Incoming:** config, speak, binary audio, clear, send_message, sip_transfer
+- **Outgoing:** ready, stt_result, tts_playback_complete, message, participant_disconnected, error, sip_transfer_error, binary audio
 
 **Operating Modes:**
 - WebSocket-only: Full STT/TTS control, your app handles audio I/O

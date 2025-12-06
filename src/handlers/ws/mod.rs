@@ -87,8 +87,11 @@
 //!   },
 //!   // Optional: Connect to LiveKit for real-time audio streaming
 //!   livekit: {
-//!     url: 'wss://your-livekit-server.com',
-//!     token: 'your-livekit-jwt-token'  // JWT token for room access
+//!     room_name: 'conversation-room-123',
+//!     enable_recording: false,
+//!     sayna_participant_identity: 'sayna-ai',  // Optional, defaults to 'sayna-ai'
+//!     sayna_participant_name: 'Sayna AI',      // Optional, defaults to 'Sayna AI'
+//!     listen_participants: []                   // Optional, empty = all participants
 //!   }
 //! };
 //!
@@ -150,6 +153,11 @@
 //!
 //!       case 'error':
 //!         console.error('Error:', message.message);
+//!         break;
+//!
+//!       case 'sip_transfer_error':
+//!         // Handle SIP transfer-specific errors
+//!         console.error('SIP Transfer failed:', message.message);
 //!         break;
 //!     }
 //!   } catch (error) {
@@ -248,8 +256,8 @@
 //!   audio: false, // Disable audio processing - only use LiveKit for messaging
 //!   // stt_config and tts_config are not required when audio=false
 //!   livekit: {
-//!     url: 'wss://your-livekit-server.com',
-//!     token: 'your-livekit-jwt-token'
+//!     room_name: 'messaging-room-456',
+//!     listen_participants: []  // Listen to all participants
 //!   }
 //! };
 //! ```
@@ -289,8 +297,11 @@
 //!         },
 //!         // Optional: Connect to LiveKit for real-time audio streaming
 //!         "livekit": {
-//!             "url": "wss://your-livekit-server.com",
-//!             "token": "your-livekit-jwt-token"
+//!             "room_name": "conversation-room-123",
+//!             "enable_recording": false,
+//!             "sayna_participant_identity": "sayna-ai",
+//!             "sayna_participant_name": "Sayna AI",
+//!             "listen_participants": []
 //!         }
 //!     });
 //!
@@ -360,6 +371,9 @@
 //!                     }
 //!                     Some("error") => {
 //!                         eprintln!("Error: {}", parsed["message"]);
+//!                     }
+//!                     Some("sip_transfer_error") => {
+//!                         eprintln!("SIP Transfer failed: {}", parsed["message"]);
 //!                     }
 //!                     _ => {}
 //!                 }
