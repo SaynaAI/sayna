@@ -2,6 +2,26 @@
 name = "sayna"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/SaynaAI/sayna"
+description = "Real-time voice processing server with STT/TTS and LiveKit integration"
+license = "MIT"
+readme = "README.md"
+
+# cargo-dist configuration for binary releases
+[workspace.metadata.dist]
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+# Optimized release profile for distribution
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [features]
 default = []

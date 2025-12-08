@@ -1,0 +1,156 @@
+name: Binary Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --no-default-features
+          else
+            cargo build --release --target ${{ matrix.target }} --no-default-features
+          fi
+
+      - name: Package binary (Unix)
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz sayna
+          cd ../../..
+
+      - name: Generate checksum (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sha256sum sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Generate checksum (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          shasum -a 256 sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sayna-${{ matrix.target }}
+          path: |
+            sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            sayna-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            NOTES=$(git log --pretty=format:"- %s" $PREV_TAG..HEAD)
+          else
+            NOTES=$(git log --pretty=format:"- %s" HEAD~10..HEAD)
+          fi
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## What's Changed
+            ${{ steps.changelog.outputs.notes }}
+
+            ## Installation
+
+            ### Linux x64
+            ```bash
+            curl -fsSL https://github.com/SaynaAI/sayna/releases/download/${{ github.ref_name }}/sayna-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz | tar xz
+            sudo mv sayna /usr/local/bin/
+            ```
+
+            ### Linux ARM64
+            ```bash
+            curl -fsSL https://github.com/SaynaAI/sayna/releases/download/${{ github.ref_name }}/sayna-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz | tar xz
+            sudo mv sayna /usr/local/bin/
+            ```
+
+            ### macOS Intel
+            ```bash
+            curl -fsSL https://github.com/SaynaAI/sayna/releases/download/${{ github.ref_name }}/sayna-${{ github.ref_name }}-x86_64-apple-darwin.tar.gz | tar xz
+            sudo mv sayna /usr/local/bin/
+            ```
+
+            ### macOS Apple Silicon
+            ```bash
+            curl -fsSL https://github.com/SaynaAI/sayna/releases/download/${{ github.ref_name }}/sayna-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz | tar xz
+            sudo mv sayna /usr/local/bin/
+            ```
+
+            ### Docker (recommended for full features)
+            ```bash
+            docker pull saynaai/sayna:${{ github.ref_name }}
+            ```
+
+            > **Note**: Binary releases are built without optional features (turn-detect, noise-filter).
+            > For full functionality including DeepFilterNet noise suppression and ONNX-based turn detection,
+            > use the Docker image instead.
+          files: artifacts/*
+          generate_release_notes: true

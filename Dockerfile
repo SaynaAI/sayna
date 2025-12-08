@@ -24,9 +24,9 @@ WORKDIR /app
 # Download ONNX Runtime (architecture-specific)
 ARG ONNX_VERSION=1.23.2
 RUN ONNX_ARCH=$(case "${TARGETARCH:-amd64}" in \
-        amd64) echo "x64" ;; \
-        arm64) echo "aarch64" ;; \
-        *) echo "x64" ;; \
+    amd64) echo "x64" ;; \
+    arm64) echo "aarch64" ;; \
+    *) echo "x64" ;; \
     esac) && \
     curl -L "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" -o onnxruntime.tgz && \
     tar -xzf onnxruntime.tgz && \

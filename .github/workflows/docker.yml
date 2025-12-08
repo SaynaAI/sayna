@@ -90,6 +90,7 @@ jobs:
 
   # Build for multiple architectures and push
   build:
+    name: Build and Push
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
@@ -213,8 +214,10 @@ jobs:
 
   # Update Docker Hub description
   update-dockerhub-description:
+    name: Update DockerHub Description
     runs-on: ubuntu-latest
     needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
