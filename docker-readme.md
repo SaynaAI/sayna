@@ -34,6 +34,8 @@ docker run --rm \
 
 The server will start on `http://localhost:3001`.
 
+> Note: On container start the entrypoint runs `sayna init` to download turn-detect assets into `$CACHE_PATH` (default `/app/cache`). Mount a volume to persist them between runs.
+
 ### Run with All Provider Keys
 
 ```bash
@@ -127,6 +129,7 @@ volumes:
 | `AUTH_REQUIRED` | Enable authentication | `false` |
 | `AUTH_SERVICE_URL` | External auth service endpoint | - |
 | `AUTH_SIGNING_KEY_PATH` | Path to JWT signing private key | - |
+| `SKIP_INIT` | Set to `1` to skip `sayna init` (for pre-populated caches) | `0` |
 
 ### Using a Config File
 

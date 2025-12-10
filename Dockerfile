@@ -7,15 +7,20 @@ ARG TARGETARCH
 # ——— Build dependencies for a static musl release ———
 RUN apt-get update && \
     apt-get install -y \
-    clang cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev && \
+    clang binutils cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Use clang for C/asm build scripts (ring) to avoid GCC ICEs under qemu on arm64
+# Keep GNU binutils for ar/ranlib to avoid missing llvm-ar in slim images
+ENV CC=clang CXX=clang++ AR=ar RANLIB=ranlib
+
 # Fine-tuned, size-optimised build flags
-ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols"
+# Avoid strip/linker flags here because binutils on arm builds crashes when combined with version scripts
+ENV RUSTFLAGS="-C opt-level=z"
 # Enable ThinLTO for further optimisation
 ENV CARGO_PROFILE_RELEASE_LTO=thin
 
@@ -75,5 +80,7 @@ ENV RUST_LOG=info \
     CACHE_PATH=/app/cache
 
 EXPOSE 3001
-RUN mkdir -p "$CACHE_PATH" && /app/sayna init
-ENTRYPOINT ["/app/sayna"]
+# Init will run at container start so we don't execute target binaries during cross-build
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
