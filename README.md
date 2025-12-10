@@ -2,6 +2,9 @@
 
 A high-performance real-time voice processing server built in Rust that provides unified Speech-to-Text (STT) and Text-to-Speech (TTS) services through WebSocket and REST APIs.
 
+![Sayna Structure Flow](docs/flow-animated.gif)
+
+
 ## Features
 
 - **Unified Voice API**: Single interface for multiple STT/TTS providers
