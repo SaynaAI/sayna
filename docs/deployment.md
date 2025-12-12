@@ -4,6 +4,7 @@ Sayna ships as a single Axum binary that can be deployed anywhere you can run co
 
 ## 1. Prerequisites
 
+- **Docker with BuildKit** enabled (default in Docker 23.0+). Required for the Dockerfile cache mounts.
 - **LiveKit cluster** reachable from the Sayna pod/container (LAN or VPC is ideal). Set `LIVEKIT_URL` to the internal address and `LIVEKIT_PUBLIC_URL` to the address clients should use.
 - **Provider credentials** for the STT/TTS services you plan to use:
   - `DEEPGRAM_API_KEY` for Deepgram STT/TTS.
@@ -14,17 +15,58 @@ Sayna ships as a single Axum binary that can be deployed anywhere you can run co
 
 ## 2. Building the Container Image
 
-The provided multi-stage `Dockerfile` compiles Sayna with release optimizations and bundles required runtime assets. To build locally:
+The provided multi-stage `Dockerfile` uses [cargo-chef](https://github.com/LukeMathWalker/cargo-chef) for optimized dependency caching and produces a minimal [distroless](https://github.com/GoogleContainerTools/distroless) runtime image. BuildKit is required.
 
 ```bash
 docker build -t sayna:latest .
 ```
 
-Key details:
+### Build Stages
 
-- `arg RUST_VERSION` lets you pin the toolchain. Override with `--build-arg RUST_VERSION=1.75.0` if needed.
-- `sayna init` runs during the image build to pre-download turn-detection assets when `CACHE_PATH` is set. Re-run `sayna init` at runtime if you mount a fresh cache volume.
-- Default exposed port is `3001`. Override with `-e PORT=XXXX` if necessary.
+| Stage | Base Image | Purpose |
+|-------|------------|---------|
+| `chef` | `rust:${RUST_VERSION}-slim-bookworm` | Installs cargo-chef |
+| `planner` | chef | Generates dependency recipe |
+| `builder` | chef | Compiles release binary with cached deps |
+| `init` | `debian:bookworm-slim` | Runs `sayna init` to download models |
+| `runtime` | `gcr.io/distroless/cc-debian12` | Minimal production image (~20MB base) |
+
+### Build Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `RUST_VERSION` | `1.88.0` | Rust toolchain version (must support Rust 2024 edition) |
+| `CARGO_BUILD_FEATURES` | `--all-features` | Feature flags. Use `--features turn-detect` or `""` for smaller builds |
+| `ONNX_VERSION` | `1.23.2` | ONNX Runtime version for turn detection |
+| `RUN_SAYNA_INIT` | `true` | Pre-download turn-detection assets. Set `false` to skip |
+
+Example with custom args:
+
+```bash
+docker build -t sayna:latest \
+  --build-arg RUST_VERSION=1.88.0 \
+  --build-arg CARGO_BUILD_FEATURES="--features turn-detect" \
+  --build-arg RUN_SAYNA_INIT=false \
+  .
+```
+
+### BuildKit Cache
+
+The Dockerfile uses BuildKit cache mounts for the Cargo registry and git dependencies. These caches persist across builds and can be pruned with:
+
+```bash
+docker builder prune --filter type=exec.cachemount
+```
+
+### Distroless Runtime Notes
+
+The production image uses Google's distroless base for minimal attack surface (~20MB). Key implications:
+
+- **No shell**: You cannot `docker exec -it <container> sh`. Use `docker logs` for debugging.
+- **No package manager**: All dependencies are copied at build time.
+- **Debug variant**: For troubleshooting, you can temporarily switch to `debian:bookworm-slim` in the Dockerfile's runtime stage.
+
+Default exposed port is `3001`. Override with `-e PORT=XXXX` if necessary.
 
 ## 3. Runtime Environment Variables
 
@@ -223,8 +265,11 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 ### E. Feature Flag Tuning
 - Disable expensive DSP layers when you need minimal footprints:
   - `cargo run --no-default-features --features openapi` (no turn detection or noise filter).
-  - Build flags propagate into Docker by overriding `cargo build` command if you maintain a custom Dockerfile.
-- The published Dockerfile uses `--all-features` to keep the container ready for every scenario; create a variant if you want smaller images.
+  - Override feature flags at build time: `--build-arg CARGO_BUILD_FEATURES="--features turn-detect"`.
+- The published Dockerfile uses `--all-features` by default. For smaller images, build with fewer features:
+  ```bash
+  docker build -t sayna:minimal --build-arg CARGO_BUILD_FEATURES="" .
+  ```
 
 ## 9. Verification Checklist
 
