@@ -41,15 +41,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libva-dev libdrm-dev
 
+      - name: Build with all features
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: cargo build --locked --all-features
+
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy lint
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+          CARGO_INCREMENTAL: 0
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test with all features
-        run: |
-          echo "::group::Building and testing with all features"
-          cargo build --locked --all-features
-          cargo test --locked --all-features
-          echo "::endgroup::"
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: cargo test --locked --all-features
