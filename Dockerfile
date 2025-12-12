@@ -4,7 +4,7 @@ FROM debian:bookworm-slim AS builder
 # ——— Build dependencies for a static musl release ———
 RUN apt-get update && \
     apt-get install -y \
-    clang cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev && \
+    clang cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev git && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -28,6 +28,7 @@ RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_V
 # ---------- 1a. Cache dependencies ----------
 # Create a dummy src so `cargo build` only fetches & compile deps.
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/config.toml .cargo/config.toml
 RUN mkdir src && echo "fn main(){}" > src/main.rs
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN cargo build --release --all-features --locked
