@@ -1,73 +1,99 @@
+# syntax=docker/dockerfile:1
 ARG RUST_VERSION=1.88.0
-FROM debian:bookworm-slim AS builder
+ARG CARGO_BUILD_FEATURES="--all-features"
+ARG ONNX_VERSION=1.23.2
 
-# ——— Build dependencies for a static musl release ———
-RUN apt-get update && \
-    apt-get install -y \
-    clang cmake pkg-config libssl-dev ca-certificates curl libva-dev libdrm-dev git && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Fine-tuned, size-optimised build flags
-ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols"
-# Enable ThinLTO for further optimisation
-ENV CARGO_PROFILE_RELEASE_LTO=thin
-
+# ==================== Chef Base ====================
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef
 WORKDIR /app
+
+# ==================== Planner ====================
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ==================== Builder ====================
+FROM chef AS builder
+ARG CARGO_BUILD_FEATURES
+ARG ONNX_VERSION
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake pkg-config libssl-dev ca-certificates \
+    curl libva-dev libdrm-dev git \
+    && rm -rf /var/lib/apt/lists/*
 
 # Download ONNX Runtime
-ARG ONNX_VERSION=1.23.2
-RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz -o onnxruntime.tgz && \
-    tar -xzf onnxruntime.tgz && \
-    mv onnxruntime-linux-x64-${ONNX_VERSION} onnxruntime && \
-    rm onnxruntime.tgz
+RUN curl -L "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz" \
+    -o onnxruntime.tgz \
+    && tar -xzf onnxruntime.tgz \
+    && mv "onnxruntime-linux-x64-${ONNX_VERSION}" onnxruntime \
+    && rm onnxruntime.tgz
 
-# ---------- 1a. Cache dependencies ----------
-# Create a dummy src so `cargo build` only fetches & compile deps.
-COPY Cargo.toml Cargo.lock ./
+# Build optimization flags
+ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols" \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+# Cook dependencies (cached layer) - sharing=locked prevents cache corruption
+COPY --from=planner /app/recipe.json recipe.json
 COPY .cargo/config.toml .cargo/config.toml
-RUN mkdir src && echo "fn main(){}" > src/main.rs
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-RUN cargo build --release --all-features --locked
-RUN rm -rf src
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    cargo chef cook --release ${CARGO_BUILD_FEATURES} --recipe-path recipe.json
 
-# ---------- 1b. Build the real application ----------
+# Build application
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    cargo build --release ${CARGO_BUILD_FEATURES} --locked
 
-RUN cargo build --release --all-features --locked
-
-############################
-# 2️⃣  Runtime stage
-############################
-FROM debian:bookworm-slim AS runtime
-
+# ==================== Init Stage ====================
+# Separate stage to run sayna init (downloads models)
+# This allows using distroless for final runtime
+FROM debian:bookworm-slim AS init
+ARG RUN_SAYNA_INIT=true
 WORKDIR /app
 
-# Install OpenSSL
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Root certificates for HTTPS (reqwest/rustls)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# The statically-linked binary
 COPY --from=builder /app/target/release/sayna /app/sayna
-COPY --from=builder /app/target/release/*.so /app/
-COPY --from=builder /app/target/release/*.so.* /app/
-COPY --from=builder /app/target/release/*.d /app/
-COPY --from=builder /app/target/release/*.rlib /app/
-COPY --from=builder /app/onnxruntime/lib/libonnxruntime.so* /app/
+COPY --from=builder /app/onnxruntime/lib/*.so* /app/
 
-# Default logging level & port (override with -e if needed)
-ENV RUST_LOG=info \
-    PORT=3001 \
+ENV LD_LIBRARY_PATH=/app \
     CACHE_PATH=/app/cache
 
+RUN mkdir -p "$CACHE_PATH" \
+    && if [ "${RUN_SAYNA_INIT}" = "true" ]; then /app/sayna init; fi
+
+# ==================== Runtime ====================
+# Using distroless for minimal attack surface (~20MB vs ~74MB debian-slim)
+# Includes glibc, libstdc++, and ca-certificates
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /app
+
+# Binary
+COPY --from=builder /app/target/release/sayna /app/sayna
+
+# ONNX Runtime shared libraries
+COPY --from=builder /app/onnxruntime/lib/*.so* /app/
+
+# OpenSSL libraries (not included in distroless)
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3 /app/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /app/
+
+# Cached models from init stage
+COPY --from=init /app/cache /app/cache
+
+ENV RUST_LOG=info \
+    PORT=3001 \
+    CACHE_PATH=/app/cache \
+    LD_LIBRARY_PATH=/app
+
 EXPOSE 3001
-RUN mkdir -p "$CACHE_PATH" && /app/sayna init
 ENTRYPOINT ["/app/sayna"]

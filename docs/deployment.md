@@ -22,8 +22,9 @@ docker build -t sayna:latest .
 
 Key details:
 
-- `arg RUST_VERSION` lets you pin the toolchain. Override with `--build-arg RUST_VERSION=1.75.0` if needed.
-- `sayna init` runs during the image build to pre-download turn-detection assets when `CACHE_PATH` is set. Re-run `sayna init` at runtime if you mount a fresh cache volume.
+- `arg RUST_VERSION` lets you pin the toolchain (must support the Rust 2024 edition). Override with `--build-arg RUST_VERSION=1.85.0` if needed.
+- `CARGO_BUILD_FEATURES` controls feature selection at build time (defaults to `--all-features`). Override with `--build-arg CARGO_BUILD_FEATURES="--features turn-detect"` (or `""`) to reduce build time and image size.
+- `sayna init` runs during the image build by default to pre-download turn-detection assets into `CACHE_PATH`. Disable with `--build-arg RUN_SAYNA_INIT=false` (and run `sayna init` at runtime if you mount a fresh cache volume).
 - Default exposed port is `3001`. Override with `-e PORT=XXXX` if necessary.
 
 ## 3. Runtime Environment Variables
