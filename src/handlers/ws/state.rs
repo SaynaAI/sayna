@@ -31,6 +31,8 @@ pub struct ConnectionState {
     pub stream_id: Option<String>,
     /// LiveKit room name for cleanup operations
     pub livekit_room_name: Option<String>,
+    /// Local LiveKit participant identity (Sayna agent)
+    pub livekit_local_identity: Option<String>,
     /// Recording egress ID for cleanup operations
     pub recording_egress_id: Option<String>,
 }
@@ -50,6 +52,7 @@ impl ConnectionState {
             audio_enabled: AtomicBool::new(false),
             stream_id: None,
             livekit_room_name: None,
+            livekit_local_identity: None,
             recording_egress_id: None,
         }
     }

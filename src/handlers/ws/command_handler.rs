@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::livekit::LiveKitOperation;
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
+use livekit_protocol::participant_info;
 
 use super::{
     error::WebSocketError,
@@ -213,14 +214,36 @@ pub async fn handle_sip_transfer(
         }
     };
 
-    // Step 5: Fetch participants from the room and use the first one
-    let participant_identity = match room_handler.list_participants(&room_name).await {
-        Ok(participants) if !participants.is_empty() => participants[0].identity.clone(),
-        Ok(_) => {
-            let error = WebSocketError::SIPTransferNoParticipant;
-            warn!("SIP transfer failed: no participants in room {}", room_name);
-            send_sip_transfer_error(&error, message_tx).await;
-            return true;
+    // Step 5: Fetch participants from the room and use the first non-local one
+    let local_identity = {
+        let state_guard = state.read().await;
+        state_guard.livekit_local_identity.clone()
+    };
+
+    let participant = match room_handler.list_participants(&room_name).await {
+        Ok(participants) => {
+            let remote_participants = participants
+                .into_iter()
+                .filter(|p| {
+                    Some(&p.identity) != local_identity.as_ref()
+                        && participant_info::Kind::try_from(p.kind)
+                            .ok()
+                            .map(|k| k == participant_info::Kind::Sip)
+                            .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(p) = remote_participants.first() {
+                p.clone()
+            } else {
+                let error = WebSocketError::SIPTransferNoParticipant;
+                warn!(
+                    "SIP transfer failed: no eligible remote participants in room {}",
+                    room_name
+                );
+                send_sip_transfer_error(&error, message_tx).await;
+                return true;
+            }
         }
         Err(e) => {
             let error =
@@ -231,28 +254,47 @@ pub async fn handle_sip_transfer(
         }
     };
 
-    // Step 6: Execute the SIP transfer
+    let participant_identity = participant.identity;
+    let participant_name = participant.name;
+
+    // Step 6: Execute the SIP transfer in a background task
+    // The transfer operation can take up to 30 seconds waiting for the destination to answer.
+    // If the call is dropped during transfer, it will timeout. We spawn this as a background
+    // task to avoid blocking the WebSocket handler.
     debug!(
-        "Initiating SIP transfer: room={}, participant={}, transfer_to={}",
-        room_name, participant_identity, validated_phone
+        "Initiating SIP transfer: room={}, participant_name={}, participant_identity={}, transfer_to={}",
+        room_name, participant_name, participant_identity, validated_phone
     );
 
-    match sip_handler
-        .transfer_call(&participant_identity, &room_name, &validated_phone)
-        .await
-    {
-        Ok(()) => {
-            info!(
-                "SIP transfer successful: room={}, participant={}, transfer_to={}",
-                room_name, participant_identity, validated_phone
-            );
+    let message_tx = message_tx.clone();
+    let room_name_clone = room_name.clone();
+    let participant_name_clone = participant_name.clone();
+    let validated_phone_clone = validated_phone.clone();
+
+    tokio::spawn(async move {
+        match sip_handler
+            .transfer_call(&participant_identity, &room_name_clone, &validated_phone_clone)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "SIP transfer successful: room={}, participant_name={}, transfer_to={}",
+                    room_name_clone, participant_name_clone, validated_phone_clone
+                );
+            }
+            Err(e) => {
+                // Log the error but don't block - the call may have been dropped
+                let error = WebSocketError::SIPTransferFailed(e.to_string());
+                error!("SIP transfer failed: {}", error);
+                // Try to send error message, but don't panic if channel is closed
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::SIPTransferError {
+                        message: error.to_message(),
+                    }))
+                    .await;
+            }
         }
-        Err(e) => {
-            let error = WebSocketError::SIPTransferFailed(e.to_string());
-            error!("SIP transfer failed: {}", error);
-            send_sip_transfer_error(&error, message_tx).await;
-        }
-    }
+    });
 
     true
 }

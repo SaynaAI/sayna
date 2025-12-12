@@ -190,25 +190,38 @@ impl SIPApiClient {
             ringing_timeout: None,
         };
 
-        let auth_header = self
-            .auth_header(SIPGrants {
-                call: true,
+        // TransferSIPParticipant requires BOTH VideoGrants (with room_admin for the specific room)
+        // AND SIPGrants (with call permission). This matches the Go SDK:
+        // withSIPGrant{Call: true}, withVideoGrant{RoomAdmin: true, Room: in.RoomName}
+        let token = AccessToken::with_api_key(&self.api_key, &self.api_secret)
+            .with_grants(livekit_api::access_token::VideoGrants {
+                room: room_name.to_string(),
+                room_admin: true,
                 ..Default::default()
             })
+            .with_sip_grants(SIPGrants {
+                admin: false,
+                call: true,
+            })
+            .to_jwt()
             .map_err(|e| {
                 LiveKitError::ConnectionFailed(format!("Failed to create auth token: {e}"))
             })?;
+        let auth_header = format!("Bearer {token}");
 
         let mut buf = Vec::new();
         request.encode(&mut buf).map_err(|e| {
             LiveKitError::ConnectionFailed(format!("Failed to encode transfer request: {e}"))
         })?;
 
+        // TransferSIPParticipant waits for the call to be transferred, which can take time.
+        // The Go SDK uses a 30-second timeout for this operation.
         let resp = self
             .client
             .post(url)
             .header(CONTENT_TYPE, "application/protobuf")
             .header(AUTHORIZATION, auth_header)
+            .timeout(Duration::from_secs(30))
             .body(buf)
             .send()
             .await

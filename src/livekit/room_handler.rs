@@ -37,7 +37,7 @@
 //! }
 //! ```
 
-use livekit_api::access_token::{AccessToken, VideoGrants};
+use livekit_api::access_token::{AccessToken, SIPGrants, VideoGrants};
 use livekit_api::services::egress::{EgressClient, EgressOutput, RoomCompositeOptions};
 use livekit_api::services::room::{CreateRoomOptions, RoomClient};
 use livekit_protocol as proto;
@@ -252,6 +252,35 @@ impl LiveKitRoomHandler {
             .to_jwt()
             .map_err(|e| {
                 LiveKitError::ConnectionFailed(format!("Failed to generate agent token: {e}"))
+            })?;
+
+        Ok(token)
+    }
+
+    /// Generate a JWT token for an agent with admin privileges and SIP admin grants
+    ///
+    /// This is used for the websocket LiveKit connection where the server needs
+    /// elevated SIP permissions to manage transfers, while keeping other tokens
+    /// non-admin.
+    pub fn agent_token_with_sip_admin(
+        &self,
+        room_name: &str,
+        identity: &str,
+        name: &str,
+    ) -> Result<String, LiveKitError> {
+        let token = AccessToken::with_api_key(&self.api_key, &self.api_secret)
+            .with_identity(identity)
+            .with_name(name)
+            .with_grants(self.token_permissions(room_name, true))
+            .with_sip_grants(SIPGrants {
+                admin: true,
+                ..Default::default()
+            })
+            .to_jwt()
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!(
+                    "Failed to generate agent token with SIP grants: {e}"
+                ))
             })?;
 
         Ok(token)
@@ -592,6 +621,22 @@ mod tests {
         .unwrap();
 
         let result = handler.agent_token("test-room", "test-agent", "Test Agent");
+        assert!(result.is_ok());
+        let token = result.unwrap();
+        assert!(!token.is_empty());
+    }
+
+    #[test]
+    fn test_agent_token_with_sip_admin_generation() {
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.agent_token_with_sip_admin("test-room", "test-agent", "Test Agent");
         assert!(result.is_ok());
         let token = result.unwrap();
         assert!(!token.is_empty());

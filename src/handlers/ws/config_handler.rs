@@ -155,6 +155,7 @@ pub async fn handle_config_message(
                     state_guard.livekit_client = Some(client.clone());
                     state_guard.livekit_operation_queue = operation_queue;
                     state_guard.livekit_room_name = Some(room_name.clone());
+                    state_guard.livekit_local_identity = Some(identity.clone());
                     state_guard.recording_egress_id = egress_id;
                     (Some(client), Some(room_name), Some(identity), Some(name))
                 }
@@ -702,19 +703,22 @@ async fn initialize_livekit_client(
         .unwrap_or("Sayna AI");
 
     // Generate agent token for AI participant with custom identity and name
-    let agent_token =
-        match room_handler.agent_token(&livekit_ws_config.room_name, sayna_identity, sayna_name) {
-            Ok(token) => token,
-            Err(e) => {
-                error!("Failed to generate agent token: {:?}", e);
-                let _ = message_tx
-                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                        message: format!("Failed to generate agent token: {e:?}"),
-                    }))
-                    .await;
-                return None;
-            }
-        };
+    let agent_token = match room_handler.agent_token_with_sip_admin(
+        &livekit_ws_config.room_name,
+        sayna_identity,
+        sayna_name,
+    ) {
+        Ok(token) => token,
+        Err(e) => {
+            error!("Failed to generate agent token: {:?}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to generate agent token: {e:?}"),
+                }))
+                .await;
+            return None;
+        }
+    };
 
     info!("LiveKit agent token generated successfully");
     info!("Enabling recording: {}", livekit_ws_config.enable_recording);

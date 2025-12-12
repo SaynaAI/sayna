@@ -29,7 +29,7 @@ RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_V
 # Create a dummy src so `cargo build` only fetches & compile deps.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main(){}" > src/main.rs
-RUN cargo build --release
+RUN cargo build --release --all-features
 RUN rm -rf src
 
 # ---------- 1b. Build the real application ----------
