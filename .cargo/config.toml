@@ -1,6 +1,3 @@
-[registries.crates-io]
-protocol = "sparse"
-
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-ObjC"]
 
@@ -9,3 +6,6 @@ rustflags = ["-C", "link-arg=-ObjC"]
 
 [target.aarch64-apple-ios]       # if you also build for iOS / visionOS
 rustflags = ["-C", "link-arg=-ObjC"]
+
+[registries.crates-io]
+protocol = "git"
