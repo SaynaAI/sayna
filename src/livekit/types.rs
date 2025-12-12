@@ -78,4 +78,7 @@ pub enum LiveKitError {
 
     #[error("Audio stream error: {0}")]
     AudioStreamError(String),
+
+    #[error("SIP transfer request timeout (transfer likely succeeded)")]
+    SIPTransferRequestTimeout,
 }

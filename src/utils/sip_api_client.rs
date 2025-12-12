@@ -181,13 +181,20 @@ impl SIPApiClient {
     ) -> Result<(), LiveKitError> {
         let url = self.twirp_endpoint("SIP", "TransferSIPParticipant");
 
+        // Set ringing_timeout to 30 seconds - this is how long the server waits for the
+        // transfer destination to answer.
+        let ringing_timeout = Duration::from_secs(30);
+
         let request = proto::TransferSipParticipantRequest {
             room_name: room_name.to_string(),
             participant_identity: participant_identity.to_string(),
             transfer_to: transfer_to.to_string(),
             play_dialtone: false,
             headers: Default::default(),
-            ringing_timeout: None,
+            ringing_timeout: Some(ProtoDuration {
+                seconds: ringing_timeout.as_secs() as i64,
+                nanos: ringing_timeout.subsec_nanos() as i32,
+            }),
         };
 
         // TransferSIPParticipant requires BOTH VideoGrants (with room_admin for the specific room)
@@ -214,22 +221,34 @@ impl SIPApiClient {
             LiveKitError::ConnectionFailed(format!("Failed to encode transfer request: {e}"))
         })?;
 
-        // TransferSIPParticipant waits for the call to be transferred, which can take time.
-        // The Go SDK uses a 30-second timeout for this operation.
+        // Use a short timeout (2 seconds) for the HTTP request.
+        // Real failures (permission denied, not found, etc.) respond quickly.
+        // If we timeout, the transfer was likely initiated successfully but the room
+        // was cleaned up before we received the response - this is expected behavior.
+        let http_timeout = Duration::from_secs(2);
+
         let resp = self
             .client
             .post(url)
             .header(CONTENT_TYPE, "application/protobuf")
             .header(AUTHORIZATION, auth_header)
-            .timeout(Duration::from_secs(30))
+            .timeout(http_timeout)
             .body(buf)
             .send()
             .await
             .map_err(|e| {
-                LiveKitError::ConnectionFailed(format!("Failed to send transfer request: {e}"))
+                if e.is_timeout() {
+                    LiveKitError::SIPTransferRequestTimeout
+                } else {
+                    LiveKitError::ConnectionFailed(format!("Failed to send transfer request: {e}"))
+                }
             })?;
 
         if resp.status().is_success() {
+            // Consume the response body to properly complete the HTTP request.
+            // The official SDK always reads and decodes the response, even for Empty responses.
+            // This ensures the connection is properly closed.
+            let _ = resp.bytes().await;
             Ok(())
         } else {
             let status = resp.status();

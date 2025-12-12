@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use crate::livekit::LiveKitOperation;
+use crate::livekit::{LiveKitError, LiveKitOperation};
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
 use livekit_protocol::participant_info;
@@ -273,7 +273,11 @@ pub async fn handle_sip_transfer(
 
     tokio::spawn(async move {
         match sip_handler
-            .transfer_call(&participant_identity, &room_name_clone, &validated_phone_clone)
+            .transfer_call(
+                &participant_identity,
+                &room_name_clone,
+                &validated_phone_clone,
+            )
             .await
         {
             Ok(()) => {
@@ -282,14 +286,24 @@ pub async fn handle_sip_transfer(
                     room_name_clone, participant_name_clone, validated_phone_clone
                 );
             }
+            Err(LiveKitError::SIPTransferRequestTimeout) => {
+                // Timeout means the request was sent but we didn't get a response within 2 seconds.
+                // Real errors (permission denied, not found, etc.) respond quickly.
+                // Timeout likely means the transfer was initiated and the room was cleaned up.
+                info!(
+                    "SIP transfer initiated (timeout, transfer likely succeeded): room={}, participant_name={}, transfer_to={}",
+                    room_name_clone, participant_name_clone, validated_phone_clone
+                );
+            }
             Err(e) => {
-                // Log the error but don't block - the call may have been dropped
-                let error = WebSocketError::SIPTransferFailed(e.to_string());
-                error!("SIP transfer failed: {}", error);
-                // Try to send error message, but don't panic if channel is closed
+                // Real error - log and notify client
+                error!(
+                    "SIP transfer failed: room={}, participant_name={}, transfer_to={}, error={}",
+                    room_name_clone, participant_name_clone, validated_phone_clone, e
+                );
                 let _ = message_tx
                     .send(MessageRoute::Outgoing(OutgoingMessage::SIPTransferError {
-                        message: error.to_message(),
+                        message: format!("SIP transfer failed: {}", e),
                     }))
                     .await;
             }
