@@ -1,0 +1,41 @@
+# release-plz configuration for Sayna
+# https://release-plz.dev/docs/config
+
+[workspace]
+# Use git-cliff for changelog generation (compatible with cliff.toml)
+changelog_config = "cliff.toml"
+
+# PR configuration
+pr_draft = false
+pr_labels = ["release"]
+
+# Commit message for version bump
+git_release_enable = true
+git_release_draft = false
+
+# Publish to crates.io (set to false if not publishing to crates.io)
+publish = false
+
+# Allow dirty working directory during release (not recommended for CI)
+allow_dirty = false
+
+# Semver compatibility check
+semver_check = true
+
+[[package]]
+name = "sayna"
+
+# Changelog configuration for the package
+changelog_include = [
+  "feat",
+  "fix",
+  "perf",
+  "refactor",
+  "docs",
+  "build",
+  "ci",
+  "test",
+  "chore",
+  "style",
+  "revert",
+]

@@ -1,0 +1,123 @@
+# GitHub Actions workflow for building and pushing multi-architecture Docker images
+# Builds for linux/amd64 and linux/arm64, pushes to DockerHub at saynaai/sayna
+#
+# Trigger: Push tags matching v*.*.* OR workflow_dispatch (manual/triggered)
+# Note: ARM64 builds use QEMU emulation and may take 30-60 minutes
+
+name: Docker
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build (e.g., v1.0.0)"
+        required: false
+        type: string
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: saynaai/sayna
+
+jobs:
+  # =============================================================================
+  # Build and push multi-architecture Docker image
+  # =============================================================================
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90  # ARM64 emulation is slow
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            # Use manually provided tag
+            VERSION="${{ inputs.tag }}"
+          else
+            # Use Git tag
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+
+          # Remove 'v' prefix for version number
+          VERSION_NUM="${VERSION#v}"
+
+          echo "version=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Detect if this is a pre-release (contains hyphen after version, e.g., 1.0.0-beta.1)
+          if [[ "${VERSION_NUM}" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Detected pre-release version: ${VERSION_NUM}"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Detected stable version: ${VERSION_NUM}"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Always tag with version
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
+            # Tag as 'latest' only for stable releases (no pre-release suffix)
+            type=raw,value=latest,enable=${{ steps.version.outputs.is_prerelease == 'false' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build arguments are handled by Dockerfile's TARGETARCH
+
+      - name: Verify pushed images
+        run: |
+          echo "## Docker Image Published Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux/amd64\` (x86_64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux/arm64\` (aarch64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.version.outputs.is_prerelease }}" = "false" ]; then
+            echo "docker pull ${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY

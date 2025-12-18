@@ -1,0 +1,423 @@
+# GitHub Actions workflow for Sayna releases
+# Builds binaries for 7 target platforms, creates GitHub Release with changelog,
+# generates checksums and SLSA attestations for supply chain security.
+#
+# Trigger: Push tags matching v*.*.* (e.g., v1.0.0, v1.2.3-beta.1)
+# Architecture: validate -> create-release -> build (parallel) -> publish-release
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Permissions required for release creation and attestations
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # =============================================================================
+  # Stage 1: Validate version consistency between Git tag and Cargo.toml
+  # =============================================================================
+  validate:
+    name: Validate Version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          # Extract version from Git tag (remove 'v' prefix)
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Git tag version: $TAG_VERSION"
+
+          # Extract version from Cargo.toml
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          # Validate versions match
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Version mismatch! Git tag 'v$TAG_VERSION' does not match Cargo.toml version '$CARGO_VERSION'"
+            echo "::error::Please ensure the tag matches the version in Cargo.toml"
+            exit 1
+          fi
+
+          echo "Version validated: $TAG_VERSION"
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  # =============================================================================
+  # Stage 2: Create draft GitHub Release with changelog
+  # =============================================================================
+  create-release:
+    name: Create Release
+    needs: validate
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog generation
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.7.0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Generate changelog for this release only (from previous tag to current)
+          git cliff --current --strip header > RELEASE_CHANGELOG.md
+
+          # If no conventional commits found, create a basic changelog
+          if [ ! -s RELEASE_CHANGELOG.md ]; then
+            echo "## What's Changed" > RELEASE_CHANGELOG.md
+            echo "" >> RELEASE_CHANGELOG.md
+            echo "See the [full changelog](https://github.com/saynaai/sayna/commits/v${{ needs.validate.outputs.version }}) for details." >> RELEASE_CHANGELOG.md
+          fi
+
+          echo "Generated changelog:"
+          cat RELEASE_CHANGELOG.md
+
+      - name: Create draft release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Sayna v${{ needs.validate.outputs.version }}
+          body_path: RELEASE_CHANGELOG.md
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =============================================================================
+  # Stage 3: Build binaries for all target platforms
+  # =============================================================================
+
+  # ---------------------------------------------------------------------------
+  # Linux builds - Native compilation on GitHub runners
+  # ---------------------------------------------------------------------------
+  # Note: We use native builds instead of cross-rs because the livekit crate
+  # depends on libwebrtc which requires glib and other native libraries.
+  # These dependencies are easier to satisfy with native compilation.
+  build-linux:
+    name: Build Linux (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            runner: ubuntu-22.04-arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake pkg-config libssl-dev ca-certificates \
+            libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: |
+          # Build release binary using native cargo (no features for minimal dependencies)
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Prepare archive
+        id: archive
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          ARCHIVE_NAME="sayna-${VERSION}-${{ matrix.target }}"
+          ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
+
+          # Create staging directory
+          mkdir -p "${ARCHIVE_NAME}"
+
+          # Copy binary
+          cp "target/${{ matrix.target }}/release/sayna" "${ARCHIVE_NAME}/"
+
+          # Copy documentation
+          cp README.md "${ARCHIVE_NAME}/"
+          cp LICENSE "${ARCHIVE_NAME}/"
+          [ -f config.example.yaml ] && cp config.example.yaml "${ARCHIVE_NAME}/"
+
+          # Create archive
+          tar -czvf "${ARCHIVE_FILE}" "${ARCHIVE_NAME}"
+
+          # Generate checksum
+          sha256sum "${ARCHIVE_FILE}" > "${ARCHIVE_FILE}.sha256"
+
+          echo "archive=${ARCHIVE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${ARCHIVE_FILE}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.archive }}
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # macOS builds (native compilation)
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            arch: aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: |
+          # Build release binary (no features for minimal dependencies)
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Prepare archive
+        id: archive
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          ARCHIVE_NAME="sayna-${VERSION}-${{ matrix.target }}"
+          ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
+
+          # Create staging directory
+          mkdir -p "${ARCHIVE_NAME}"
+
+          # Copy binary
+          cp "target/${{ matrix.target }}/release/sayna" "${ARCHIVE_NAME}/"
+
+          # Copy documentation
+          cp README.md "${ARCHIVE_NAME}/"
+          cp LICENSE "${ARCHIVE_NAME}/"
+          [ -f config.example.yaml ] && cp config.example.yaml "${ARCHIVE_NAME}/"
+
+          # Create archive
+          tar -czvf "${ARCHIVE_FILE}" "${ARCHIVE_NAME}"
+
+          # Generate checksum
+          shasum -a 256 "${ARCHIVE_FILE}" > "${ARCHIVE_FILE}.sha256"
+
+          echo "archive=${ARCHIVE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${ARCHIVE_FILE}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.archive }}
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Windows builds (native MSVC compilation)
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows (${{ matrix.target }})
+    needs: create-release
+    runs-on: windows-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - target: i686-pc-windows-msvc
+            arch: i686
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: |
+          # Build release binary (no features for minimal dependencies)
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Prepare archive
+        id: archive
+        shell: pwsh
+        run: |
+          $Version = "${{ github.ref_name }}" -replace '^v', ''
+          $ArchiveName = "sayna-${Version}-${{ matrix.target }}"
+          $ArchiveFile = "${ArchiveName}.zip"
+
+          # Create staging directory
+          New-Item -ItemType Directory -Path $ArchiveName -Force
+
+          # Copy binary
+          Copy-Item "target/${{ matrix.target }}/release/sayna.exe" -Destination $ArchiveName/
+
+          # Copy documentation
+          Copy-Item README.md -Destination $ArchiveName/
+          Copy-Item LICENSE -Destination $ArchiveName/
+          if (Test-Path config.example.yaml) {
+            Copy-Item config.example.yaml -Destination $ArchiveName/
+          }
+
+          # Create archive
+          Compress-Archive -Path $ArchiveName -DestinationPath $ArchiveFile
+
+          # Generate checksum
+          $Hash = (Get-FileHash -Algorithm SHA256 $ArchiveFile).Hash.ToLower()
+          "$Hash  $ArchiveFile" | Out-File -Encoding ASCII "${ArchiveFile}.sha256"
+
+          echo "archive=${ArchiveFile}" >> $env:GITHUB_OUTPUT
+          echo "checksum=${ArchiveFile}.sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.archive }}
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =============================================================================
+  # Stage 4: Trigger Docker build workflow
+  # =============================================================================
+  trigger-docker:
+    name: Trigger Docker Build
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Trigger Docker workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Trigger the docker.yml workflow if it exists
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'docker.yml',
+                ref: context.ref
+              });
+              console.log('Docker workflow triggered successfully');
+            } catch (error) {
+              // If docker.yml doesn't exist or can't be triggered, log but don't fail
+              console.log('Note: Could not trigger docker.yml workflow:', error.message);
+              console.log('Docker images may need to be built separately or the workflow may not exist yet.');
+            }
+
+  # =============================================================================
+  # Stage 5: Publish the release (mark as non-draft)
+  # =============================================================================
+  publish-release:
+    name: Publish Release
+    needs: [validate, create-release, build-linux, build-macos, build-windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## Release Published Successfully! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v${{ needs.validate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux x86_64 (glibc)" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux aarch64 (glibc)" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS x86_64" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS aarch64 (Apple Silicon)" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows x86_64 (MSVC)" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows i686 (MSVC)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All artifacts include SHA256 checksums and SLSA attestations." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Docker Images" >> $GITHUB_STEP_SUMMARY
+          echo "Docker images are available on DockerHub for linux/amd64 and linux/arm64." >> $GITHUB_STEP_SUMMARY

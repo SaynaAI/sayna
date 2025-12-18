@@ -22,27 +22,20 @@ A high-performance real-time voice processing server built in Rust that provides
 
 ### Prerequisites
 
-- Rust 1.70+ and Cargo
 - Optional: Deepgram API key (for STT/TTS)
 - Optional: ElevenLabs API key (for STT/TTS)
 - Optional: Google Cloud credentials (for STT/TTS)
 - Optional: Azure Speech subscription key and region (for STT/TTS)
 - Optional: LiveKit server (for WebRTC features)
 
-### Installation
+### Configuration
 
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/sayna.git
-cd sayna
-```
-
-2. **Set up environment variables**
+1. **Set up environment variables**
 ```bash
 cp .env.example .env
 ```
 
-3. **Configure your `.env` file**
+2. **Configure your `.env` file**
 ```env
 # Optional - can run without these in audio-disabled mode
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
@@ -59,9 +52,11 @@ HOST=0.0.0.0
 LIVEKIT_URL=ws://localhost:7880
 ```
 
-4. **Run the server**
+3. **Run the server**
 ```bash
-cargo run
+sayna
+# Or with a config file
+sayna -c config.yaml
 ```
 
 The server will start on `http://localhost:3001`
@@ -374,4 +369,4 @@ sip:
 
 ## Support
 
-For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/SaynaAI/sayna).
+For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/saynaai/sayna).

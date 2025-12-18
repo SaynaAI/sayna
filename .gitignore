@@ -12,3 +12,4 @@ run-todo.sh
 vertex.json
 libonnxruntime.so
 onnxruntime/
+dist/
