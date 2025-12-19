@@ -35,10 +35,10 @@ jobs:
     name: Release PR
     # Only run on push events, not PR events
     if: github.event_name == 'push'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # Full history for commit analysis
 
@@ -62,10 +62,10 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'release-plz-')
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           # Note: Using GITHUB_TOKEN here. Tags created with GITHUB_TOKEN

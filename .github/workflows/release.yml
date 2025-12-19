@@ -28,12 +28,12 @@ jobs:
   # =============================================================================
   validate:
     name: Validate Version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Extract and validate version
         id: version
@@ -62,14 +62,14 @@ jobs:
   create-release:
     name: Create Release
     needs: validate
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # Full history for changelog generation
+          fetch-depth: 0 # Full history for changelog generation
 
       - name: Install git-cliff
         uses: taiki-e/install-action@v2
@@ -124,13 +124,13 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             arch: aarch64
-            runner: ubuntu-22.04-arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -184,7 +184,7 @@ jobs:
           echo "checksum=${ARCHIVE_FILE}.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Generate attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ steps.archive.outputs.archive }}
 
@@ -211,14 +211,14 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-large
             arch: x86_64
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             arch: aarch64
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -264,7 +264,7 @@ jobs:
           echo "checksum=${ARCHIVE_FILE}.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Generate attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ steps.archive.outputs.archive }}
 
@@ -296,7 +296,7 @@ jobs:
             arch: i686
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -345,7 +345,7 @@ jobs:
           echo "checksum=${ArchiveFile}.sha256" >> $env:GITHUB_OUTPUT
 
       - name: Generate attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ steps.archive.outputs.archive }}
 
@@ -366,7 +366,7 @@ jobs:
   trigger-docker:
     name: Trigger Docker Build
     needs: [build-linux, build-macos, build-windows]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Trigger Docker workflow
         uses: actions/github-script@v7
@@ -393,7 +393,7 @@ jobs:
   publish-release:
     name: Publish Release
     needs: [validate, create-release, build-linux, build-macos, build-windows]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Publish release
         uses: softprops/action-gh-release@v2
