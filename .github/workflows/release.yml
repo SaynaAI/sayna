@@ -1,5 +1,5 @@
 # GitHub Actions workflow for Sayna releases
-# Builds binaries for 7 target platforms, creates GitHub Release with changelog,
+# Builds binaries for 5 target platforms, creates GitHub Release with changelog,
 # generates checksums and SLSA attestations for supply chain security.
 #
 # Trigger: Push tags matching v*.*.* (e.g., v1.0.0, v1.2.3-beta.1)
@@ -283,17 +283,10 @@ jobs:
   # Windows builds (native MSVC compilation)
   # ---------------------------------------------------------------------------
   build-windows:
-    name: Build Windows (${{ matrix.target }})
+    name: Build Windows
     needs: build-macos
     runs-on: windows-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            arch: x86_64
-          - target: i686-pc-windows-msvc
-            arch: i686
+    # Note: Only x86_64 is supported - webrtc-sys doesn't have prebuilt binaries for i686
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -301,31 +294,31 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: x86_64-pc-windows-msvc
 
       - name: Build binary
         run: |
           # Build release binary (no features for minimal dependencies)
-          cargo build --release --locked --target ${{ matrix.target }}
+          cargo build --release --locked --target x86_64-pc-windows-msvc
 
       - name: Prepare archive
         id: archive
         shell: pwsh
         run: |
           $Version = "${{ github.ref_name }}" -replace '^v', ''
-          $ArchiveName = "sayna-${Version}-${{ matrix.target }}"
+          $ArchiveName = "sayna-${Version}-x86_64-pc-windows-msvc"
           $ArchiveFile = "${ArchiveName}.zip"
 
           # Create staging directory
           New-Item -ItemType Directory -Path $ArchiveName -Force
 
           # Copy binary
-          Copy-Item "target/${{ matrix.target }}/release/sayna.exe" -Destination $ArchiveName/
+          Copy-Item "target/x86_64-pc-windows-msvc/release/sayna.exe" -Destination $ArchiveName/
 
           # Copy documentation
           Copy-Item README.md -Destination $ArchiveName/
@@ -415,7 +408,6 @@ jobs:
           echo "- macOS x86_64" >> $GITHUB_STEP_SUMMARY
           echo "- macOS aarch64 (Apple Silicon)" >> $GITHUB_STEP_SUMMARY
           echo "- Windows x86_64 (MSVC)" >> $GITHUB_STEP_SUMMARY
-          echo "- Windows i686 (MSVC)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "All artifacts include SHA256 checksums and SLSA attestations." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
