@@ -1,5 +1,5 @@
 # GitHub Actions workflow for Sayna releases
-# Builds binaries for 5 target platforms, creates GitHub Release with changelog,
+# Builds binaries for 4 target platforms, creates GitHub Release with changelog,
 # generates checksums and SLSA attestations for supply chain security.
 #
 # Trigger: Push tags matching v*.*.* (e.g., v1.0.0, v1.2.3-beta.1)
@@ -202,20 +202,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # macOS builds (native compilation)
   # ---------------------------------------------------------------------------
+  # Note: Only ARM64 (Apple Silicon) is built. Intel x86_64 requires paid larger
+  # runners (macos-*-large). Standard free runners are ARM64 only since macOS 14.
   build-macos:
-    name: Build macOS (${{ matrix.target }})
+    name: Build macOS (Apple Silicon)
     needs: build-linux
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            runner: macos-15-large
-            arch: x86_64
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            arch: aarch64
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -223,31 +215,31 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: aarch64-apple-darwin
 
       - name: Build binary
         run: |
           # Build release binary (no features for minimal dependencies)
-          cargo build --release --locked --target ${{ matrix.target }}
+          cargo build --release --locked --target aarch64-apple-darwin
 
       - name: Prepare archive
         id: archive
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          ARCHIVE_NAME="sayna-${VERSION}-${{ matrix.target }}"
+          ARCHIVE_NAME="sayna-${VERSION}-aarch64-apple-darwin"
           ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
 
           # Create staging directory
           mkdir -p "${ARCHIVE_NAME}"
 
           # Copy binary
-          cp "target/${{ matrix.target }}/release/sayna" "${ARCHIVE_NAME}/"
+          cp "target/aarch64-apple-darwin/release/sayna" "${ARCHIVE_NAME}/"
 
           # Copy documentation
           cp README.md "${ARCHIVE_NAME}/"
@@ -405,7 +397,6 @@ jobs:
           echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "- Linux x86_64 (glibc)" >> $GITHUB_STEP_SUMMARY
           echo "- Linux aarch64 (glibc)" >> $GITHUB_STEP_SUMMARY
-          echo "- macOS x86_64" >> $GITHUB_STEP_SUMMARY
           echo "- macOS aarch64 (Apple Silicon)" >> $GITHUB_STEP_SUMMARY
           echo "- Windows x86_64 (MSVC)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
