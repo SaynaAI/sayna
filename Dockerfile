@@ -1,29 +1,34 @@
+# syntax=docker/dockerfile:1
 ARG RUST_VERSION=1.88.0
-FROM debian:bookworm-slim AS builder
+ARG CARGO_BUILD_FEATURES="--all-features"
+ARG ONNX_VERSION=1.23.2
 
-# ——— Build dependencies for release build ———
-# Note: webrtc-sys requires many system libraries for video/graphics support
-RUN apt-get update && \
-    apt-get install -y \
-    clang cmake pkg-config libssl-dev ca-certificates curl git \
-    libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
-    libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Fine-tuned, size-optimised build flags
-ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols"
-# Enable ThinLTO for further optimisation
-ENV CARGO_PROFILE_RELEASE_LTO=thin
-
+# ==================== Chef Base ====================
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef
 WORKDIR /app
 
-# Download ONNX Runtime (architecture-aware for multi-platform builds)
-ARG ONNX_VERSION=1.23.2
+# ==================== Planner ====================
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ==================== Builder ====================
+FROM chef AS builder
+ARG CARGO_BUILD_FEATURES
+ARG ONNX_VERSION
 ARG TARGETARCH
+
+# Install build dependencies
+# Note: webrtc-sys requires many system libraries for video/graphics support
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake pkg-config libssl-dev ca-certificates curl git \
+    libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
+    libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download ONNX Runtime (architecture-aware for multi-platform builds)
 RUN case "${TARGETARCH}" in \
         amd64) ONNX_ARCH="x64" ;; \
         arm64) ONNX_ARCH="aarch64" ;; \
@@ -34,53 +39,73 @@ RUN case "${TARGETARCH}" in \
     mv "onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}" onnxruntime && \
     rm onnxruntime.tgz
 
-# ---------- 1a. Cache dependencies ----------
-# Create a dummy src so `cargo build` only fetches & compile deps.
-COPY Cargo.toml Cargo.lock ./
+# Build optimization flags
+ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols" \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+# Cook dependencies (cached layer) - sharing=locked prevents cache corruption
+COPY --from=planner /app/recipe.json recipe.json
 COPY .cargo/config.toml .cargo/config.toml
-RUN mkdir src && echo "fn main(){}" > src/main.rs
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-RUN cargo build --release --all-features --locked
-RUN rm -rf src
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    cargo chef cook --release ${CARGO_BUILD_FEATURES} --recipe-path recipe.json
 
-# ---------- 1b. Build the real application ----------
+# Build application
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    cargo build --release ${CARGO_BUILD_FEATURES} --locked
 
-RUN cargo build --release --all-features --locked
-
-############################
-# 2️⃣  Runtime stage
-############################
-FROM debian:bookworm-slim AS runtime
-
+# ==================== Init Stage ====================
+# Separate stage to run sayna init (downloads models)
+# This allows using distroless for final runtime
+FROM debian:bookworm-slim AS init
+ARG RUN_SAYNA_INIT=true
 WORKDIR /app
 
 # Install runtime dependencies
 # Note: webrtc-sys links dynamically to several system libraries
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libssl3 \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libstdc++6 \
     libva2 libva-drm2 \
     libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
-    libglib2.0-0 libgbm1 libdrm2 && \
-    rm -rf /var/lib/apt/lists/*
+    libglib2.0-0 libgbm1 libdrm2 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Root certificates for HTTPS (reqwest/rustls)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# The statically-linked binary
 COPY --from=builder /app/target/release/sayna /app/sayna
-COPY --from=builder /app/target/release/*.so /app/
-COPY --from=builder /app/target/release/*.so.* /app/
-COPY --from=builder /app/target/release/*.d /app/
-COPY --from=builder /app/target/release/*.rlib /app/
-COPY --from=builder /app/onnxruntime/lib/libonnxruntime.so* /app/
+COPY --from=builder /app/onnxruntime/lib/*.so* /app/
 
-# Default logging level & port (override with -e if needed)
-ENV RUST_LOG=info \
-    PORT=3001 \
+ENV LD_LIBRARY_PATH=/app \
     CACHE_PATH=/app/cache
 
+RUN mkdir -p "$CACHE_PATH" \
+    && if [ "${RUN_SAYNA_INIT}" = "true" ]; then /app/sayna init; fi
+
+# ==================== Runtime ====================
+# Using distroless for minimal attack surface (~20MB vs ~74MB debian-slim)
+# Includes glibc, libstdc++, and ca-certificates
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /app
+
+# Binary
+COPY --from=builder /app/target/release/sayna /app/sayna
+
+# ONNX Runtime shared libraries
+COPY --from=builder /app/onnxruntime/lib/*.so* /app/
+
+# OpenSSL libraries (not included in distroless)
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3 /app/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /app/
+
+# Cached models from init stage
+COPY --from=init /app/cache /app/cache
+
+ENV RUST_LOG=info \
+    PORT=3001 \
+    CACHE_PATH=/app/cache \
+    LD_LIBRARY_PATH=/app
+
 EXPOSE 3001
-RUN mkdir -p "$CACHE_PATH" && /app/sayna init
 ENTRYPOINT ["/app/sayna"]
