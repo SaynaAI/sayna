@@ -1,8 +1,7 @@
 # GitHub Actions workflow for building and pushing multi-architecture Docker images
-# Builds for linux/amd64 and linux/arm64, pushes to DockerHub at saynaai/sayna
-#
+# Builds on native linux/amd64 and linux/arm64 runners, then creates a manifest list
+# 
 # Trigger: Push tags matching v*.*.* OR workflow_dispatch (manual/triggered)
-# Note: ARM64 builds use QEMU emulation and may take 30-60 minutes
 
 name: Docker
 
@@ -23,17 +22,17 @@ env:
 
 jobs:
   # =============================================================================
-  # Build and push multi-architecture Docker image
+  # Prepare version metadata
   # =============================================================================
-  build-and-push:
-    name: Build and Push
+  prepare:
+    name: Prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 300  # ARM64 emulation is slow
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
       - name: Determine version
         id: version
         run: |
@@ -60,13 +59,18 @@ jobs:
             echo "Detected stable version: ${VERSION_NUM}"
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
+  # =============================================================================
+  # Build and push linux/amd64 image
+  # =============================================================================
+  build-amd64:
+    name: Build amd64
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
       - name: Log in to DockerHub
         uses: docker/login-action@v3
@@ -75,6 +79,91 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}-amd64
+
+      - name: Build and push Docker image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+  # =============================================================================
+  # Build and push linux/arm64 image
+  # =============================================================================
+  build-arm64:
+    name: Build arm64
+    needs: prepare
+    runs-on: ubuntu-24.04-arm64
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}-arm64
+
+      - name: Build and push Docker image (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+  # =============================================================================
+  # Create and push multi-arch manifest list
+  # =============================================================================
+  manifest:
+    name: Create multi-arch manifest
+    needs: [prepare, build-amd64, build-arm64]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -82,28 +171,28 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             # Always tag with version
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
             # Tag as 'latest' only for stable releases (no pre-release suffix)
-            type=raw,value=latest,enable=${{ steps.version.outputs.is_prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Build arguments are handled by Dockerfile's TARGETARCH
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          AMD64_IMAGE="${IMAGE}:${{ needs.prepare.outputs.version }}-amd64"
+          ARM64_IMAGE="${IMAGE}:${{ needs.prepare.outputs.version }}-arm64"
+
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            if [ -n "$tag" ]; then
+              docker buildx imagetools create -t "$tag" "$AMD64_IMAGE" "$ARM64_IMAGE"
+            fi
+          done
 
       - name: Verify pushed images
         run: |
           echo "## Docker Image Published Successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Tags" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -116,8 +205,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.version.outputs.is_prerelease }}" = "false" ]; then
+          echo "docker pull ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.prepare.outputs.is_prerelease }}" = "false" ]; then
             echo "docker pull ${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           fi
           echo '```' >> $GITHUB_STEP_SUMMARY

@@ -12,4 +12,4 @@ rustflags = ["-C", "link-arg=-ObjC"]
 rustflags = ["-C", "link-arg=-ObjC"]
 
 [registries.crates-io]
-protocol = "git"
+protocol = "sparse"

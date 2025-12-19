@@ -63,16 +63,16 @@ The server will start on `http://localhost:3001`
 
 ## Feature Toggles
 
-Sayna exposes several Cargo features that gate heavyweight subsystems or documentation features.
+Sayna exposes several Cargo features that gate heavyweight subsystems or documentation features. By default, no optional features are enabled.
 
-- `turn-detect` (default): ONNX-based speech turn detection and asset preparation
-- `noise-filter` (default): DeepFilterNet noise suppression pipeline
-- `openapi`: OpenAPI 3.1 specification generation and endpoints
+- `turn-detect` (disabled by default): ONNX-based speech turn detection and asset preparation
+- `noise-filter` (disabled by default): DeepFilterNet noise suppression pipeline
+- `openapi` (disabled by default): OpenAPI 3.1 specification generation and endpoints
 
 Example commands:
 
 ```bash
-# Run with default features
+# Run with no optional features (default)
 cargo run
 
 # Run with turn detection
@@ -90,7 +90,7 @@ cargo run --features turn-detect,noise-filter,openapi
 
 Features are compile-time only. Disable them when you need smaller builds or want to avoid optional dependencies.
 
-`sayna init` downloads turn-detection assets when the `turn-detect` feature is enabled. Without that feature the command exits early with an explanatory error, and runtime logs mention the timer-based fallback.
+`sayna init` downloads turn-detection assets when the `turn-detect` feature is enabled. With the default build (no optional features), the command exits early with an explanatory error, and runtime logs mention the timer-based fallback.
 
 ## OpenAPI Documentation
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG RUST_VERSION=1.88.0
-ARG CARGO_BUILD_FEATURES="--all-features"
+ARG CARGO_BUILD_FEATURES="--no-default-features --features turn-detect,noise-filter"
 ARG ONNX_VERSION=1.23.2
 
 # ==================== Chef Base ====================
@@ -11,7 +11,8 @@ WORKDIR /app
 # ==================== Planner ====================
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+# cargo-chef needs a target file for cargo metadata; stub keeps cache stable.
+RUN mkdir -p src && touch src/main.rs src/lib.rs
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ==================== Builder ====================
@@ -23,7 +24,7 @@ ARG TARGETARCH
 # Install build dependencies
 # Note: webrtc-sys requires many system libraries for video/graphics support
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang cmake pkg-config libssl-dev ca-certificates curl git \
+    clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
     libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
     libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -42,7 +43,10 @@ RUN case "${TARGETARCH}" in \
 # Build optimization flags
 ENV RUSTFLAGS="-C opt-level=z -C link-arg=-s -C strip=symbols" \
     CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    ZSTD_SYS_USE_PKG_CONFIG=1 \
+    CC=clang \
+    CXX=clang++
 
 # Cook dependencies (cached layer) - sharing=locked prevents cache corruption
 COPY --from=planner /app/recipe.json recipe.json
@@ -57,6 +61,16 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     cargo build --release ${CARGO_BUILD_FEATURES} --locked
+
+# Copy OpenSSL libraries to architecture-independent location for multi-arch builds
+# On amd64: /usr/lib/x86_64-linux-gnu/, on arm64: /usr/lib/aarch64-linux-gnu/
+RUN mkdir -p /app/lib && \
+    case "${TARGETARCH}" in \
+        amd64) LIBDIR="/usr/lib/x86_64-linux-gnu" ;; \
+        arm64) LIBDIR="/usr/lib/aarch64-linux-gnu" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    cp "${LIBDIR}/libssl.so.3" "${LIBDIR}/libcrypto.so.3" /app/lib/
 
 # ==================== Init Stage ====================
 # Separate stage to run sayna init (downloads models)
@@ -95,9 +109,9 @@ COPY --from=builder /app/target/release/sayna /app/sayna
 # ONNX Runtime shared libraries
 COPY --from=builder /app/onnxruntime/lib/*.so* /app/
 
-# OpenSSL libraries (not included in distroless)
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3 /app/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /app/
+# OpenSSL libraries (not included in distroless, copied to /app/lib in builder for multi-arch)
+COPY --from=builder /app/lib/libssl.so.3 /app/
+COPY --from=builder /app/lib/libcrypto.so.3 /app/
 
 # Cached models from init stage
 COPY --from=init /app/cache /app/cache
