@@ -11,9 +11,9 @@ on:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Version tag to build (e.g., v1.0.0)"
-        required: false
+      version:
+        description: "Version to build (e.g., 1.0.0 or v1.0.0)"
+        required: true
         type: string
 
 env:
@@ -36,19 +36,24 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            # Use manually provided tag
-            VERSION="${{ inputs.tag }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Use manually provided version
+            VERSION_INPUT="${{ inputs.version }}"
+            if [[ "${VERSION_INPUT}" == v* ]]; then
+              VERSION_TAG="${VERSION_INPUT}"
+              VERSION_NUM="${VERSION_INPUT#v}"
+            else
+              VERSION_TAG="v${VERSION_INPUT}"
+              VERSION_NUM="${VERSION_INPUT}"
+            fi
           else
             # Use Git tag
-            VERSION="${GITHUB_REF_NAME}"
+            VERSION_TAG="${GITHUB_REF_NAME}"
+            VERSION_NUM="${VERSION_TAG#v}"
           fi
 
-          # Remove 'v' prefix for version number
-          VERSION_NUM="${VERSION#v}"
-
           echo "version=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
-          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
 
           # Detect if this is a pre-release (contains hyphen after version, e.g., 1.0.0-beta.1)
           if [[ "${VERSION_NUM}" == *-* ]]; then
