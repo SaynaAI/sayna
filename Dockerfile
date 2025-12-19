@@ -23,11 +23,18 @@ ARG TARGETARCH
 
 # Install build dependencies
 # Note: webrtc-sys requires many system libraries for video/graphics support
-RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true \
-    && apt-get install -y --no-install-recommends \
-    clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
-    libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
-    libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
+# Using multiple mirror fallback strategies for ARM64 compatibility
+RUN rm -rf /var/lib/apt/lists/* \
+    && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+       elif [ -f /etc/apt/sources.list ]; then \
+         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
+       fi \
+    && apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::Check-Valid-Until=false \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+       clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
+       libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
+       libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Download ONNX Runtime (architecture-aware for multi-platform builds)
@@ -63,47 +70,47 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     cargo build --release ${CARGO_BUILD_FEATURES} --locked
 
-# Copy OpenSSL libraries to architecture-independent location for multi-arch builds
-# On amd64: /usr/lib/x86_64-linux-gnu/, on arm64: /usr/lib/aarch64-linux-gnu/
-RUN mkdir -p /app/lib && \
-    case "${TARGETARCH}" in \
-        amd64) LIBDIR="/usr/lib/x86_64-linux-gnu" ;; \
-        arm64) LIBDIR="/usr/lib/aarch64-linux-gnu" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    cp "${LIBDIR}/libssl.so.3" "${LIBDIR}/libcrypto.so.3" /app/lib/
-
-# ==================== Init Stage ====================
-# Separate stage to run sayna init (downloads models)
-# This allows using distroless for final runtime
-FROM debian:bookworm-slim AS init
-ARG RUN_SAYNA_INIT=true
-WORKDIR /app
+# ==================== Runtime Dependencies ====================
+# Base image with all runtime dependencies for webrtc-sys
+# Reused by both init and final runtime stages
+FROM debian:bookworm-slim AS runtime-deps
 
 # Install runtime dependencies
 # Note: webrtc-sys links dynamically to several system libraries
-RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true \
-    && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 libstdc++6 \
-    libva2 libva-drm2 \
-    libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
-    libglib2.0-0 libgbm1 libdrm2 \
+# Using multiple mirror fallback strategies for ARM64 compatibility
+RUN rm -rf /var/lib/apt/lists/* \
+    && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+       elif [ -f /etc/apt/sources.list ]; then \
+         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
+       fi \
+    && apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::Check-Valid-Until=false \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+       ca-certificates libssl3 libstdc++6 \
+       libva2 libva-drm2 \
+       libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
+       libglib2.0-0 libgbm1 libdrm2 \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV LD_LIBRARY_PATH=/app
+
+# ==================== Init Stage ====================
+# Runs sayna init to download models (requires shell)
+FROM runtime-deps AS init
+ARG RUN_SAYNA_INIT=true
 
 COPY --from=builder /app/target/release/sayna /app/sayna
 COPY --from=builder /app/onnxruntime/lib/*.so* /app/
 
-ENV LD_LIBRARY_PATH=/app \
-    CACHE_PATH=/app/cache
+ENV CACHE_PATH=/app/cache
 
 RUN mkdir -p "$CACHE_PATH" \
     && if [ "${RUN_SAYNA_INIT}" = "true" ]; then /app/sayna init; fi
 
 # ==================== Runtime ====================
-# Using distroless for minimal attack surface (~20MB vs ~74MB debian-slim)
-# Includes glibc, libstdc++, and ca-certificates
-FROM gcr.io/distroless/cc-debian12 AS runtime
-WORKDIR /app
+# Final production image
+FROM runtime-deps AS runtime
 
 # Binary
 COPY --from=builder /app/target/release/sayna /app/sayna
@@ -111,17 +118,12 @@ COPY --from=builder /app/target/release/sayna /app/sayna
 # ONNX Runtime shared libraries
 COPY --from=builder /app/onnxruntime/lib/*.so* /app/
 
-# OpenSSL libraries (not included in distroless, copied to /app/lib in builder for multi-arch)
-COPY --from=builder /app/lib/libssl.so.3 /app/
-COPY --from=builder /app/lib/libcrypto.so.3 /app/
-
 # Cached models from init stage
 COPY --from=init /app/cache /app/cache
 
 ENV RUST_LOG=info \
     PORT=3001 \
-    CACHE_PATH=/app/cache \
-    LD_LIBRARY_PATH=/app
+    CACHE_PATH=/app/cache
 
 EXPOSE 3001
 ENTRYPOINT ["/app/sayna"]
