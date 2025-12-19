@@ -1,3 +1,7 @@
+# Windows: Use static CRT to match webrtc-sys prebuilt binaries
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-ObjC"]
 
