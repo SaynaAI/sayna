@@ -28,7 +28,7 @@ jobs:
   build-and-push:
     name: Build and Push
     runs-on: ubuntu-24.04
-    timeout-minutes: 90  # ARM64 emulation is slow
+    timeout-minutes: 300  # ARM64 emulation is slow
 
     steps:
       - name: Checkout repository

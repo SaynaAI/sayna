@@ -118,6 +118,7 @@ jobs:
     name: Build Linux (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
     strategy:
       fail-fast: true
       matrix:
@@ -208,6 +209,7 @@ jobs:
     name: Build macOS (Apple Silicon)
     needs: build-linux
     runs-on: macos-15
+    timeout-minutes: 300
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -278,6 +280,7 @@ jobs:
     name: Build Windows
     needs: build-macos
     runs-on: windows-latest
+    timeout-minutes: 300
     # Note: Only x86_64 is supported - webrtc-sys doesn't have prebuilt binaries for i686
     steps:
       - name: Checkout repository
