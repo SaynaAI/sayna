@@ -23,7 +23,8 @@ ARG TARGETARCH
 
 # Install build dependencies
 # Note: webrtc-sys requires many system libraries for video/graphics support
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true \
+    && apt-get install -y --no-install-recommends \
     clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
     libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
     libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
@@ -81,7 +82,8 @@ WORKDIR /app
 
 # Install runtime dependencies
 # Note: webrtc-sys links dynamically to several system libraries
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true \
+    && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libstdc++6 \
     libva2 libva-drm2 \
     libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
