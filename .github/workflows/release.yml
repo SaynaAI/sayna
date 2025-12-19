@@ -3,7 +3,7 @@
 # generates checksums and SLSA attestations for supply chain security.
 #
 # Trigger: Push tags matching v*.*.* (e.g., v1.0.0, v1.2.3-beta.1)
-# Architecture: validate -> create-release -> build (parallel) -> publish-release
+# Architecture: validate -> create-release -> build (sequential: Linux -> macOS -> Windows) -> publish-release
 
 name: Release
 
@@ -204,7 +204,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: Build macOS (${{ matrix.target }})
-    needs: create-release
+    needs: build-linux
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -284,7 +284,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build Windows (${{ matrix.target }})
-    needs: create-release
+    needs: build-macos
     runs-on: windows-latest
     strategy:
       fail-fast: true
