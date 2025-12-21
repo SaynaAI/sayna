@@ -2,6 +2,13 @@
 name = "sayna"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/saynaai/sayna"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["voice", "stt", "tts", "livekit", "speech"]
+categories = ["multimedia::audio", "web-programming"]
+description = "Real-time voice processing server with unified STT and TTS services"
+publish = false  # Binary-only distribution via GitHub releases
 
 [features]
 default = []
@@ -36,7 +43,9 @@ bytes = "1.8"
 http-body-util = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+# Note: Using default-features = false + rustls-tls to avoid OpenSSL dependency
+# This is important for cross-compilation to musl targets
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
 hound = "3.5"
 
 # JWT authentication
@@ -140,3 +149,11 @@ debug-assertions = false
 debug-assertions = false
 [profile.dev.package.tract-hir]
 debug-assertions = false
+
+# Release profile optimizations for smaller, faster binaries
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,99 @@
+# GitHub Actions workflow for automated version management using release-plz
+# Analyzes conventional commits to determine version bumps, updates changelog,
+# and creates release PRs automatically.
+#
+# Workflow:
+# 1. Push commits to master -> release-plz creates/updates Release PR
+# 2. Merge Release PR -> release-plz creates Git tag
+# 3. Tag creation -> triggers release.yml workflow
+#
+# Requires conventional commits: feat, fix, docs, chore, etc.
+# See: https://www.conventionalcommits.org/
+
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    types:
+      - closed
+    branches:
+      - master
+
+# Permissions required for creating branches, commits, tags, and PRs
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # =============================================================================
+  # Job 1: Create or update Release PR when commits are pushed to master
+  # =============================================================================
+  release-plz:
+    name: Release PR
+    # Only run on push events, not PR events
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # Full history for commit analysis
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =============================================================================
+  # Job 2: Create Git tag when Release PR is merged
+  # =============================================================================
+  release-plz-tag:
+    name: Create Tag
+    # Only run when a PR is merged (not just closed)
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release-plz-')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # Note: Using GITHUB_TOKEN here. Tags created with GITHUB_TOKEN
+          # will NOT trigger other workflows (like release.yml).
+          # If automatic release triggering is desired, use a Personal Access Token:
+          # token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag creation summary
+        run: |
+          echo "## Release Tag Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The release-plz PR has been merged and a new version tag has been created." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Tags created with GITHUB_TOKEN do not trigger other workflows automatically." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To trigger the release build, either:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Manually trigger the Release workflow from the Actions tab" >> $GITHUB_STEP_SUMMARY
+          echo "2. Configure a Personal Access Token (PAT) for automatic triggering" >> $GITHUB_STEP_SUMMARY

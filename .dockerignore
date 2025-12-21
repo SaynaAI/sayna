@@ -6,6 +6,15 @@ target/
 *.rlib
 *.rmeta
 
+# ── Project assets not needed for image builds ──────────────────
+dist/
+onnxruntime/
+docs/
+examples/
+results/
+tests/
+certs/
+
 # ── VCS ─────────────────────────────────────────────────────────
 .git/
 .gitignore

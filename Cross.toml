@@ -1,0 +1,41 @@
+# Cross.toml - Configuration for cross-rs cross-compilation
+# https://github.com/cross-rs/cross
+#
+# This configuration enables cross-compilation to Linux glibc targets.
+#
+# Note: We use glibc targets instead of musl because the livekit crate
+# depends on libwebrtc which requires glib and other native libraries.
+# These dependencies cannot be easily cross-compiled to musl targets.
+#
+# For fully static binaries, use Docker multi-stage builds instead.
+# Docker images are the primary distribution method for Linux deployments.
+#
+# Usage:
+#   cross build --target x86_64-unknown-linux-gnu --release
+#   cross build --target aarch64-unknown-linux-gnu --release
+#
+# Note: This configuration is for the default build (no features enabled).
+# The turn-detect and noise-filter features require native dependencies
+# that are only included in Docker image builds.
+
+[build]
+# Use standard cargo, not xargo or build-std
+xargo = false
+build-std = false
+
+# Environment variables for all targets
+[build.env]
+passthrough = [
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+]
+
+# 64-bit x86 Linux (AMD/Intel) - Most common server platform
+# Uses glibc for compatibility with LiveKit/WebRTC native dependencies
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:edge"
+
+# 64-bit ARM Linux - AWS Graviton, Raspberry Pi 4+, Oracle Cloud ARM
+# Growing market segment due to cost-performance benefits
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"

@@ -22,114 +22,41 @@ A high-performance real-time voice processing server built in Rust that provides
 
 ### Prerequisites
 
-- Rust 1.70+ and Cargo
-- Optional: Deepgram API key (for STT/TTS)
-- Optional: ElevenLabs API key (for STT/TTS)
-- Optional: Google Cloud credentials (for STT/TTS)
-- Optional: Azure Speech subscription key and region (for STT/TTS)
-- Optional: LiveKit server (for WebRTC features)
+- Docker
+- At least one provider API key (optional - can run in audio-disabled mode)
 
-### Installation
-
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/sayna.git
-cd sayna
-```
-
-2. **Set up environment variables**
-```bash
-cp .env.example .env
-```
-
-3. **Configure your `.env` file**
-```env
-# Optional - can run without these in audio-disabled mode
-DEEPGRAM_API_KEY=your_deepgram_api_key_here
-ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-AZURE_SPEECH_SUBSCRIPTION_KEY=your_azure_subscription_key
-AZURE_SPEECH_REGION=eastus
-
-# Server configuration
-PORT=3001
-HOST=0.0.0.0
-
-# Optional - for LiveKit integration
-LIVEKIT_URL=ws://localhost:7880
-```
-
-4. **Run the server**
-```bash
-cargo run
-```
-
-The server will start on `http://localhost:3001`
-
-## Feature Toggles
-
-Sayna exposes several Cargo features that gate heavyweight subsystems or documentation features.
-
-- `turn-detect` (default): ONNX-based speech turn detection and asset preparation
-- `noise-filter` (default): DeepFilterNet noise suppression pipeline
-- `openapi`: OpenAPI 3.1 specification generation and endpoints
-
-Example commands:
+### Run with Docker
 
 ```bash
-# Run with default features
-cargo run
-
-# Run with turn detection
-cargo run --features turn-detect
-
-# Run with noise filter
-cargo run --features noise-filter
-
-# Run with OpenAPI documentation
-cargo run --features openapi
-
-# Run with multiple features
-cargo run --features turn-detect,noise-filter,openapi
+docker run -d \
+  -p 3001:3001 \
+  -e DEEPGRAM_API_KEY=your-key \
+  saynaai/sayna
 ```
 
-Features are compile-time only. Disable them when you need smaller builds or want to avoid optional dependencies.
+The server will be available at `http://localhost:3001`.
 
-`sayna init` downloads turn-detection assets when the `turn-detect` feature is enabled. Without that feature the command exits early with an explanatory error, and runtime logs mention the timer-based fallback.
+### Docker Compose
 
-## OpenAPI Documentation
+```yaml
+version: "3.9"
+services:
+  sayna:
+    image: saynaai/sayna
+    ports:
+      - "3001:3001"
+    environment:
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      CACHE_PATH: /data/cache
+    volumes:
+      - sayna-cache:/data/cache
 
-Sayna provides machine-generated OpenAPI 3.1 specification for all REST endpoints and WebSocket message types. This feature is gated behind the `openapi` Cargo feature to keep production builds lean.
-
-### Generating the OpenAPI Spec
-
-The OpenAPI specification is automatically generated from Rust code annotations via CLI commands:
-
-```bash
-# Generate YAML to stdout (default)
-cargo run --features openapi -- openapi
-
-# Generate and save YAML to file
-cargo run --features openapi -- openapi --output docs/openapi.yaml
-# or use short form
-cargo run --features openapi -- openapi -o docs/openapi.yaml
-
-# Generate JSON format
-cargo run --features openapi -- openapi --format json --output docs/openapi.json
-# or use short form
-cargo run --features openapi -- openapi -f json -o docs/openapi.json
+volumes:
+  sayna-cache: {}
 ```
 
-**CLI Options:**
-- `-f, --format <FORMAT>`: Output format (`yaml` or `json`). Default: `yaml`
-- `-o, --output <FILE>`: Write to file instead of stdout
-
-The generated spec can be used with:
-- **Postman**: For API testing and collection generation
-- **Swagger UI**: For interactive documentation
-- **Redoc**: For modern API docs
-- **OpenAPI Generators**: Generate client SDKs in various languages
-- **API Documentation Tools**: Import into your documentation platform
+For complete Docker documentation including LiveKit integration, see [docs/docker.md](docs/docker.md).
 
 ### Running Without API Keys (Audio-Disabled Mode)
 
@@ -253,7 +180,14 @@ For complete authentication setup and architecture details, see [docs/authentica
 
 ## Development
 
-### Building
+For local development, you can build and run from source.
+
+### Prerequisites
+
+- Rust 1.88.0 or later
+- Optional: ONNX Runtime (for turn detection feature)
+
+### Building from Source
 
 ```bash
 # Development build
@@ -262,9 +196,33 @@ cargo build
 # Release build (optimized)
 cargo build --release
 
-# Check code without building
-cargo check
+# Run the server
+cargo run
+
+# Run with a config file
+cargo run -- -c config.yaml
 ```
+
+### Feature Flags
+
+Sayna exposes several Cargo features that gate heavyweight subsystems:
+
+- `turn-detect`: ONNX-based speech turn detection
+- `noise-filter`: DeepFilterNet noise suppression pipeline
+- `openapi`: OpenAPI 3.1 specification generation
+
+```bash
+# Run with turn detection
+cargo run --features turn-detect
+
+# Run with noise filter
+cargo run --features noise-filter
+
+# Run with multiple features
+cargo run --features turn-detect,noise-filter,openapi
+```
+
+The Docker image includes `turn-detect` and `noise-filter` by default.
 
 ### Testing
 
@@ -292,7 +250,7 @@ cargo clippy
 cargo audit
 ```
 
-### Docker
+### Building Docker Image Locally
 
 ```bash
 # Build Docker image
@@ -374,4 +332,4 @@ sip:
 
 ## Support
 
-For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/SaynaAI/sayna).
+For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/saynaai/sayna).

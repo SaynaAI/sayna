@@ -1534,7 +1534,7 @@ Browser Participant → LiveKit Room → Sayna
 
 **Noise Filtering:**
 
-If compiled with `noise-filter` feature (default), Sayna applies DeepFilterNet noise reduction:
+If compiled with `noise-filter` feature (disabled by default), Sayna applies DeepFilterNet noise reduction:
 - Reduces background noise, keyboard typing, fan noise
 - Preserves speech quality
 - CPU-intensive, runs on thread pool (non-blocking)
@@ -1543,7 +1543,7 @@ If compiled with `noise-filter` feature (default), Sayna applies DeepFilterNet n
 
 **Turn Detection:**
 
-If compiled with `turn-detect` feature (default), Sayna uses an ONNX model to detect when speech ends:
+If compiled with `turn-detect` feature (disabled by default), Sayna uses an ONNX model to detect when speech ends:
 - Sets `is_speech_final=true` when speaker stops talking
 - More accurate than silence-only detection
 - Helps conversational AI know when to respond

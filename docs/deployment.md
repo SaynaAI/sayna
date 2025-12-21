@@ -263,12 +263,14 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 - **In-memory cache**: omit `CACHE_PATH` to keep assets in RAM; faster to bootstrap but cleared on restarts.
 
 ### E. Feature Flag Tuning
-- Disable expensive DSP layers when you need minimal footprints:
-  - `cargo run --no-default-features --features openapi` (no turn detection or noise filter).
-  - Override feature flags at build time: `--build-arg CARGO_BUILD_FEATURES="--features turn-detect"`.
-- The published Dockerfile uses `--all-features` by default. For smaller images, build with fewer features:
+- Default builds enable no optional features. Add only what you need:
+  - `cargo run` (no optional features)
+  - `cargo run --features turn-detect` (turn detection enabled)
+  - `cargo run --features openapi` (OpenAPI enabled)
+- Override feature flags at build time: `--build-arg CARGO_BUILD_FEATURES="--features turn-detect"`.
+- The published Dockerfile defaults to `--no-default-features --features turn-detect,noise-filter` (OpenAPI off). For smaller images, override the build args:
   ```bash
-  docker build -t sayna:minimal --build-arg CARGO_BUILD_FEATURES="" .
+  docker build -t sayna:minimal --build-arg CARGO_BUILD_FEATURES="--no-default-features" .
   ```
 
 ## 9. Verification Checklist

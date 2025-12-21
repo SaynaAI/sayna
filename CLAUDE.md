@@ -21,12 +21,15 @@ docker build -t saynaai/sayna .      # Build Docker image
 ```
 
 ### Feature Flags
-- `turn-detect` (default): ONNX-based turn detection. Required for `sayna init`.
-- `noise-filter` (default): DeepFilterNet noise suppression. Disable to reduce dependencies.
-- `openapi`: OpenAPI 3.1 specification generation using utoipa crate.
+By default, no optional features are enabled.
+
+- `turn-detect` (disabled by default): ONNX-based turn detection. Required for `sayna init`.
+- `noise-filter` (disabled by default): DeepFilterNet noise suppression. Disable to reduce dependencies.
+- `openapi` (disabled by default): OpenAPI 3.1 specification generation using utoipa crate.
 
 ```bash
-cargo check --no-default-features              # Disable all default features
+cargo check                                   # Default build, no optional features
+cargo check --no-default-features             # Explicitly disable optional features
 cargo build --features turn-detect,openapi     # Enable specific features
 cargo run --features openapi -- openapi -o docs/openapi.yaml  # Generate OpenAPI spec
 ```

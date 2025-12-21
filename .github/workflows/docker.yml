@@ -1,0 +1,240 @@
+# GitHub Actions workflow for building and pushing multi-architecture Docker images
+# Builds on native linux/amd64 and linux/arm64 runners, then creates a manifest list
+# 
+# Trigger: Push tags matching v*.*.* OR workflow_dispatch (manual/triggered)
+
+name: Docker
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g., 1.0.0 or v1.0.0)"
+        required: true
+        type: string
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: saynaai/sayna
+
+jobs:
+  # =============================================================================
+  # Prepare version metadata
+  # =============================================================================
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Use manually provided version
+            VERSION_INPUT="${{ inputs.version }}"
+            if [[ "${VERSION_INPUT}" == v* ]]; then
+              VERSION_TAG="${VERSION_INPUT}"
+              VERSION_NUM="${VERSION_INPUT#v}"
+            else
+              VERSION_TAG="v${VERSION_INPUT}"
+              VERSION_NUM="${VERSION_INPUT}"
+            fi
+          else
+            # Use Git tag
+            VERSION_TAG="${GITHUB_REF_NAME}"
+            VERSION_NUM="${VERSION_TAG#v}"
+          fi
+
+          echo "version=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Detect if this is a pre-release (contains hyphen after version, e.g., 1.0.0-beta.1)
+          if [[ "${VERSION_NUM}" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Detected pre-release version: ${VERSION_NUM}"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Detected stable version: ${VERSION_NUM}"
+          fi
+
+  # =============================================================================
+  # Build and push linux/amd64 image
+  # =============================================================================
+  build-amd64:
+    name: Build amd64
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}-amd64
+
+      - name: Build and push Docker image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+  # =============================================================================
+  # Build and push linux/arm64 image
+  # =============================================================================
+  build-arm64:
+    name: Build arm64
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}-arm64
+
+      - name: Build and push Docker image (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+  # =============================================================================
+  # Create and push multi-arch manifest list
+  # =============================================================================
+  manifest:
+    name: Create multi-arch manifest
+    needs: [prepare, build-amd64, build-arm64]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Always tag with version
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            # Tag as 'latest' only for stable releases (no pre-release suffix)
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
+
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          AMD64_IMAGE="${IMAGE}:${{ needs.prepare.outputs.version }}-amd64"
+          ARM64_IMAGE="${IMAGE}:${{ needs.prepare.outputs.version }}-arm64"
+
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            if [ -n "$tag" ]; then
+              docker buildx imagetools create -t "$tag" "$AMD64_IMAGE" "$ARM64_IMAGE"
+            fi
+          done
+
+      - name: Verify pushed images
+        run: |
+          echo "## Docker Image Published Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux/amd64\` (x86_64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux/arm64\` (aarch64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.prepare.outputs.is_prerelease }}" = "false" ]; then
+            echo "docker pull ${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # =============================================================================
+  # Update Docker Hub README
+  # =============================================================================
+  update-readme:
+    name: Update Docker Hub README
+    needs: [prepare, manifest]
+    runs-on: ubuntu-24.04
+    # Only update README for stable releases
+    if: needs.prepare.outputs.is_prerelease == 'false'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE_NAME }}
+          readme-filepath: ./docs/docker.md
+          short-description: "Real-time voice processing server with unified STT/TTS APIs"
