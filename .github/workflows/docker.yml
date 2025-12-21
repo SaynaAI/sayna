@@ -215,3 +215,26 @@ jobs:
             echo "docker pull ${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           fi
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # =============================================================================
+  # Update Docker Hub README
+  # =============================================================================
+  update-readme:
+    name: Update Docker Hub README
+    needs: [prepare, manifest]
+    runs-on: ubuntu-24.04
+    # Only update README for stable releases
+    if: needs.prepare.outputs.is_prerelease == 'false'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE_NAME }}
+          readme-filepath: ./docs/docker.md
+          short-description: "Real-time voice processing server with unified STT/TTS APIs"
