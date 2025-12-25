@@ -1,4 +1,4 @@
-use crate::auth::{AuthContext, filter_headers, match_api_secret_id};
+use crate::auth::{Auth, filter_headers, match_api_secret_id};
 use crate::errors::auth_error::AuthError;
 use crate::state::AppState;
 use axum::{
@@ -74,11 +74,10 @@ pub async fn auth_middleware(
             tracing::info!(
                 method = %request_method,
                 path = %request_path,
-                api_secret_id = %secret_id,
+                auth_id = %secret_id,
                 "API secret authentication successful"
             );
-            let auth_context = AuthContext::api_secret(secret_id);
-            request.extensions_mut().insert(auth_context);
+            request.extensions_mut().insert(Auth::new(secret_id));
             return Ok(next.run(request).await);
         } else {
             tracing::warn!(
@@ -131,17 +130,19 @@ pub async fn auth_middleware(
             )
             .await
         {
-            Ok(()) => {
+            Ok(auth) => {
                 tracing::info!(
                     method = %request_method,
                     path = %request_path,
+                    auth_id = ?auth.id,
                     "JWT authentication successful"
                 );
 
                 // Token is valid, reconstruct the request with the original body and continue
                 let mut request = Request::from_parts(parts, Body::from(body_bytes));
-                // Insert AuthContext for JWT as well so handlers can rely on Extension<AuthContext>.
-                request.extensions_mut().insert(AuthContext::jwt());
+                // Insert Auth from the auth service response.
+                // Handlers can access this via Extension<Auth> to get auth.id, etc.
+                request.extensions_mut().insert(auth);
                 Ok(next.run(request).await)
             }
             Err(e) => {

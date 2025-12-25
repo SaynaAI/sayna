@@ -414,7 +414,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
 // Integration tests for API secret authentication
 mod with_api_secret {
     use axum::extract::Extension;
-    use sayna::auth::AuthContext;
+    use sayna::auth::Auth;
     use sayna::config::AuthApiSecret;
 
     use super::*;
@@ -463,8 +463,8 @@ mod with_api_secret {
         .await
     }
 
-    async fn auth_context_id_handler(Extension(context): Extension<AuthContext>) -> String {
-        context.id().unwrap_or("missing").to_string()
+    async fn auth_id_handler(Extension(auth): Extension<Auth>) -> String {
+        auth.id.clone().unwrap_or_else(|| "missing".to_string())
     }
 
     #[tokio::test]
@@ -680,7 +680,7 @@ mod with_api_secret {
         .await;
 
         let app = Router::new()
-            .route("/whoami", get(auth_context_id_handler))
+            .route("/whoami", get(auth_id_handler))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 auth_middleware,

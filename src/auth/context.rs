@@ -1,31 +1,47 @@
-#[derive(Clone, Debug)]
-pub enum AuthMethod {
-    ApiSecret,
-    Jwt,
+/// Authenticated client information
+///
+/// Inserted into request extensions by the auth middleware after successful
+/// validation. Handlers can extract this via `Extension<Auth>` to access
+/// the authenticated client's identity.
+///
+/// This struct is designed to be extensible - new fields can be added
+/// as the auth service evolves.
+///
+/// # Example
+/// ```rust,ignore
+/// use axum::Extension;
+/// use sayna::auth::Auth;
+///
+/// async fn my_handler(
+///     Extension(auth): Extension<Auth>,
+/// ) -> impl IntoResponse {
+///     if let Some(id) = &auth.id {
+///         tracing::info!("Request from client: {}", id);
+///     }
+///     // ...
+/// }
+/// ```
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+pub struct Auth {
+    /// The authenticated client/project identifier (e.g., "project1", "client-a")
+    #[serde(default)]
+    pub id: Option<String>,
+    // Future fields can be added here, e.g.:
+    // pub org_id: Option<String>,
+    // pub permissions: Vec<String>,
+    // pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug)]
-pub struct AuthContext {
-    pub method: AuthMethod,
-    pub api_secret_id: Option<String>,
-}
-
-impl AuthContext {
-    pub fn api_secret(id: impl Into<String>) -> Self {
+impl Auth {
+    /// Create a new Auth with the given id
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
-            method: AuthMethod::ApiSecret,
-            api_secret_id: Some(id.into()),
+            id: Some(id.into()),
         }
     }
 
-    pub fn jwt() -> Self {
-        Self {
-            method: AuthMethod::Jwt,
-            api_secret_id: None,
-        }
-    }
-
-    pub fn id(&self) -> Option<&str> {
-        self.api_secret_id.as_deref()
+    /// Create an empty Auth (no id)
+    pub fn empty() -> Self {
+        Self::default()
     }
 }
