@@ -14,6 +14,7 @@ use crate::handlers::{
         DeleteSipHooksRequest, SipHookEntry, SipHooksErrorResponse, SipHooksRequest,
         SipHooksResponse,
     },
+    sip_transfer::{SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse},
     speak::SpeakRequest,
     voices::Voice,
     ws::{
@@ -47,6 +48,7 @@ use crate::handlers::{
         crate::handlers::sip_hooks::list_sip_hooks,
         crate::handlers::sip_hooks::update_sip_hooks,
         crate::handlers::sip_hooks::delete_sip_hooks,
+        crate::handlers::sip_transfer::sip_transfer,
     ),
     components(schemas(
         // REST API types
@@ -61,6 +63,10 @@ use crate::handlers::{
         SipHookEntry,
         SipHooksErrorResponse,
         DeleteSipHooksRequest,
+        // SIP transfer types
+        SIPTransferRequest,
+        SIPTransferResponse,
+        SIPTransferErrorResponse,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,

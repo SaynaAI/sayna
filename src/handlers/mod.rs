@@ -3,6 +3,7 @@ pub mod livekit;
 pub mod livekit_webhook;
 pub mod recording;
 pub mod sip_hooks;
+pub mod sip_transfer;
 pub mod speak;
 pub mod voices;
 pub mod ws;

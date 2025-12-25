@@ -6,7 +6,8 @@ info:
     name: Sayna
     url: https://api.sayna.ai
   license:
-    name: ''
+    name: Apache-2.0
+    identifier: Apache-2.0
   version: 0.1.0
 servers:
 - url: https://api.sayna.ai
@@ -234,6 +235,67 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+  /sip/transfer:
+    post:
+      tags:
+      - sip
+      summary: Handler for POST /sip/transfer endpoint
+      description: |-
+        Initiates a SIP REFER transfer for a participant in a LiveKit room.
+        The transfer moves an ongoing SIP call to a different phone number.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit handlers
+        * `request` - Transfer request with room name, participant identity, and destination
+
+        # Returns
+        * `Response` - JSON response with transfer status or error
+
+        # Errors
+        * 400 Bad Request - Invalid phone number format or empty fields
+        * 404 Not Found - Specified participant not found or not a SIP participant
+        * 500 Internal Server Error - LiveKit not configured or transfer operation failed
+
+        # Flow
+        1. Validate the phone number format
+        2. Check LiveKit handlers are configured
+        3. Verify the participant exists and is a SIP participant
+        4. Execute the SIP transfer
+        5. Return success or appropriate error
+      operationId: sip_transfer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIPTransferRequest'
+        required: true
+      responses:
+        '200':
+          description: Transfer initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferResponse'
+        '400':
+          description: Invalid request (bad phone number or empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+        '404':
+          description: Participant not found or not a SIP participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+        '500':
+          description: LiveKit not configured or transfer failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+      security:
+      - bearer_auth: []
   /speak:
     post:
       tags:
@@ -412,6 +474,33 @@ components:
             type: string
             enum:
             - send_message
+      - type: object
+        description: |-
+          Transfer the current SIP call to another phone number.
+
+          This command initiates a SIP REFER transfer for the current participant
+          in the LiveKit room. The participant identity and room name are derived
+          from the WebSocket connection state.
+        required:
+        - transfer_to
+        - type
+        properties:
+          transfer_to:
+            type: string
+            description: |-
+              The destination phone number to transfer the call to.
+
+              Accepts phone numbers in various formats:
+              - International format with `+` prefix (e.g., "+1234567890")
+              - National format without prefix (e.g., "1234567890")
+              - Internal extensions (e.g., "1234")
+
+              Validation is performed by the handler, not during deserialization.
+            example: '+1234567890'
+          type:
+            type: string
+            enum:
+            - sip_transfer
       description: WebSocket message types for incoming messages
     LiveKitWebSocketConfig:
       type: object
@@ -562,6 +651,24 @@ components:
             type: string
             enum:
             - error
+      - type: object
+        description: |-
+          SIP transfer specific error
+
+          This message is sent when a SIP transfer operation fails.
+          Clients can subscribe to this specific error type to handle
+          SIP transfer failures separately from other errors.
+        required:
+        - message
+        - type
+        properties:
+          message:
+            type: string
+            description: Error message describing why the transfer failed
+          type:
+            type: string
+            enum:
+            - sip_transfer_error
       description: WebSocket message types for outgoing messages
     ParticipantDisconnectedInfo:
       type: object
@@ -602,6 +709,104 @@ components:
           type: string
           description: Word to replace
           example: API
+    SIPTransferErrorResponse:
+      type: object
+      description: |-
+        Error response for SIP transfer failures
+
+        # Example
+        ```json
+        {
+          "error": "Participant 'sip_123' not found or is not a SIP participant",
+          "code": "PARTICIPANT_NOT_FOUND"
+        }
+        ```
+      required:
+      - error
+      - code
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: PARTICIPANT_NOT_FOUND
+        error:
+          type: string
+          description: Human-readable error message
+          example: Participant not found or is not a SIP participant
+    SIPTransferRequest:
+      type: object
+      description: |-
+        Request body for initiating a SIP call transfer
+
+        # Example
+        ```json
+        {
+          "room_name": "call-room-123",
+          "participant_identity": "sip_participant_456",
+          "transfer_to": "+15551234567"
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - transfer_to
+      properties:
+        participant_identity:
+          type: string
+          description: |-
+            The identity of the SIP participant to transfer.
+            This can be obtained by listing participants in the room via LiveKit API.
+          example: sip_participant_456
+        room_name:
+          type: string
+          description: The LiveKit room name where the SIP participant is connected
+          example: call-room-123
+        transfer_to:
+          type: string
+          description: |-
+            The phone number to transfer the call to.
+            Supports international format (+1234567890), national format (07123456789),
+            or internal extensions (1234).
+          example: '+15551234567'
+    SIPTransferResponse:
+      type: object
+      description: |-
+        Response for a successful SIP transfer initiation
+
+        Note: A successful response indicates the transfer has been initiated,
+        not that it has completed. The actual transfer may take several seconds.
+
+        # Example
+        ```json
+        {
+          "status": "initiated",
+          "room_name": "call-room-123",
+          "participant_identity": "sip_participant_456",
+          "transfer_to": "tel:+15551234567"
+        }
+        ```
+      required:
+      - status
+      - room_name
+      - participant_identity
+      - transfer_to
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the participant being transferred
+          example: sip_participant_456
+        room_name:
+          type: string
+          description: The room name where the transfer was initiated
+          example: call-room-123
+        status:
+          type: string
+          description: Status of the transfer request ("initiated" or "completed")
+          example: initiated
+        transfer_to:
+          type: string
+          description: 'The normalized phone number with tel: prefix'
+          example: tel:+15551234567
     STTWebSocketConfig:
       type: object
       description: STT configuration for WebSocket messages (without API key)
