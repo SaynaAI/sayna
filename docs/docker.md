@@ -57,9 +57,18 @@ The server will be available at `http://localhost:3001`.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `AUTH_REQUIRED` | Enable authentication | `false` |
+| `AUTH_API_SECRETS_JSON` | API secrets JSON array (`[{id, secret}]`) | - |
+| `AUTH_API_SECRET` | Legacy single API secret | - |
+| `AUTH_API_SECRET_ID` | Legacy API secret id for `AUTH_API_SECRET` | `default` |
 | `AUTH_SERVICE_URL` | External auth service URL | - |
 | `AUTH_SIGNING_KEY_PATH` | Path to JWT signing key | - |
 | `AUTH_TIMEOUT_SECONDS` | Auth request timeout | `5` |
+
+Minimal multi-secret example:
+
+```bash
+AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"}]'
+```
 
 ### S3 Recording (Optional)
 

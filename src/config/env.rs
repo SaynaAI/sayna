@@ -1,10 +1,11 @@
 use std::env;
 use std::path::PathBuf;
 
-use super::ServerConfig;
+use super::parse_auth_api_secrets_json;
 use super::sip::{SipConfig, SipHookConfig};
 use super::utils::parse_bool;
-use super::validation::{validate_auth_required, validate_jwt_auth};
+use super::validation::{validate_auth_api_secrets, validate_auth_required, validate_jwt_auth};
+use super::{AuthApiSecret, ServerConfig};
 
 impl ServerConfig {
     /// Load configuration from environment variables
@@ -69,7 +70,11 @@ impl ServerConfig {
         // Authentication configuration
         let auth_service_url = env::var("AUTH_SERVICE_URL").ok();
         let auth_signing_key_path = env::var("AUTH_SIGNING_KEY_PATH").ok().map(PathBuf::from);
+        let auth_api_secrets_json = env::var("AUTH_API_SECRETS_JSON").ok();
         let auth_api_secret = env::var("AUTH_API_SECRET").ok();
+        let auth_api_secret_id = env::var("AUTH_API_SECRET_ID")
+            .ok()
+            .unwrap_or_else(|| "default".to_string());
         let auth_timeout_seconds = env::var("AUTH_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -79,15 +84,27 @@ impl ServerConfig {
             .and_then(|v| parse_bool(&v))
             .unwrap_or(false);
 
+        let auth_api_secrets = if let Some(json) = auth_api_secrets_json {
+            parse_auth_api_secrets_json(&json)?
+        } else if let Some(secret) = auth_api_secret {
+            vec![AuthApiSecret {
+                id: auth_api_secret_id,
+                secret,
+            }]
+        } else {
+            Vec::new()
+        };
+
         // Validate JWT auth configuration if partially provided
         validate_jwt_auth(&auth_service_url, &auth_signing_key_path)?;
+        validate_auth_api_secrets(&auth_api_secrets)?;
 
         // Validate that when auth is required, at least one auth method is configured
         validate_auth_required(
             auth_required,
             &auth_service_url,
             &auth_signing_key_path,
-            &auth_api_secret,
+            &auth_api_secrets,
         )?;
 
         // SIP configuration
@@ -116,7 +133,7 @@ impl ServerConfig {
             cache_ttl_seconds,
             auth_service_url,
             auth_signing_key_path,
-            auth_api_secret,
+            auth_api_secrets,
             auth_timeout_seconds,
             auth_required,
             sip,
@@ -223,7 +240,9 @@ mod tests {
             env::remove_var("AUTH_REQUIRED");
             env::remove_var("AUTH_SERVICE_URL");
             env::remove_var("AUTH_SIGNING_KEY_PATH");
+            env::remove_var("AUTH_API_SECRETS_JSON");
             env::remove_var("AUTH_API_SECRET");
+            env::remove_var("AUTH_API_SECRET_ID");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
             env::remove_var("HOST");
             env::remove_var("PORT");
@@ -399,7 +418,7 @@ mod tests {
         unsafe {
             env::set_var("AUTH_REQUIRED", "true");
             env::set_var("AUTH_SIGNING_KEY_PATH", key_path.to_str().unwrap());
-            // Missing AUTH_SERVICE_URL (and no AUTH_API_SECRET either)
+            // Missing AUTH_SERVICE_URL (and no AUTH_API_SECRETS_JSON/AUTH_API_SECRET either)
         }
 
         let result = ServerConfig::from_env();
@@ -423,7 +442,7 @@ mod tests {
         unsafe {
             env::set_var("AUTH_REQUIRED", "true");
             env::set_var("AUTH_SERVICE_URL", "http://auth.example.com");
-            // Missing AUTH_SIGNING_KEY_PATH (and no AUTH_API_SECRET either)
+            // Missing AUTH_SIGNING_KEY_PATH (and no AUTH_API_SECRETS_JSON/AUTH_API_SECRET either)
         }
 
         let result = ServerConfig::from_env();
@@ -534,12 +553,75 @@ mod tests {
 
         let config = ServerConfig::from_env().expect("Should load config");
         assert!(config.auth_required);
+        assert_eq!(config.auth_api_secrets.len(), 1);
+        assert_eq!(config.auth_api_secrets[0].id, "default");
         assert_eq!(
-            config.auth_api_secret,
-            Some("my-super-secret-token".to_string())
+            config.auth_api_secrets[0].secret,
+            "my-super-secret-token".to_string()
         );
         assert!(config.auth_service_url.is_none());
         assert!(config.auth_signing_key_path.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_api_secrets_json_auth_enabled() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var(
+                "AUTH_API_SECRETS_JSON",
+                r#"[{"id":"client-a","secret":"token-a"},{"id":"client-b","secret":"token-b"}]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.auth_api_secrets.len(), 2);
+        assert_eq!(config.auth_api_secrets[0].id, "client-a");
+        assert_eq!(config.auth_api_secrets[1].id, "client-b");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_api_secrets_json_invalid() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_API_SECRETS_JSON", "not-json");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid AUTH_API_SECRETS_JSON format")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_api_secret_id_legacy() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("AUTH_REQUIRED", "true");
+            env::set_var("AUTH_API_SECRET", "my-secret");
+            env::set_var("AUTH_API_SECRET_ID", "legacy-client");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        assert_eq!(config.auth_api_secrets.len(), 1);
+        assert_eq!(config.auth_api_secrets[0].id, "legacy-client");
+        assert_eq!(config.auth_api_secrets[0].secret, "my-secret");
 
         cleanup_env_vars();
     }
@@ -551,7 +633,7 @@ mod tests {
 
         unsafe {
             env::set_var("AUTH_REQUIRED", "true");
-            // No AUTH_API_SECRET or AUTH_SERVICE_URL
+            // No AUTH_API_SECRETS_JSON/AUTH_API_SECRET or AUTH_SERVICE_URL
         }
 
         let result = ServerConfig::from_env();
@@ -560,7 +642,9 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET")
+                .contains(
+                    "either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRETS_JSON/AUTH_API_SECRET"
+                )
         );
 
         cleanup_env_vars();
@@ -584,7 +668,8 @@ mod tests {
         // Both auth methods configured should be valid
         let config = ServerConfig::from_env().expect("Should load config with both auth methods");
         assert!(config.auth_required);
-        assert_eq!(config.auth_api_secret, Some("my-secret".to_string()));
+        assert_eq!(config.auth_api_secrets.len(), 1);
+        assert_eq!(config.auth_api_secrets[0].secret, "my-secret");
         assert_eq!(
             config.auth_service_url,
             Some("http://auth.example.com".to_string())

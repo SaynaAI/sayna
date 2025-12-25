@@ -87,7 +87,14 @@ auth:
   required: false                             # ENV: AUTH_REQUIRED (true/false/1/0/yes/no)
   service_url: "https://auth.example.com"     # ENV: AUTH_SERVICE_URL
   signing_key_path: "/path/to/key.pem"        # ENV: AUTH_SIGNING_KEY_PATH
-  api_secret: "your-api-secret"               # ENV: AUTH_API_SECRET
+  # ENV: AUTH_API_SECRETS_JSON (JSON array of {id, secret})
+  api_secrets:
+    - id: "default"
+      secret: "sk_test_default_123456"        # ENV: AUTH_API_SECRETS_JSON (preferred)
+    - id: "partner-1"
+      secret: "sk_test_partner_abcdef"        # ENV: AUTH_API_SECRETS_JSON (preferred)
+  # Legacy single-secret alias (ignored when api_secrets is non-empty):
+  # api_secret: "sk_test_legacy_123456"       # ENV: AUTH_API_SECRET (AUTH_API_SECRET_ID optional)
   timeout_seconds: 5                          # ENV: AUTH_TIMEOUT_SECONDS
 
 # SIP configuration (optional)

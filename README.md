@@ -277,13 +277,17 @@ docker run -p 3001:3001 --env-file .env sayna
 | `HOST` | Server bind address | `0.0.0.0` | No |
 | `PORT` | Server port | `3001` | No |
 | `AUTH_REQUIRED` | Enable authentication | `false` | No |
+| `AUTH_API_SECRETS_JSON` | API secrets JSON array (`[{id, secret}]`) | - | Yes** |
+| `AUTH_API_SECRET` | Legacy single API secret | - | No**** |
+| `AUTH_API_SECRET_ID` | Legacy API secret id for `AUTH_API_SECRET` | `default` | No |
 | `AUTH_SERVICE_URL` | External auth service endpoint | - | Yes** |
 | `AUTH_SIGNING_KEY_PATH` | Path to JWT signing private key | - | Yes** |
 | `AUTH_TIMEOUT_SECONDS` | Auth request timeout | `5` | No |
 
 *Not required when using audio-disabled mode
-**Required when `AUTH_REQUIRED=true`
+**Required when `AUTH_REQUIRED=true` for the auth method you choose
 ***Required for LiveKit webhook validation and token generation features
+****Legacy single-secret fallback; prefer `AUTH_API_SECRETS_JSON`
 
 ### SIP Configuration (Optional)
 

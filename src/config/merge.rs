@@ -1,10 +1,11 @@
 use std::env;
 use std::path::PathBuf;
 
-use super::ServerConfig;
+use super::parse_auth_api_secrets_json;
 use super::sip::{SipConfig, SipHookConfig};
 use super::utils::parse_bool;
 use super::yaml::YamlConfig;
+use super::{AuthApiSecret, ServerConfig};
 
 /// Merge YAML configuration with environment variables
 ///
@@ -195,10 +196,41 @@ pub fn merge_config(
         .or_else(|| env::var("AUTH_SIGNING_KEY_PATH").ok())
         .map(PathBuf::from);
 
-    let auth_api_secret = get_optional!(
-        "AUTH_API_SECRET",
-        yaml.auth.as_ref().and_then(|a| a.api_secret.clone())
-    );
+    // API secret auth precedence:
+    // 1) YAML auth.api_secrets (when non-empty)
+    // 2) AUTH_API_SECRETS_JSON
+    // 3) Legacy auth.api_secret or AUTH_API_SECRET (mapped to a single entry)
+    let auth_api_secrets = if let Some(yaml_auth) = yaml.auth.as_ref()
+        && !yaml_auth.api_secrets.is_empty()
+    {
+        yaml_auth
+            .api_secrets
+            .iter()
+            .map(|entry| AuthApiSecret {
+                id: entry.id.clone(),
+                secret: entry.secret.clone(),
+            })
+            .collect()
+    } else if let Ok(json) = env::var("AUTH_API_SECRETS_JSON") {
+        parse_auth_api_secrets_json(&json)?
+    } else {
+        let legacy_secret = yaml
+            .auth
+            .as_ref()
+            .and_then(|a| a.api_secret.clone())
+            .or_else(|| env::var("AUTH_API_SECRET").ok());
+        // AUTH_API_SECRET_ID provides the id for legacy single-secret configs.
+        let legacy_id = env::var("AUTH_API_SECRET_ID").unwrap_or_else(|_| "default".to_string());
+
+        if let Some(secret) = legacy_secret {
+            vec![AuthApiSecret {
+                id: legacy_id,
+                secret,
+            }]
+        } else {
+            Vec::new()
+        }
+    };
 
     let auth_timeout_seconds = yaml
         .auth
@@ -244,7 +276,7 @@ pub fn merge_config(
         cache_ttl_seconds,
         auth_service_url,
         auth_signing_key_path,
-        auth_api_secret,
+        auth_api_secrets,
         auth_timeout_seconds,
         auth_required,
         sip,
@@ -356,6 +388,7 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
 
 #[cfg(test)]
 mod tests {
+    use super::super::yaml::AuthApiSecretYaml;
     use super::super::yaml::SipHookYaml;
     use super::*;
     use serial_test::serial;
@@ -376,7 +409,9 @@ mod tests {
             env::remove_var("AUTH_REQUIRED");
             env::remove_var("AUTH_SERVICE_URL");
             env::remove_var("AUTH_SIGNING_KEY_PATH");
+            env::remove_var("AUTH_API_SECRETS_JSON");
             env::remove_var("AUTH_API_SECRET");
+            env::remove_var("AUTH_API_SECRET_ID");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
             env::remove_var("SIP_ROOM_PREFIX");
             env::remove_var("SIP_ALLOWED_ADDRESSES");
@@ -508,6 +543,97 @@ mod tests {
         ); // YAML overrides ENV
         assert_eq!(config.auth_signing_key_path, Some(key_path)); // from YAML
         assert_eq!(config.auth_timeout_seconds, 10); // from YAML
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_auth_api_secrets_yaml_over_env() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            auth: Some(super::super::yaml::AuthYaml {
+                api_secrets: vec![
+                    AuthApiSecretYaml {
+                        id: "yaml-a".to_string(),
+                        secret: "secret-a".to_string(),
+                    },
+                    AuthApiSecretYaml {
+                        id: "yaml-b".to_string(),
+                        secret: "secret-b".to_string(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var(
+                "AUTH_API_SECRETS_JSON",
+                r#"[{"id":"env-a","secret":"env-secret"}]"#,
+            );
+            env::set_var("AUTH_API_SECRET", "legacy-secret");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+
+        assert_eq!(config.auth_api_secrets.len(), 2);
+        assert_eq!(config.auth_api_secrets[0].id, "yaml-a");
+        assert_eq!(config.auth_api_secrets[1].id, "yaml-b");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_auth_api_secrets_env_over_legacy() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            auth: Some(super::super::yaml::AuthYaml {
+                api_secret: Some("legacy-secret".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var(
+                "AUTH_API_SECRETS_JSON",
+                r#"[{"id":"env-a","secret":"token-a"}]"#,
+            );
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+
+        assert_eq!(config.auth_api_secrets.len(), 1);
+        assert_eq!(config.auth_api_secrets[0].id, "env-a");
+        assert_eq!(config.auth_api_secrets[0].secret, "token-a");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_auth_api_secrets_empty_yaml_uses_legacy() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            auth: Some(super::super::yaml::AuthYaml {
+                api_secrets: Vec::new(),
+                api_secret: Some("legacy-secret".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = merge_config(Some(yaml)).unwrap();
+
+        assert_eq!(config.auth_api_secrets.len(), 1);
+        assert_eq!(config.auth_api_secrets[0].id, "default");
+        assert_eq!(config.auth_api_secrets[0].secret, "legacy-secret");
 
         cleanup_env_vars();
     }

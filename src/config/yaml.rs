@@ -39,7 +39,9 @@ use std::path::PathBuf;
 ///   required: true
 ///   service_url: "https://auth.example.com"
 ///   signing_key_path: "/path/to/key.pem"
-///   api_secret: "your-api-secret"
+///   api_secrets:
+///     - id: "client-a"
+///       secret: "your-api-secret"
 ///   timeout_seconds: 5
 ///
 /// sip:
@@ -133,8 +135,19 @@ pub struct AuthYaml {
     pub required: Option<bool>,
     pub service_url: Option<String>,
     pub signing_key_path: Option<String>,
+    /// Preferred multi-secret form. If non-empty, it takes precedence over api_secret.
+    #[serde(default)]
+    pub api_secrets: Vec<AuthApiSecretYaml>,
+    /// Legacy single-secret alias. Ignored when api_secrets is non-empty.
     pub api_secret: Option<String>,
     pub timeout_seconds: Option<u64>,
+}
+
+/// API secret authentication entry in YAML
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthApiSecretYaml {
+    pub id: String,
+    pub secret: String,
 }
 
 /// SIP configuration from YAML
@@ -222,7 +235,9 @@ auth:
   required: true
   service_url: "https://auth.example.com"
   signing_key_path: "/path/to/key.pem"
-  api_secret: "auth-secret"
+  api_secrets:
+    - id: "client-a"
+      secret: "auth-secret"
   timeout_seconds: 10
 "#;
 
@@ -254,6 +269,43 @@ auth:
             Some("/tmp/cache".to_string())
         );
         assert_eq!(config.auth.as_ref().unwrap().required, Some(true));
+        let auth = config.auth.as_ref().unwrap();
+        assert_eq!(auth.api_secrets.len(), 1);
+        assert_eq!(auth.api_secrets[0].id, "client-a");
+        assert_eq!(auth.api_secrets[0].secret, "auth-secret");
+    }
+
+    #[test]
+    fn test_yaml_config_auth_multiple_api_secrets() {
+        let yaml = r#"
+auth:
+  api_secrets:
+    - id: "client-a"
+      secret: "secret-a"
+    - id: "client-b"
+      secret: "secret-b"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let auth = config.auth.as_ref().unwrap();
+        assert_eq!(auth.api_secrets.len(), 2);
+        assert_eq!(auth.api_secrets[0].id, "client-a");
+        assert_eq!(auth.api_secrets[1].id, "client-b");
+    }
+
+    #[test]
+    fn test_yaml_config_auth_legacy_api_secret() {
+        let yaml = r#"
+auth:
+  api_secret: "legacy-secret"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let auth = config.auth.as_ref().unwrap();
+        assert!(auth.api_secrets.is_empty());
+        assert_eq!(auth.api_secret.as_deref(), Some("legacy-secret"));
     }
 
     #[test]
