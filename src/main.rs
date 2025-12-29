@@ -118,8 +118,13 @@ async fn main() -> anyhow::Result<()> {
         auth_middleware,
     ));
 
-    // Create WebSocket routes (no auth for now, see action plan task 8)
-    let ws_routes = routes::ws::create_ws_router();
+    // Create WebSocket routes with auth middleware for tenant isolation
+    // When auth is enabled: requires valid auth token
+    // When auth is disabled: inserts empty Auth context for room name handling
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
 
     // Create webhook routes (no auth - uses LiveKit signature verification)
     let webhook_routes = routes::webhooks::create_webhook_router();

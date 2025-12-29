@@ -1,3 +1,4 @@
+use axum::middleware;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use std::io::ErrorKind;
@@ -5,7 +6,7 @@ use std::io::ErrorKind;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-use sayna::{ServerConfig, routes, state::AppState};
+use sayna::{ServerConfig, middleware::auth::auth_middleware, routes, state::AppState};
 
 #[tokio::test]
 async fn test_websocket_voice_config() {
@@ -42,9 +43,13 @@ async fn test_websocket_voice_config() {
     // Create application state
     let app_state = AppState::new(config.clone()).await;
 
-    // Create router
+    // Create router with auth middleware (inserts empty Auth when auth_required=false)
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
     let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener
@@ -206,9 +211,13 @@ async fn test_websocket_invalid_message() {
     // Create application state
     let app_state = AppState::new(config.clone()).await;
 
-    // Create router
+    // Create router with auth middleware (inserts empty Auth when auth_required=false)
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
     let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener
@@ -302,9 +311,13 @@ async fn test_websocket_sip_transfer_without_livekit_config() {
     // Create application state
     let app_state = AppState::new(config.clone()).await;
 
-    // Create router
+    // Create router with auth middleware (inserts empty Auth when auth_required=false)
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
     let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener
@@ -401,9 +414,13 @@ async fn test_websocket_sip_transfer_invalid_phone_number() {
     // Create application state
     let app_state = AppState::new(config.clone()).await;
 
-    // Create router
+    // Create router with auth middleware (inserts empty Auth when auth_required=false)
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
     let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener
@@ -500,9 +517,13 @@ async fn test_websocket_sip_transfer_empty_phone_number() {
     // Create application state
     let app_state = AppState::new(config.clone()).await;
 
-    // Create router
+    // Create router with auth middleware (inserts empty Auth when auth_required=false)
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
     let app = routes::api::create_api_router()
-        .merge(routes::ws::create_ws_router())
+        .merge(ws_routes)
         .with_state(app_state);
 
     // Create listener

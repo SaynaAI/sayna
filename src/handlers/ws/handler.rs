@@ -4,6 +4,7 @@
 //! and the core WebSocket connection handling logic.
 
 use axum::{
+    Extension,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -16,6 +17,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio::{select, time::Duration};
 use tracing::{debug, error, info, warn};
 
+use crate::auth::Auth;
 use crate::state::AppState;
 
 use super::{
@@ -38,19 +40,24 @@ const CHANNEL_BUFFER_SIZE: usize = 1024;
 /// # Arguments
 /// * `ws` - The WebSocket upgrade request from Axum
 /// * `state` - Application state containing configuration and shared resources
+/// * `auth` - Auth context from middleware for tenant isolation
 ///
 /// # Returns
 /// * `Response` - HTTP response that upgrades the connection to WebSocket
 pub async fn ws_voice_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<Auth>,
 ) -> Response {
-    info!("WebSocket voice connection upgrade requested");
+    info!(
+        auth_id = ?auth.id,
+        "WebSocket voice connection upgrade requested"
+    );
     debug!("AppState extracted successfully, preparing upgrade");
 
     let response = ws.on_upgrade(move |socket| {
         debug!("WebSocket upgrade callback triggered");
-        handle_voice_socket(socket, state)
+        handle_voice_socket(socket, state, auth)
     });
 
     debug!("WebSocket upgrade response created");
@@ -65,6 +72,7 @@ pub async fn ws_voice_handler(
 /// # Arguments
 /// * `socket` - The established WebSocket connection
 /// * `app_state` - Application state containing shared resources
+/// * `auth` - Auth context for tenant isolation (room name prefixing)
 ///
 /// # Lifecycle
 /// 1. Split socket into sender/receiver for bidirectional communication
@@ -77,9 +85,9 @@ pub async fn ws_voice_handler(
 /// - Large channel buffer (1024) for reduced contention
 /// - RwLock for connection state (frequent reads, rare writes)
 /// - Timeout handling for stale connection detection
-async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
+async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>, auth: Auth) {
     debug!("handle_voice_socket started");
-    info!("WebSocket voice connection established");
+    info!(auth_id = ?auth.id, "WebSocket voice connection established");
 
     debug!("Splitting socket into sender and receiver");
     // Split the socket into sender and receiver
@@ -87,7 +95,8 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>) {
     debug!("Socket split completed");
 
     // Connection state with RwLock for rare writes, frequent reads
-    let state = Arc::new(RwLock::new(ConnectionState::new()));
+    // Initialize with auth context for room name normalization
+    let state = Arc::new(RwLock::new(ConnectionState::with_auth(auth)));
 
     let (message_tx, mut message_rx) = mpsc::channel::<MessageRoute>(CHANNEL_BUFFER_SIZE);
 

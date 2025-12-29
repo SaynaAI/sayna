@@ -10,6 +10,7 @@ use std::sync::{
 use tokio::sync::RwLock;
 
 use crate::{
+    auth::Auth,
     core::voice_manager::VoiceManager,
     livekit::{LiveKitClient, operations::OperationQueue},
 };
@@ -35,6 +36,8 @@ pub struct ConnectionState {
     pub livekit_local_identity: Option<String>,
     /// Recording egress ID for cleanup operations
     pub recording_egress_id: Option<String>,
+    /// Auth context for this connection (used for room name normalization)
+    pub auth: Auth,
 }
 
 impl Default for ConnectionState {
@@ -54,6 +57,22 @@ impl ConnectionState {
             livekit_room_name: None,
             livekit_local_identity: None,
             recording_egress_id: None,
+            auth: Auth::empty(),
+        }
+    }
+
+    /// Create a new ConnectionState with the given Auth context
+    pub fn with_auth(auth: Auth) -> Self {
+        Self {
+            voice_manager: None,
+            livekit_client: None,
+            livekit_operation_queue: None,
+            audio_enabled: AtomicBool::new(false),
+            stream_id: None,
+            livekit_room_name: None,
+            livekit_local_identity: None,
+            recording_egress_id: None,
+            auth,
         }
     }
 

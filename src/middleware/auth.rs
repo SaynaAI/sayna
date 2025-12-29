@@ -36,8 +36,10 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, AuthError> {
     // Skip authentication if auth is not required or not configured
+    // Still insert an empty Auth to allow handlers that need Auth context to work
     if !state.config.auth_required {
-        tracing::debug!("Authentication disabled, skipping validation");
+        tracing::debug!("Authentication disabled, inserting empty Auth context");
+        request.extensions_mut().insert(Auth::empty());
         return Ok(next.run(request).await);
     }
 

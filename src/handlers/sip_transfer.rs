@@ -5,6 +5,7 @@
 //! commands but exposes it as a standard REST API.
 
 use axum::{
+    Extension,
     extract::{Json, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+use crate::auth::Auth;
 use crate::livekit::LiveKitError;
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
@@ -179,11 +181,15 @@ fn error_response(status: StatusCode, message: &str, code: SIPTransferErrorCode)
 )]
 pub async fn sip_transfer(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<Auth>,
     Json(request): Json<SIPTransferRequest>,
 ) -> Response {
+    // Normalize room name with auth prefix for tenant isolation
+    let room_name = auth.normalize_room_name(&request.room_name);
+
     info!(
-        "SIP transfer request - room: {}, participant: {:?}, transfer_to: {}",
-        request.room_name, request.participant_identity, request.transfer_to
+        "SIP transfer request - room: {} (normalized: {}), participant: {:?}, transfer_to: {}",
+        request.room_name, room_name, request.participant_identity, request.transfer_to
     );
 
     // Step 1: Validate phone number format
@@ -244,7 +250,7 @@ pub async fn sip_transfer(
     }
 
     // Verify the participant exists and is a SIP participant
-    let participant_identity = match room_handler.list_participants(&request.room_name).await {
+    let participant_identity = match room_handler.list_participants(&room_name).await {
         Ok(participants) => {
             let found = participants.iter().any(|p| {
                 p.identity == request.participant_identity
@@ -255,7 +261,7 @@ pub async fn sip_transfer(
             if !found {
                 warn!(
                     "SIP transfer failed: participant '{}' not found or not a SIP participant in room '{}'",
-                    request.participant_identity, request.room_name
+                    request.participant_identity, room_name
                 );
                 return error_response(
                     StatusCode::NOT_FOUND,
@@ -281,23 +287,23 @@ pub async fn sip_transfer(
     // Step 6: Execute the SIP transfer
     info!(
         "Initiating SIP transfer: room={}, participant={}, transfer_to={}",
-        request.room_name, participant_identity, validated_phone
+        room_name, participant_identity, validated_phone
     );
 
     match sip_handler
-        .transfer_call(&participant_identity, &request.room_name, &validated_phone)
+        .transfer_call(&participant_identity, &room_name, &validated_phone)
         .await
     {
         Ok(()) => {
             info!(
                 "SIP transfer completed: room={}, participant={}, transfer_to={}",
-                request.room_name, participant_identity, validated_phone
+                room_name, participant_identity, validated_phone
             );
             (
                 StatusCode::OK,
                 Json(SIPTransferResponse {
                     status: "completed".to_string(),
-                    room_name: request.room_name,
+                    room_name: room_name.clone(),
                     participant_identity,
                     transfer_to: validated_phone,
                 }),
@@ -310,13 +316,13 @@ pub async fn sip_transfer(
             // Timeout likely means the transfer was initiated and the room was cleaned up.
             info!(
                 "SIP transfer initiated (timeout, transfer likely succeeded): room={}, participant={}, transfer_to={}",
-                request.room_name, participant_identity, validated_phone
+                room_name, participant_identity, validated_phone
             );
             (
                 StatusCode::OK,
                 Json(SIPTransferResponse {
                     status: "initiated".to_string(),
-                    room_name: request.room_name,
+                    room_name,
                     participant_identity,
                     transfer_to: validated_phone,
                 }),
@@ -326,7 +332,7 @@ pub async fn sip_transfer(
         Err(e) => {
             error!(
                 "SIP transfer failed: room={}, participant={}, transfer_to={}, error={}",
-                request.room_name, participant_identity, validated_phone, e
+                room_name, participant_identity, validated_phone, e
             );
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
