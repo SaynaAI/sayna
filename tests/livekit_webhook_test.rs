@@ -557,7 +557,7 @@ mod unit_tests {
     use super::*;
     use livekit_api::webhooks::WebhookError;
     use livekit_protocol::ParticipantInfo;
-    use sayna::handlers::livekit_webhook::{
+    use sayna::handlers::livekit::{
         SipForwardingError, extract_sip_attributes, webhook_error_to_status,
     };
 
@@ -660,7 +660,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_simple() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(
             parse_sip_domain("sip:user@example.com"),
@@ -670,7 +670,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_with_angle_brackets() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(
             parse_sip_domain("\"User Name\" <sip:user@example.com>"),
@@ -680,7 +680,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_with_uri_parameters() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(
             parse_sip_domain("sip:user@example.com;user=phone;tag=xyz123"),
@@ -690,7 +690,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_sips_scheme() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(
             parse_sip_domain("sips:user@secure.example.com"),
@@ -700,7 +700,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_case_insensitive() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         // Domain should be lowercased
         assert_eq!(
@@ -711,7 +711,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_with_port() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         // Port is part of the domain in SIP URIs
         assert_eq!(
@@ -722,28 +722,28 @@ mod unit_tests {
 
     #[test]
     fn test_parse_sip_domain_invalid_no_at_sign() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(parse_sip_domain("sip:example.com"), None);
     }
 
     #[test]
     fn test_parse_sip_domain_invalid_no_sip_scheme() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(parse_sip_domain("user@example.com"), None);
     }
 
     #[test]
     fn test_parse_sip_domain_invalid_empty() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(parse_sip_domain(""), None);
     }
 
     #[test]
     fn test_parse_sip_domain_malformed() {
-        use sayna::handlers::livekit_webhook::parse_sip_domain;
+        use sayna::handlers::livekit::parse_sip_domain;
 
         assert_eq!(parse_sip_domain("not-a-sip-uri"), None);
     }

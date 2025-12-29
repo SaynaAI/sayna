@@ -10,11 +10,10 @@ use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
     livekit::{TokenRequest, TokenResponse},
-    sip_hooks::{
-        DeleteSipHooksRequest, SipHookEntry, SipHooksErrorResponse, SipHooksRequest,
-        SipHooksResponse,
+    sip::{
+        DeleteSipHooksRequest, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
+        SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
     },
-    sip_transfer::{SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse},
     speak::SpeakRequest,
     voices::Voice,
     ws::{
@@ -45,10 +44,10 @@ use crate::handlers::{
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
         crate::handlers::recording::download_recording,
-        crate::handlers::sip_hooks::list_sip_hooks,
-        crate::handlers::sip_hooks::update_sip_hooks,
-        crate::handlers::sip_hooks::delete_sip_hooks,
-        crate::handlers::sip_transfer::sip_transfer,
+        crate::handlers::sip::list_sip_hooks,
+        crate::handlers::sip::update_sip_hooks,
+        crate::handlers::sip::delete_sip_hooks,
+        crate::handlers::sip::sip_transfer,
     ),
     components(schemas(
         // REST API types

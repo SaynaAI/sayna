@@ -1,6 +1,6 @@
 //! LiveKit token generation handler
 //!
-//! This module provides REST API endpoints for LiveKit token generation,
+//! This module provides the REST API endpoint for LiveKit token generation,
 //! allowing multiple participants to join the same LiveKit room.
 
 use axum::{
