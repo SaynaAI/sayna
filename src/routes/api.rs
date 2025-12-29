@@ -17,6 +17,7 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
         .route("/voices", get(voices::list_voices))
         .route("/speak", post(speak::speak_handler))
         .route("/livekit/token", post(livekit::generate_token))
+        .route("/livekit/rooms", get(livekit::list_rooms))
         .route("/recording/{stream_id}", get(recording::download_recording))
         // SIP hooks management
         .route(

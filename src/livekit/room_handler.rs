@@ -537,6 +537,53 @@ impl LiveKitRoomHandler {
                 LiveKitError::ConnectionFailed(format!("Failed to list participants: {e}"))
             })
     }
+
+    /// List all LiveKit rooms, optionally filtered by a name prefix
+    ///
+    /// # Arguments
+    /// * `prefix` - Optional prefix to filter room names. If None, returns all rooms.
+    ///
+    /// # Returns
+    /// * `Result<Vec<proto::Room>, LiveKitError>` - List of rooms or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // List all rooms for tenant "project1"
+    /// let rooms = handler.list_rooms(Some("project1_")).await?;
+    /// for room in rooms {
+    ///     println!("Room: {}", room.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_rooms(&self, prefix: Option<&str>) -> Result<Vec<proto::Room>, LiveKitError> {
+        // Fetch all rooms from LiveKit
+        let all_rooms =
+            self.room_client.list_rooms(vec![]).await.map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to list rooms: {e}"))
+            })?;
+
+        // Filter by prefix if provided
+        let rooms = match prefix {
+            Some(p) if !p.is_empty() => all_rooms
+                .into_iter()
+                .filter(|r| r.name.starts_with(p))
+                .collect(),
+            _ => all_rooms,
+        };
+
+        Ok(rooms)
+    }
 }
 
 #[cfg(test)]
@@ -796,5 +843,43 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Failed to list participants"));
+    }
+
+    #[tokio::test]
+    async fn test_list_rooms_with_invalid_server() {
+        // This test validates that list_rooms fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.list_rooms(None).await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to list rooms"));
+    }
+
+    #[tokio::test]
+    async fn test_list_rooms_with_prefix_invalid_server() {
+        // This test validates that list_rooms with prefix fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.list_rooms(Some("project1_")).await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to list rooms"));
     }
 }
