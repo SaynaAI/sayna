@@ -83,6 +83,8 @@ jobs:
 
       - name: Create release branch
         run: |
+          # Delete remote branch if it exists from a previous failed run
+          git push origin --delete release/v${{ steps.version.outputs.new_version }} 2>/dev/null || true
           git checkout -b release/v${{ steps.version.outputs.new_version }}
 
       - name: Update version in Cargo.toml
