@@ -9,10 +9,14 @@ use utoipa::OpenApi;
 use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
-    livekit::{TokenRequest, TokenResponse},
-    sip_hooks::{
-        DeleteSipHooksRequest, SipHookEntry, SipHooksErrorResponse, SipHooksRequest,
-        SipHooksResponse,
+    livekit::{
+        ListRoomsResponse, MuteParticipantRequest, MuteParticipantResponse, ParticipantInfo,
+        RemoveParticipantErrorResponse, RemoveParticipantRequest, RemoveParticipantResponse,
+        RoomDetailsResponse, RoomInfo, TokenRequest, TokenResponse,
+    },
+    sip::{
+        DeleteSipHooksRequest, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
+        SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
     },
     speak::SpeakRequest,
     voices::Voice,
@@ -43,10 +47,15 @@ use crate::handlers::{
         crate::handlers::voices::list_voices,
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
+        crate::handlers::livekit::list_rooms,
+        crate::handlers::livekit::get_room_details,
+        crate::handlers::livekit::remove_participant,
+        crate::handlers::livekit::mute_participant,
         crate::handlers::recording::download_recording,
-        crate::handlers::sip_hooks::list_sip_hooks,
-        crate::handlers::sip_hooks::update_sip_hooks,
-        crate::handlers::sip_hooks::delete_sip_hooks,
+        crate::handlers::sip::list_sip_hooks,
+        crate::handlers::sip::update_sip_hooks,
+        crate::handlers::sip::delete_sip_hooks,
+        crate::handlers::sip::sip_transfer,
     ),
     components(schemas(
         // REST API types
@@ -55,12 +64,26 @@ use crate::handlers::{
         SpeakRequest,
         TokenRequest,
         TokenResponse,
+        // LiveKit room types
+        ListRoomsResponse,
+        RoomInfo,
+        RoomDetailsResponse,
+        ParticipantInfo,
+        RemoveParticipantRequest,
+        RemoveParticipantResponse,
+        RemoveParticipantErrorResponse,
+        MuteParticipantRequest,
+        MuteParticipantResponse,
         // SIP hooks types
         SipHooksRequest,
         SipHooksResponse,
         SipHookEntry,
         SipHooksErrorResponse,
         DeleteSipHooksRequest,
+        // SIP transfer types
+        SIPTransferRequest,
+        SIPTransferResponse,
+        SIPTransferErrorResponse,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,

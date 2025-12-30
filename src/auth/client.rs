@@ -1,3 +1,4 @@
+use crate::auth::context::Auth;
 use crate::auth::jwt::{AuthPayload, load_private_key, sign_auth_request_with_key};
 use crate::config::ServerConfig;
 use crate::errors::auth_error::{AuthError, AuthResult};
@@ -70,6 +71,10 @@ impl AuthClient {
 
     /// Validate a bearer token by calling the external auth service
     ///
+    /// On success, parses the response body as an `Auth` object containing
+    /// the authenticated client's information. This is then available via
+    /// `AuthContext.auth` in request handlers.
+    ///
     /// # Arguments
     /// * `token` - The bearer token to validate
     /// * `request_body` - The original request body as JSON
@@ -78,7 +83,7 @@ impl AuthClient {
     /// * `request_method` - The HTTP method (e.g., "POST")
     ///
     /// # Returns
-    /// * `AuthResult<()>` - Ok if token is valid, AuthError otherwise
+    /// * `AuthResult<Auth>` - The authenticated client info from response
     ///
     /// # Example
     /// ```rust,no_run
@@ -90,13 +95,17 @@ impl AuthClient {
     /// let config = ServerConfig::from_env()?;
     /// let client = AuthClient::from_config(&config).await?;
     ///
-    /// client.validate_token(
+    /// let auth = client.validate_token(
     ///     "user-bearer-token",
     ///     &serde_json::json!({"text": "Hello"}),
     ///     HashMap::new(),
     ///     "/speak",
     ///     "POST",
     /// ).await?;
+    ///
+    /// if let Some(id) = &auth.id {
+    ///     println!("Authenticated as: {}", id);
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -107,7 +116,7 @@ impl AuthClient {
         request_headers: HashMap<String, String>,
         request_path: &str,
         request_method: &str,
-    ) -> AuthResult<()> {
+    ) -> AuthResult<Auth> {
         // Create the auth payload
         let payload = AuthPayload {
             token: token.to_string(),
@@ -133,8 +142,30 @@ impl AuthClient {
         let status = response.status();
         match status {
             StatusCode::OK => {
-                tracing::debug!("Token validation successful");
-                Ok(())
+                // Parse response body as Auth object
+                // Expected format: { "id": "project1", ... } or empty
+                let response_text = response.text().await.unwrap_or_else(|_| String::new());
+
+                let auth = if response_text.is_empty() {
+                    Auth::empty()
+                } else {
+                    // Parse as Auth struct, falling back to empty on parse failure
+                    serde_json::from_str::<Auth>(&response_text).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to parse auth service response as Auth, using empty"
+                        );
+                        Auth::empty()
+                    })
+                };
+
+                if let Some(ref id) = auth.id {
+                    tracing::debug!(auth_id = %id, "Token validation successful");
+                } else {
+                    tracing::debug!("Token validation successful (no id in response)");
+                }
+
+                Ok(auth)
             }
             _ => {
                 // Cap error body at 500 characters to prevent DoS
@@ -239,7 +270,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: None,
             auth_signing_key_path: Some(PathBuf::from("/tmp/key.pem")),
             auth_timeout_seconds: 5,
@@ -275,7 +306,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some("http://auth.example.com".to_string()),
             auth_signing_key_path: None,
             auth_timeout_seconds: 5,
@@ -289,13 +320,76 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
     }
 
     #[tokio::test]
-    async fn test_validate_token_success_200() {
+    async fn test_validate_token_success_200_with_id() {
         let (_temp_dir, key_path) = create_test_key();
 
         // Start a mock server
         let mock_server = MockServer::start().await;
 
-        // Mock a 200 OK response
+        // Mock a 200 OK response with id in body
+        Mock::given(method("POST"))
+            .and(header("content-type", "application/jwt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "project1"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
+            cartesia_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            recording_s3_prefix: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_api_secrets: Vec::new(),
+            auth_service_url: Some(mock_server.uri()),
+            auth_signing_key_path: Some(key_path),
+            auth_timeout_seconds: 5,
+            auth_required: true,
+            sip: None,
+        };
+
+        let client = AuthClient::from_config(&config).await.unwrap();
+
+        let result = client
+            .validate_token(
+                "test-token",
+                &serde_json::json!({"test": "data"}),
+                HashMap::new(),
+                "/test",
+                "POST",
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let auth = result.unwrap();
+        assert_eq!(auth.id, Some("project1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_validate_token_success_200_empty_body() {
+        let (_temp_dir, key_path) = create_test_key();
+
+        // Start a mock server
+        let mock_server = MockServer::start().await;
+
+        // Mock a 200 OK response with empty body (no id)
         Mock::given(method("POST"))
             .and(header("content-type", "application/jwt"))
             .respond_with(ResponseTemplate::new(200))
@@ -324,7 +418,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -345,6 +439,8 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .await;
 
         assert!(result.is_ok());
+        let auth = result.unwrap();
+        assert_eq!(auth.id, None); // No id in empty response
     }
 
     #[tokio::test]
@@ -382,7 +478,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -441,7 +537,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,
@@ -502,7 +598,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 1, // 1 second timeout
@@ -564,7 +660,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             recording_s3_prefix: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_service_url: Some(mock_server.uri()),
             auth_signing_key_path: Some(key_path),
             auth_timeout_seconds: 5,

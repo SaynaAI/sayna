@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use super::AuthApiSecret;
 use super::sip::SipConfig;
 
 /// Validate JWT authentication configuration
@@ -42,19 +43,76 @@ pub fn validate_auth_required(
     auth_required: bool,
     auth_service_url: &Option<String>,
     auth_signing_key_path: &Option<PathBuf>,
-    auth_api_secret: &Option<String>,
+    auth_api_secrets: &[AuthApiSecret],
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !auth_required {
         return Ok(());
     }
 
     let has_jwt_auth = auth_service_url.is_some() && auth_signing_key_path.is_some();
-    let has_api_secret = auth_api_secret.is_some();
+    let has_api_secret = !auth_api_secrets.is_empty();
 
     if !has_jwt_auth && !has_api_secret {
         return Err(
-            "When AUTH_REQUIRED=true, either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRET must be configured".into()
+            "When AUTH_REQUIRED=true, either (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) or AUTH_API_SECRETS_JSON/AUTH_API_SECRET must be configured".into()
         );
+    }
+
+    Ok(())
+}
+
+/// Validate API secret authentication entries
+///
+/// Ensures that:
+/// - ids are non-empty, trimmed, and unique (case-insensitive)
+/// - secrets are non-empty and not reused across ids
+pub fn validate_auth_api_secrets(
+    auth_api_secrets: &[AuthApiSecret],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_secrets = std::collections::HashMap::new();
+
+    for (index, entry) in auth_api_secrets.iter().enumerate() {
+        let id_trimmed = entry.id.trim();
+        if id_trimmed.is_empty() {
+            return Err(format!(
+                "Auth API secret id at index {} cannot be empty or whitespace-only",
+                index
+            )
+            .into());
+        }
+        if id_trimmed != entry.id {
+            return Err(format!(
+                "Auth API secret id '{}' must not include leading or trailing whitespace",
+                entry.id
+            )
+            .into());
+        }
+
+        let id_key = id_trimmed.to_lowercase();
+        if !seen_ids.insert(id_key) {
+            return Err(format!(
+                "Duplicate auth API secret id '{}'; ids are case-insensitive",
+                entry.id
+            )
+            .into());
+        }
+
+        if entry.secret.trim().is_empty() {
+            return Err(format!(
+                "Auth API secret for id '{}' cannot be empty or whitespace-only",
+                entry.id
+            )
+            .into());
+        }
+
+        if let Some(existing_id) = seen_secrets.insert(entry.secret.clone(), entry.id.clone()) {
+            return Err(format!(
+                "Auth API secret for id '{}' duplicates the secret used by id '{}'",
+                entry.id, existing_id
+            )
+            .into());
+        }
     }
 
     Ok(())
@@ -188,6 +246,113 @@ mod tests {
     fn test_validate_sip_config_none() {
         let result = validate_sip_config(&None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_auth_api_secrets_valid() {
+        let secrets = vec![
+            AuthApiSecret {
+                id: "client-a".to_string(),
+                secret: "token-a".to_string(),
+            },
+            AuthApiSecret {
+                id: "client-b".to_string(),
+                secret: "token-b".to_string(),
+            },
+        ];
+
+        assert!(validate_auth_api_secrets(&secrets).is_ok());
+    }
+
+    #[test]
+    fn test_validate_auth_api_secrets_duplicate_id_case_insensitive() {
+        let secrets = vec![
+            AuthApiSecret {
+                id: "Client-A".to_string(),
+                secret: "token-a".to_string(),
+            },
+            AuthApiSecret {
+                id: "client-a".to_string(),
+                secret: "token-b".to_string(),
+            },
+        ];
+
+        let result = validate_auth_api_secrets(&secrets);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate auth API secret id")
+        );
+    }
+
+    #[test]
+    fn test_validate_auth_api_secrets_duplicate_secret() {
+        let secrets = vec![
+            AuthApiSecret {
+                id: "client-a".to_string(),
+                secret: "shared-token".to_string(),
+            },
+            AuthApiSecret {
+                id: "client-b".to_string(),
+                secret: "shared-token".to_string(),
+            },
+        ];
+
+        let result = validate_auth_api_secrets(&secrets);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicates the secret used by id")
+        );
+    }
+
+    #[test]
+    fn test_validate_auth_api_secrets_empty_id_or_secret() {
+        let secrets = vec![
+            AuthApiSecret {
+                id: "   ".to_string(),
+                secret: "token-a".to_string(),
+            },
+            AuthApiSecret {
+                id: "client-b".to_string(),
+                secret: "   ".to_string(),
+            },
+        ];
+
+        let result = validate_auth_api_secrets(&secrets);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_auth_required_without_auth_methods() {
+        let auth_service_url: Option<String> = None;
+        let auth_signing_key_path: Option<PathBuf> = None;
+        let auth_api_secrets: Vec<AuthApiSecret> = Vec::new();
+
+        let result = validate_auth_required(
+            true,
+            &auth_service_url,
+            &auth_signing_key_path,
+            &auth_api_secrets,
+        );
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("AUTH_REQUIRED=true")
+        );
     }
 
     #[test]

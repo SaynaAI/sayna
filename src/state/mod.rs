@@ -160,7 +160,16 @@ impl AppState {
                 }
             }
         } else if config.auth_required && config.has_api_secret_auth() {
-            tracing::info!("API secret authentication enabled");
+            let api_secret_ids: Vec<&str> = config
+                .auth_api_secrets
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect();
+            tracing::info!(
+                api_secret_count = api_secret_ids.len(),
+                api_secret_ids = ?api_secret_ids,
+                "API secret authentication enabled"
+            );
             None
         } else {
             None
@@ -300,7 +309,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None, // No SIP config
@@ -340,7 +349,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: Some(SipConfig {

@@ -1,3 +1,8 @@
+//! LiveKit webhook handler
+//!
+//! This module handles incoming LiveKit webhook events, validates their signatures,
+//! and forwards SIP-related events to configured downstream webhooks.
+
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -339,7 +344,7 @@ pub async fn handle_livekit_webhook(
 /// ```
 /// use std::collections::HashMap;
 /// use livekit_protocol::ParticipantInfo;
-/// use sayna::handlers::livekit_webhook::extract_sip_attributes;
+/// use sayna::handlers::livekit::extract_sip_attributes;
 ///
 /// let mut participant = ParticipantInfo::default();
 /// participant.attributes.insert("sip.trunkPhoneNumber".to_string(), "+1234567890".to_string());
@@ -419,7 +424,7 @@ pub fn get_sip_host_header(attributes: &HashMap<String, String>) -> Option<&str>
 /// # Examples
 ///
 /// ```
-/// use sayna::handlers::livekit_webhook::parse_sip_domain;
+/// use sayna::handlers::livekit::parse_sip_domain;
 ///
 /// // SIP URI formats
 /// assert_eq!(parse_sip_domain("sip:user@example.com"), Some("example.com".to_string()));

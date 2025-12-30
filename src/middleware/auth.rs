@@ -1,4 +1,4 @@
-use crate::auth::filter_headers;
+use crate::auth::{Auth, filter_headers, match_api_secret_id};
 use crate::errors::auth_error::AuthError;
 use crate::state::AppState;
 use axum::{
@@ -13,14 +13,15 @@ use std::sync::Arc;
 /// Authentication middleware that validates bearer tokens
 ///
 /// This middleware supports two authentication modes:
-/// 1. **API Secret Mode**: Simple bearer token comparison against AUTH_API_SECRET
+/// 1. **API Secret Mode**: Simple bearer token comparison against configured API secrets
 /// 2. **JWT Mode**: External validation service with signed JWT requests
 ///
 /// The middleware:
 /// 1. Extracts the Authorization header and parses the bearer token
-/// 2. For API secret mode: compares token directly with configured secret
+/// 2. For API secret mode: compares token directly with configured API secrets
 /// 3. For JWT mode: buffers body, filters headers, and validates with auth service
-/// 4. Returns 401 if validation fails, or passes the request through if successful
+/// 4. Inserts an AuthContext into request extensions on successful validation
+/// 5. Returns 401 if validation fails, or passes the request through if successful
 ///
 /// # Arguments
 /// * `state` - Application state containing the ServerConfig and optional AuthClient
@@ -31,12 +32,14 @@ use std::sync::Arc;
 /// * `Result<Response, AuthError>` - The response from the next handler or an auth error
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
     // Skip authentication if auth is not required or not configured
+    // Still insert an empty Auth to allow handlers that need Auth context to work
     if !state.config.auth_required {
-        tracing::debug!("Authentication disabled, skipping validation");
+        tracing::debug!("Authentication disabled, inserting empty Auth context");
+        request.extensions_mut().insert(Auth::empty());
         return Ok(next.run(request).await);
     }
 
@@ -68,19 +71,15 @@ pub async fn auth_middleware(
     // Check authentication mode and validate accordingly
     // Priority: API secret mode first (simpler), then JWT mode
     if state.config.has_api_secret_auth() {
-        // API Secret authentication mode - simple string comparison
-        let api_secret = state
-            .config
-            .auth_api_secret
-            .as_ref()
-            .expect("API secret should be present when has_api_secret_auth() is true");
-
-        if token == *api_secret {
+        // API Secret authentication mode - constant-time comparison
+        if let Some(secret_id) = match_api_secret_id(&token, &state.config.auth_api_secrets) {
             tracing::info!(
                 method = %request_method,
                 path = %request_path,
+                auth_id = %secret_id,
                 "API secret authentication successful"
             );
+            request.extensions_mut().insert(Auth::new(secret_id));
             return Ok(next.run(request).await);
         } else {
             tracing::warn!(
@@ -133,15 +132,19 @@ pub async fn auth_middleware(
             )
             .await
         {
-            Ok(()) => {
+            Ok(auth) => {
                 tracing::info!(
                     method = %request_method,
                     path = %request_path,
+                    auth_id = ?auth.id,
                     "JWT authentication successful"
                 );
 
                 // Token is valid, reconstruct the request with the original body and continue
-                let request = Request::from_parts(parts, Body::from(body_bytes));
+                let mut request = Request::from_parts(parts, Body::from(body_bytes));
+                // Insert Auth from the auth service response.
+                // Handlers can access this via Extension<Auth> to get auth.id, etc.
+                request.extensions_mut().insert(auth);
                 Ok(next.run(request).await)
             }
             Err(e) => {

@@ -1,9 +1,10 @@
 //! LiveKit token generation handler
 //!
-//! This module provides REST API endpoints for LiveKit token generation,
+//! This module provides the REST API endpoint for LiveKit token generation,
 //! allowing multiple participants to join the same LiveKit room.
 
 use axum::{
+    Extension,
     extract::{Json, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
 
+use crate::auth::Auth;
 use crate::state::AppState;
 
 /// Request body for generating a LiveKit token
@@ -102,11 +104,15 @@ pub struct TokenResponse {
 )]
 pub async fn generate_token(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<Auth>,
     Json(request): Json<TokenRequest>,
 ) -> Response {
+    // Normalize room name with auth prefix for tenant isolation
+    let room_name = auth.normalize_room_name(&request.room_name);
+
     info!(
-        "Token generation request - room: {}, participant: {} ({})",
-        request.room_name, request.participant_name, request.participant_identity
+        "Token generation request - room: {} (normalized: {}), participant: {} ({})",
+        request.room_name, room_name, request.participant_name, request.participant_identity
     );
 
     // Validate that LiveKit handler is configured
@@ -155,9 +161,9 @@ pub async fn generate_token(
             .into_response();
     }
 
-    // Generate token using custom participant identity and name
+    // Generate token using normalized room name and custom participant identity
     let token = match room_handler.user_token(
-        &request.room_name,
+        &room_name,
         &request.participant_identity,
         &request.participant_name,
     ) {
@@ -174,15 +180,12 @@ pub async fn generate_token(
         }
     };
 
-    info!(
-        "Successfully generated token for room: {}",
-        request.room_name
-    );
+    info!("Successfully generated token for room: {}", room_name);
 
-    // Build response
+    // Build response with normalized room name so clients know the actual room
     let response = TokenResponse {
         token,
-        room_name: request.room_name,
+        room_name,
         participant_identity: request.participant_identity,
         livekit_url: state.config.livekit_public_url.clone(),
     };

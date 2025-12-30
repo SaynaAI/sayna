@@ -137,7 +137,19 @@ pub async fn handle_config_message(
 
     // Initialize LiveKit client if configured
     let (livekit_client, livekit_room_name, sayna_identity, sayna_name) =
-        if let Some(livekit_ws_config) = livekit_ws_config {
+        if let Some(mut livekit_ws_config) = livekit_ws_config {
+            // Normalize room name with auth prefix for tenant isolation
+            {
+                let state_guard = state.read().await;
+                livekit_ws_config.room_name = state_guard
+                    .auth
+                    .normalize_room_name(&livekit_ws_config.room_name);
+                info!(
+                    "Normalized LiveKit room name to: {}",
+                    livekit_ws_config.room_name
+                );
+            }
+
             match initialize_livekit_client(
                 livekit_ws_config,
                 tts_ws_config.as_ref(),

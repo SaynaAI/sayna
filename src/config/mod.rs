@@ -40,6 +40,13 @@ mod yaml;
 
 pub use sip::{SipConfig, SipHookConfig};
 
+/// API secret authentication entry with a client identifier
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthApiSecret {
+    pub id: String,
+    pub secret: String,
+}
+
 /// Server configuration
 ///
 /// Contains all configuration needed to run the Sayna server, including:
@@ -96,7 +103,7 @@ pub struct ServerConfig {
     // Authentication configuration
     pub auth_service_url: Option<String>,
     pub auth_signing_key_path: Option<PathBuf>,
-    pub auth_api_secret: Option<String>,
+    pub auth_api_secrets: Vec<AuthApiSecret>,
     pub auth_timeout_seconds: u64,
     pub auth_required: bool,
 
@@ -159,11 +166,12 @@ impl ServerConfig {
 
         // Validate configuration
         validation::validate_jwt_auth(&config.auth_service_url, &config.auth_signing_key_path)?;
+        validation::validate_auth_api_secrets(&config.auth_api_secrets)?;
         validation::validate_auth_required(
             config.auth_required,
             &config.auth_service_url,
             &config.auth_signing_key_path,
-            &config.auth_api_secret,
+            &config.auth_api_secrets,
         )?;
         validation::validate_sip_config(&config.sip)?;
 
@@ -197,9 +205,19 @@ impl ServerConfig {
 
     /// Check if API secret authentication is configured
     ///
-    /// Returns true if AUTH_API_SECRET is set
+    /// Returns true if at least one API secret entry is configured
     pub fn has_api_secret_auth(&self) -> bool {
-        self.auth_api_secret.is_some()
+        !self.auth_api_secrets.is_empty()
+    }
+
+    /// Find the API secret identifier that matches a bearer token
+    ///
+    /// Returns the configured id when the token matches a known secret.
+    pub fn find_api_secret_id(&self, token: &str) -> Option<&str> {
+        self.auth_api_secrets
+            .iter()
+            .find(|entry| entry.secret == token)
+            .map(|entry| entry.id.as_str())
     }
 
     /// Get API key for a specific provider
@@ -276,6 +294,27 @@ impl ServerConfig {
     }
 }
 
+pub(crate) fn parse_auth_api_secrets_json(
+    json_str: &str,
+) -> Result<Vec<AuthApiSecret>, Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct AuthApiSecretJson {
+        id: String,
+        secret: String,
+    }
+
+    let secrets: Vec<AuthApiSecretJson> = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid AUTH_API_SECRETS_JSON format: {e}"))?;
+
+    Ok(secrets
+        .into_iter()
+        .map(|entry| AuthApiSecret {
+            id: entry.id,
+            secret: entry.secret,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +348,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -349,7 +388,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -385,7 +424,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -424,7 +463,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -463,7 +502,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -508,7 +547,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: Some("http://auth.example.com".to_string()),
             auth_signing_key_path: Some(key_path),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: true,
             sip: None,
@@ -540,7 +579,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -574,7 +613,10 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: Some("my-secret-token".to_string()),
+            auth_api_secrets: vec![AuthApiSecret {
+                id: "default".to_string(),
+                secret: "my-secret-token".to_string(),
+            }],
             auth_timeout_seconds: 5,
             auth_required: true,
             sip: None,
@@ -606,13 +648,57 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
         };
 
         assert!(!config_without_api_secret.has_api_secret_auth());
+    }
+
+    #[test]
+    fn test_find_api_secret_id() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 3001,
+            livekit_url: "ws://localhost:7880".to_string(),
+            livekit_public_url: "http://localhost:7880".to_string(),
+            livekit_api_key: None,
+            livekit_api_secret: None,
+            deepgram_api_key: None,
+            elevenlabs_api_key: None,
+            google_credentials: None,
+            azure_speech_subscription_key: None,
+            azure_speech_region: None,
+            cartesia_api_key: None,
+            recording_s3_bucket: None,
+            recording_s3_region: None,
+            recording_s3_endpoint: None,
+            recording_s3_access_key: None,
+            recording_s3_secret_key: None,
+            recording_s3_prefix: None,
+            cache_path: None,
+            cache_ttl_seconds: Some(3600),
+            auth_service_url: None,
+            auth_signing_key_path: None,
+            auth_api_secrets: vec![
+                AuthApiSecret {
+                    id: "client-a".to_string(),
+                    secret: "token-a".to_string(),
+                },
+                AuthApiSecret {
+                    id: "client-b".to_string(),
+                    secret: "token-b".to_string(),
+                },
+            ],
+            auth_timeout_seconds: 5,
+            auth_required: true,
+            sip: None,
+        };
+
+        assert_eq!(config.find_api_secret_id("token-a"), Some("client-a"));
+        assert_eq!(config.find_api_secret_id("missing"), None);
     }
 
     #[test]
@@ -640,7 +726,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -678,7 +764,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -715,7 +801,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -752,7 +838,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -794,7 +880,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -830,7 +916,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -869,7 +955,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -903,7 +989,7 @@ mod tests {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: false,
             sip: None,
@@ -927,7 +1013,9 @@ mod tests {
             env::remove_var("AUTH_REQUIRED");
             env::remove_var("AUTH_SERVICE_URL");
             env::remove_var("AUTH_SIGNING_KEY_PATH");
+            env::remove_var("AUTH_API_SECRETS_JSON");
             env::remove_var("AUTH_API_SECRET");
+            env::remove_var("AUTH_API_SECRET_ID");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
             env::remove_var("RECORDING_S3_PREFIX");
         }

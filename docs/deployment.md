@@ -84,7 +84,13 @@ Add the relevant variables before starting the container. The most common ones a
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Credentials used to mint LiveKit tokens in `/livekit/token` and during WebSocket LiveKit bring-up. | `lk_key` / `lk_secret` |
 | `RECORDING_S3_*` | Bucket configuration for LiveKit recordings (bucket, region, endpoint, access key, secret key). | `recordings`, `us-east-1`, etc. |
 
-Set `AUTH_REQUIRED`, `AUTH_SERVICE_URL`, `AUTH_SIGNING_KEY_PATH`, or `AUTH_API_SECRET` only if you follow the separate authentication guide.
+Set `AUTH_REQUIRED` plus either `AUTH_API_SECRETS_JSON` (preferred) or `AUTH_SERVICE_URL`/`AUTH_SIGNING_KEY_PATH` only if you follow the separate authentication guide. Legacy `AUTH_API_SECRET` is still supported with optional `AUTH_API_SECRET_ID`.
+
+Minimal multi-secret example:
+
+```bash
+AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"}]'
+```
 
 ## 4. Local Docker Run
 

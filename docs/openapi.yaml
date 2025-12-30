@@ -6,7 +6,8 @@ info:
     name: Sayna
     url: https://api.sayna.ai
   license:
-    name: ''
+    name: Apache-2.0
+    identifier: Apache-2.0
   version: 0.1.0
 servers:
 - url: https://api.sayna.ai
@@ -29,6 +30,199 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /livekit/participant:
+    delete:
+      tags:
+      - livekit
+      summary: Handler for DELETE /livekit/participant endpoint
+      description: |-
+        Removes a participant from a LiveKit room, forcibly disconnecting them.
+        The room name is normalized with the auth.id prefix for tenant isolation,
+        ensuring users can only remove participants from their own rooms.
+
+        Note: This does not invalidate the participant's token. To prevent rejoining,
+        use short-lived tokens and avoid issuing new tokens to removed participants.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+        * `request` - Request with room name and participant identity
+
+        # Returns
+        * `Response` - JSON response with removal status or error
+
+        # Errors
+        * 400 Bad Request - Empty room name or participant identity
+        * 404 Not Found - Participant not found in the room
+        * 500 Internal Server Error - LiveKit not configured or removal failed
+
+        # Flow
+        1. Validate request fields are not empty
+        2. Normalize room name with auth.id prefix
+        3. Verify participant exists in the room
+        4. Remove the participant
+        5. Return success or appropriate error
+      operationId: remove_participant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveParticipantRequest'
+        required: true
+      responses:
+        '200':
+          description: Participant removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantResponse'
+        '400':
+          description: Invalid request (empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '404':
+          description: Participant not found in room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '500':
+          description: LiveKit not configured or removal failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+      security:
+      - bearer_auth: []
+  /livekit/participant/mute:
+    post:
+      tags:
+      - livekit
+      summary: Handler for POST /livekit/participant/mute endpoint
+      description: |-
+        Mutes or unmutes a participant's published track. The room name is
+        normalized with the auth.id prefix for tenant isolation.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+        * `request` - Request with room name, participant identity, track_sid, and muted state
+
+        # Returns
+        * `Response` - JSON response with mute status or error
+
+        # Errors
+        * 400 Bad Request - Empty fields in request
+        * 404 Not Found - Room or participant not found
+        * 500 Internal Server Error - LiveKit not configured or mute operation failed
+      operationId: mute_participant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MuteParticipantRequest'
+        required: true
+      responses:
+        '200':
+          description: Track muted/unmuted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MuteParticipantResponse'
+        '400':
+          description: Invalid request (empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '404':
+          description: Room or participant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '500':
+          description: LiveKit not configured or mute failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+      security:
+      - bearer_auth: []
+  /livekit/rooms:
+    get:
+      tags:
+      - livekit
+      summary: Handler for GET /livekit/rooms endpoint
+      description: |-
+        Lists all LiveKit rooms belonging to the authenticated client.
+        Rooms are filtered by the auth.id prefix for tenant isolation.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+
+        # Returns
+        * `Response` - JSON response with rooms list or error status
+
+        # Errors
+        * 500 Internal Server Error - LiveKit service not configured or API call failed
+      operationId: list_rooms
+      responses:
+        '200':
+          description: Rooms listed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListRoomsResponse'
+        '500':
+          description: LiveKit service not configured or failed to list rooms
+      security:
+      - bearer_auth: []
+  /livekit/rooms/{room_name}:
+    get:
+      tags:
+      - livekit
+      summary: Handler for GET /livekit/rooms/{room_name} endpoint
+      description: |-
+        Returns detailed information about a specific LiveKit room including
+        all current participants. The room name is normalized with the auth.id
+        prefix for tenant isolation.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+        * `room_name` - Name of the room to retrieve (from path parameter)
+
+        # Returns
+        * `Response` - JSON response with room details or error status
+
+        # Errors
+        * 404 Not Found - Room not found or not accessible
+        * 500 Internal Server Error - LiveKit service not configured or API call failed
+      operationId: get_room_details
+      parameters:
+      - name: room_name
+        in: path
+        description: Name of the room to retrieve
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Room details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailsResponse'
+        '404':
+          description: Room not found or not accessible
+        '500':
+          description: LiveKit service not configured or failed to get room details
+      security:
+      - bearer_auth: []
   /livekit/token:
     post:
       tags:
@@ -234,6 +428,67 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+  /sip/transfer:
+    post:
+      tags:
+      - sip
+      summary: Handler for POST /sip/transfer endpoint
+      description: |-
+        Initiates a SIP REFER transfer for a participant in a LiveKit room.
+        The transfer moves an ongoing SIP call to a different phone number.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit handlers
+        * `request` - Transfer request with room name, participant identity, and destination
+
+        # Returns
+        * `Response` - JSON response with transfer status or error
+
+        # Errors
+        * 400 Bad Request - Invalid phone number format or empty fields
+        * 404 Not Found - Specified participant not found or not a SIP participant
+        * 500 Internal Server Error - LiveKit not configured or transfer operation failed
+
+        # Flow
+        1. Validate the phone number format
+        2. Check LiveKit handlers are configured
+        3. Verify the participant exists and is a SIP participant
+        4. Execute the SIP transfer
+        5. Return success or appropriate error
+      operationId: sip_transfer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIPTransferRequest'
+        required: true
+      responses:
+        '200':
+          description: Transfer initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferResponse'
+        '400':
+          description: Invalid request (bad phone number or empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+        '404':
+          description: Participant not found or not a SIP participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+        '500':
+          description: LiveKit not configured or transfer failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPTransferErrorResponse'
+      security:
+      - bearer_auth: []
   /speak:
     post:
       tags:
@@ -412,7 +667,64 @@ components:
             type: string
             enum:
             - send_message
+      - type: object
+        description: |-
+          Transfer the current SIP call to another phone number.
+
+          This command initiates a SIP REFER transfer for the current participant
+          in the LiveKit room. The participant identity and room name are derived
+          from the WebSocket connection state.
+        required:
+        - transfer_to
+        - type
+        properties:
+          transfer_to:
+            type: string
+            description: |-
+              The destination phone number to transfer the call to.
+
+              Accepts phone numbers in various formats:
+              - International format with `+` prefix (e.g., "+1234567890")
+              - National format without prefix (e.g., "1234567890")
+              - Internal extensions (e.g., "1234")
+
+              Validation is performed by the handler, not during deserialization.
+            example: '+1234567890'
+          type:
+            type: string
+            enum:
+            - sip_transfer
       description: WebSocket message types for incoming messages
+    ListRoomsResponse:
+      type: object
+      description: |-
+        Response containing the list of LiveKit rooms
+
+        # Example
+        ```json
+        {
+          "rooms": [
+            {
+              "name": "project1_room-1",
+              "num_participants": 2,
+              "creation_time": 1703123456
+            },
+            {
+              "name": "project1_room-2",
+              "num_participants": 0,
+              "creation_time": 1703123789
+            }
+          ]
+        }
+        ```
+      required:
+      - rooms
+      properties:
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomInfo'
+          description: List of rooms belonging to the authenticated client
     LiveKitWebSocketConfig:
       type: object
       description: LiveKit configuration for WebSocket messages
@@ -449,6 +761,78 @@ components:
           - 'null'
           description: Sayna AI participant display name (defaults to "Sayna AI")
           example: Sayna AI
+    MuteParticipantRequest:
+      type: object
+      description: |-
+        Request body for muting/unmuting a participant's track
+
+        # Example
+        ```json
+        {
+          "room_name": "conversation-room-123",
+          "participant_identity": "user-alice-456",
+          "track_sid": "TR_abc123",
+          "muted": true
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - track_sid
+      - muted
+      properties:
+        muted:
+          type: boolean
+          description: True to mute, false to unmute
+          example: true
+        participant_identity:
+          type: string
+          description: The identity of the participant whose track to mute
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The LiveKit room name where the participant is connected
+          example: conversation-room-123
+        track_sid:
+          type: string
+          description: The session ID of the track to mute/unmute
+          example: TR_abc123
+    MuteParticipantResponse:
+      type: object
+      description: |-
+        Response for a successful mute/unmute operation
+
+        # Example
+        ```json
+        {
+          "room_name": "project1_conversation-room-123",
+          "participant_identity": "user-alice-456",
+          "track_sid": "TR_abc123",
+          "muted": true
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - track_sid
+      - muted
+      properties:
+        muted:
+          type: boolean
+          description: Current muted state
+          example: true
+        participant_identity:
+          type: string
+          description: The identity of the participant
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The normalized room name (with tenant prefix)
+          example: project1_conversation-room-123
+        track_sid:
+          type: string
+          description: The session ID of the track
+          example: TR_abc123
     OutgoingMessage:
       oneOf:
       - type: object
@@ -562,6 +946,24 @@ components:
             type: string
             enum:
             - error
+      - type: object
+        description: |-
+          SIP transfer specific error
+
+          This message is sent when a SIP transfer operation fails.
+          Clients can subscribe to this specific error type to handle
+          SIP transfer failures separately from other errors.
+        required:
+        - message
+        - type
+        properties:
+          message:
+            type: string
+            description: Error message describing why the transfer failed
+          type:
+            type: string
+            enum:
+            - sip_transfer_error
       description: WebSocket message types for outgoing messages
     ParticipantDisconnectedInfo:
       type: object
@@ -587,6 +989,76 @@ components:
           format: int64
           description: Timestamp when the disconnection occurred
           minimum: 0
+    ParticipantInfo:
+      type: object
+      description: |-
+        Detailed information about a participant in a LiveKit room
+
+        # Example
+        ```json
+        {
+          "sid": "PA_abc123",
+          "identity": "user-alice-456",
+          "name": "Alice Smith",
+          "state": "ACTIVE",
+          "kind": "STANDARD",
+          "joined_at": 1703123456,
+          "metadata": "{\"role\": \"host\"}",
+          "attributes": {}
+        }
+        ```
+      required:
+      - sid
+      - identity
+      - name
+      - state
+      - kind
+      - joined_at
+      - metadata
+      - attributes
+      - is_publisher
+      properties:
+        attributes:
+          type: object
+          description: User-specified attributes for the participant
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        identity:
+          type: string
+          description: Unique identifier provided when connecting
+          example: user-alice-456
+        is_publisher:
+          type: boolean
+          description: Whether the participant is currently publishing audio/video
+          example: true
+        joined_at:
+          type: integer
+          format: int64
+          description: Timestamp when participant joined (Unix timestamp in seconds)
+          example: 1703123456
+        kind:
+          type: string
+          description: 'Participant kind: STANDARD, AGENT, SIP, EGRESS, or INGRESS'
+          example: STANDARD
+        metadata:
+          type: string
+          description: User-specified metadata for the participant
+          example:
+            role: host
+        name:
+          type: string
+          description: Display name of the participant
+          example: Alice Smith
+        sid:
+          type: string
+          description: Unique session ID for this participant (generated by LiveKit)
+          example: PA_abc123
+        state:
+          type: string
+          description: 'Participant state: JOINING, JOINED, ACTIVE, or DISCONNECTED'
+          example: ACTIVE
     Pronunciation:
       type: object
       description: Pronunciation replacement configuration
@@ -602,6 +1074,281 @@ components:
           type: string
           description: Word to replace
           example: API
+    RemoveParticipantErrorResponse:
+      type: object
+      description: |-
+        Error response for participant removal failures
+
+        # Example
+        ```json
+        {
+          "error": "Participant 'user-123' not found in room",
+          "code": "PARTICIPANT_NOT_FOUND"
+        }
+        ```
+      required:
+      - error
+      - code
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: PARTICIPANT_NOT_FOUND
+        error:
+          type: string
+          description: Human-readable error message
+          example: Participant not found in room
+    RemoveParticipantRequest:
+      type: object
+      description: |-
+        Request body for removing a participant from a LiveKit room
+
+        # Example
+        ```json
+        {
+          "room_name": "conversation-room-123",
+          "participant_identity": "user-alice-456"
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the participant to remove
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The LiveKit room name where the participant is connected
+          example: conversation-room-123
+    RemoveParticipantResponse:
+      type: object
+      description: |-
+        Response for a successful participant removal
+
+        # Example
+        ```json
+        {
+          "status": "removed",
+          "room_name": "project1_conversation-room-123",
+          "participant_identity": "user-alice-456"
+        }
+        ```
+      required:
+      - status
+      - room_name
+      - participant_identity
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the removed participant
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The normalized room name (with tenant prefix)
+          example: project1_conversation-room-123
+        status:
+          type: string
+          description: Status of the removal operation
+          example: removed
+    RoomDetailsResponse:
+      type: object
+      description: |-
+        Detailed information about a LiveKit room including participants
+
+        # Example
+        ```json
+        {
+          "sid": "RM_xyz789",
+          "name": "project1_conversation-room-123",
+          "num_participants": 2,
+          "max_participants": 10,
+          "creation_time": 1703123456,
+          "metadata": "",
+          "active_recording": false,
+          "participants": [...]
+        }
+        ```
+      required:
+      - sid
+      - name
+      - num_participants
+      - max_participants
+      - creation_time
+      - metadata
+      - active_recording
+      - participants
+      properties:
+        active_recording:
+          type: boolean
+          description: Whether a recording is currently active
+          example: false
+        creation_time:
+          type: integer
+          format: int64
+          description: Room creation time (Unix timestamp in seconds)
+          example: 1703123456
+        max_participants:
+          type: integer
+          format: int32
+          description: Maximum allowed participants (0 = no limit)
+          example: 10
+          minimum: 0
+        metadata:
+          type: string
+          description: User-specified metadata for the room
+          example: ''
+        name:
+          type: string
+          description: The full room name (includes tenant prefix)
+          example: project1_conversation-room-123
+        num_participants:
+          type: integer
+          format: int32
+          description: Number of current participants in the room
+          example: 2
+          minimum: 0
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantInfo'
+          description: List of participants currently in the room
+        sid:
+          type: string
+          description: Unique session ID for the room (generated by LiveKit)
+          example: RM_xyz789
+    RoomInfo:
+      type: object
+      description: |-
+        Information about a LiveKit room
+
+        # Example
+        ```json
+        {
+          "name": "project1_conversation-room-123",
+          "num_participants": 2,
+          "creation_time": 1703123456
+        }
+        ```
+      required:
+      - name
+      - num_participants
+      - creation_time
+      properties:
+        creation_time:
+          type: integer
+          format: int64
+          description: Room creation time (Unix timestamp in seconds)
+          example: 1703123456
+        name:
+          type: string
+          description: The full room name (includes tenant prefix)
+          example: project1_conversation-room-123
+        num_participants:
+          type: integer
+          format: int32
+          description: Number of current participants in the room
+          example: 2
+          minimum: 0
+    SIPTransferErrorResponse:
+      type: object
+      description: |-
+        Error response for SIP transfer failures
+
+        # Example
+        ```json
+        {
+          "error": "Participant 'sip_123' not found or is not a SIP participant",
+          "code": "PARTICIPANT_NOT_FOUND"
+        }
+        ```
+      required:
+      - error
+      - code
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: PARTICIPANT_NOT_FOUND
+        error:
+          type: string
+          description: Human-readable error message
+          example: Participant not found or is not a SIP participant
+    SIPTransferRequest:
+      type: object
+      description: |-
+        Request body for initiating a SIP call transfer
+
+        # Example
+        ```json
+        {
+          "room_name": "call-room-123",
+          "participant_identity": "sip_participant_456",
+          "transfer_to": "+15551234567"
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - transfer_to
+      properties:
+        participant_identity:
+          type: string
+          description: |-
+            The identity of the SIP participant to transfer.
+            This can be obtained by listing participants in the room via LiveKit API.
+          example: sip_participant_456
+        room_name:
+          type: string
+          description: The LiveKit room name where the SIP participant is connected
+          example: call-room-123
+        transfer_to:
+          type: string
+          description: |-
+            The phone number to transfer the call to.
+            Supports international format (+1234567890), national format (07123456789),
+            or internal extensions (1234).
+          example: '+15551234567'
+    SIPTransferResponse:
+      type: object
+      description: |-
+        Response for a successful SIP transfer initiation
+
+        Note: A successful response indicates the transfer has been initiated,
+        not that it has completed. The actual transfer may take several seconds.
+
+        # Example
+        ```json
+        {
+          "status": "initiated",
+          "room_name": "call-room-123",
+          "participant_identity": "sip_participant_456",
+          "transfer_to": "tel:+15551234567"
+        }
+        ```
+      required:
+      - status
+      - room_name
+      - participant_identity
+      - transfer_to
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the participant being transferred
+          example: sip_participant_456
+        room_name:
+          type: string
+          description: The room name where the transfer was initiated
+          example: call-room-123
+        status:
+          type: string
+          description: Status of the transfer request ("initiated" or "completed")
+          example: initiated
+        transfer_to:
+          type: string
+          description: 'The normalized phone number with tel: prefix'
+          example: tel:+15551234567
     STTWebSocketConfig:
       type: object
       description: STT configuration for WebSocket messages (without API key)

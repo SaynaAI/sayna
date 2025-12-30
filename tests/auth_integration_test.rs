@@ -34,7 +34,7 @@ async fn create_test_state_auth_disabled() -> Arc<AppState> {
         cache_ttl_seconds: Some(3600),
         auth_service_url: None,
         auth_signing_key_path: None,
-        auth_api_secret: None,
+        auth_api_secrets: Vec::new(),
         auth_timeout_seconds: 5,
         auth_required: false, // Auth disabled
         sip: None,
@@ -171,7 +171,7 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             cache_ttl_seconds: Some(3600),
             auth_service_url: Some(auth_service_url.to_string()),
             auth_signing_key_path: Some(key_path),
-            auth_api_secret: None,
+            auth_api_secrets: Vec::new(),
             auth_timeout_seconds: 5,
             auth_required: true,
             sip: None,
@@ -413,10 +413,16 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
 
 // Integration tests for API secret authentication
 mod with_api_secret {
+    use axum::extract::Extension;
+    use sayna::auth::Auth;
+    use sayna::config::AuthApiSecret;
+
     use super::*;
 
     /// Helper to create a test AppState with API secret auth enabled
-    async fn create_test_state_with_api_secret(api_secret: &str) -> Arc<AppState> {
+    async fn create_test_state_with_api_secrets(
+        auth_api_secrets: Vec<AuthApiSecret>,
+    ) -> Arc<AppState> {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 3001,
@@ -440,13 +446,25 @@ mod with_api_secret {
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
             auth_signing_key_path: None,
-            auth_api_secret: Some(api_secret.to_string()),
+            auth_api_secrets,
             auth_timeout_seconds: 5,
             auth_required: true,
             sip: None,
         };
 
         AppState::new(config).await
+    }
+
+    async fn create_test_state_with_api_secret(api_secret: &str) -> Arc<AppState> {
+        create_test_state_with_api_secrets(vec![AuthApiSecret {
+            id: "default".to_string(),
+            secret: api_secret.to_string(),
+        }])
+        .await
+    }
+
+    async fn auth_id_handler(Extension(auth): Extension<Auth>) -> String {
+        auth.id.clone().unwrap_or_else(|| "missing".to_string())
     }
 
     #[tokio::test]
@@ -645,5 +663,45 @@ mod with_api_secret {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_context_includes_correct_id() {
+        let state = create_test_state_with_api_secrets(vec![
+            AuthApiSecret {
+                id: "client-a".to_string(),
+                secret: "token-a".to_string(),
+            },
+            AuthApiSecret {
+                id: "client-b".to_string(),
+                secret: "token-b".to_string(),
+            },
+        ])
+        .await;
+
+        let app = Router::new()
+            .route("/whoami", get(auth_id_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/whoami")
+            .header("authorization", "Bearer token-b")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body_str, "client-b");
     }
 }

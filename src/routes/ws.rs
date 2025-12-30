@@ -9,36 +9,21 @@ use std::sync::Arc;
 ///
 /// # WebSocket Authentication Design
 ///
-/// **Design Choice: WebSocket endpoints are intentionally unauthenticated (Option C)**
+/// The WebSocket endpoint uses the same auth middleware as REST endpoints for tenant isolation.
+/// The auth middleware provides `Auth` context that is used to prefix LiveKit room names with
+/// the authenticated client's ID, ensuring different tenants cannot access each other's rooms.
 ///
-/// The `/ws` endpoint does not require authentication for the following reasons:
+/// ## Behavior
 ///
-/// 1. **Complexity**: WebSocket authentication is significantly more complex than REST auth:
-///    - Token validation must occur during the HTTP upgrade handshake
-///    - Tokens must be passed via query parameters or headers (not ideal for bearer tokens)
-///    - Connection lifecycle management becomes more complex with auth failures
+/// - **When `AUTH_REQUIRED=true`**: Requires valid authentication token in the Authorization header
+/// - **When `AUTH_REQUIRED=false`**: Inserts an empty `Auth` context (no room name prefixing)
 ///
-/// 2. **Use Case**: The primary use case for WebSocket connections is real-time voice
-///    processing where:
-///    - Connections are typically short-lived
-///    - Audio data is ephemeral and not persisted
-///    - The service acts as a processing pipeline rather than a data store
+/// ## Room Name Isolation
 ///
-/// 3. **Alternative Protection**: If WebSocket auth is required, consider:
-///    - **Network-level protection**: Use a reverse proxy (nginx, Envoy) with auth
-///    - **Application tokens**: Implement custom token validation in the Config message
-///    - **Query param tokens**: Validate tokens passed as URL parameters during upgrade
-///
-/// 4. **REST Endpoints are Protected**: All REST endpoints (`/voices`, `/speak`, `/livekit/token`)
-///    require authentication when `AUTH_REQUIRED=true`, protecting the core API surface.
-///
-/// ## Future Enhancement
-///
-/// To add WebSocket authentication in the future, implement one of these approaches:
-///
-/// - **Option A (Upgrade-time auth)**: Validate authorization header during HTTP upgrade
-/// - **Option B (Message-based auth)**: Require auth token in the first WebSocket message
-/// - **Option C (Current)**: No WebSocket auth, protect via network/proxy layer
+/// When a client connects with an authenticated context (e.g., `auth.id = "project1"`),
+/// any LiveKit room names are automatically prefixed with the auth ID:
+/// - Client requests room `my-room` → Actual room becomes `project1_my-room`
+/// - This prevents tenant A from accessing tenant B's rooms
 ///
 /// See `docs/authentication.md` for detailed authentication architecture.
 pub fn create_ws_router() -> Router<Arc<AppState>> {

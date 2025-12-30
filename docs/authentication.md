@@ -4,7 +4,7 @@
 
 Sayna supports two authentication methods for protecting API endpoints:
 
-1. **API Secret Authentication** (Simple): Direct bearer token comparison against a configured secret. Ideal for single-tenant deployments or simple use cases.
+1. **API Secret Authentication** (Simple): Direct bearer token comparison against a configured list of `{id, secret}` entries. Ideal for single-tenant or small multi-tenant deployments.
 
 2. **JWT-Based Authentication** (Advanced): Delegates token validation to an external authentication service with JWT-signed requests. Provides maximum flexibility for multi-tenant systems and complex authorization logic.
 
@@ -19,11 +19,13 @@ openssl rand -base64 32
 
 # 2. Configure
 AUTH_REQUIRED=true
-AUTH_API_SECRET=your-generated-secret
+AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"},{"id":"partner-1","secret":"sk_test_partner_456"}]'
 
 # 3. Use
-curl -H "Authorization: Bearer your-generated-secret" http://localhost:3001/speak
+curl -H "Authorization: Bearer sk_test_default_123" http://localhost:3001/speak
 ```
+
+Legacy single-secret support is still available via `AUTH_API_SECRET` with optional `AUTH_API_SECRET_ID`.
 
 ### JWT-Based (Advanced)
 ```bash
@@ -43,7 +45,7 @@ AUTH_SIGNING_KEY_PATH=/path/to/private.pem
 
 ### Method 1: API Secret Authentication Flow
 
-Simple bearer token comparison - no external service required.
+Simple bearer token comparison against a configured list of secrets (with ids) - no external service required.
 
 ```
 ┌─────────┐                 ┌───────┐
@@ -55,7 +57,7 @@ Simple bearer token comparison - no external service required.
      ├─────────────────────────>│
      │                          │
      │                          │ Compare token "tk"
-     │                          │ with AUTH_API_SECRET
+     │                          │ with configured api_secrets
      │                          │
      │     Allow/Deny request   │
      │<─────────────────────────┤
@@ -63,8 +65,9 @@ Simple bearer token comparison - no external service required.
 ```
 
 **When to use:**
-- Single-tenant deployments
+- Single-tenant deployments or small multi-tenant setups
 - Simple authentication requirements
+- Lightweight per-tenant auditing via secret ids
 - No need for per-request authorization logic
 - Lowest latency (no external service call)
 
@@ -116,12 +119,12 @@ Delegated validation with external auth service for advanced use cases.
 1. **Authentication Middleware** (`src/middleware/auth.rs`)
    - Intercepts HTTP requests to protected endpoints
    - Extracts and validates Authorization header format
-   - **API Secret Mode**: Direct token comparison with configured secret
+   - **API Secret Mode**: Direct token comparison with configured secret list; matched id stored in `AuthContext`
    - **JWT Mode**: Buffers request body/headers and calls AuthClient
    - Priority: API secret checked first if configured
 
 2. **Server Config** (`src/config.rs`)
-   - Loads authentication configuration from environment variables
+   - Loads authentication configuration from YAML and environment variables
    - Validates that at least one auth method is configured when `AUTH_REQUIRED=true`
    - Helper methods: `has_jwt_auth()`, `has_api_secret_auth()`
 
@@ -145,7 +148,7 @@ Choose one of the two authentication methods below based on your requirements.
 
 ### Option A: API Secret Authentication (Simple)
 
-For simple deployments where you just need a shared secret.
+For simple deployments where you just need one or more shared secrets.
 
 #### 1. Generate a Secure Secret
 
@@ -165,17 +168,36 @@ Add to your `.env` file:
 # Enable authentication
 AUTH_REQUIRED=true
 
-# Set your API secret
-AUTH_API_SECRET=your-secure-secret-here
+# Set your API secrets (JSON array of {id, secret})
+AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"},{"id":"partner-1","secret":"sk_test_partner_456"}]'
+```
+
+Legacy single-secret env vars (if you cannot set JSON):
+
+```bash
+AUTH_API_SECRET=sk_test_legacy_123
+AUTH_API_SECRET_ID=default
+```
+
+Or configure YAML:
+
+```yaml
+auth:
+  required: true
+  api_secrets:
+    - id: "default"
+      secret: "sk_test_default_123"
+    - id: "partner-1"
+      secret: "sk_test_partner_456"
 ```
 
 #### 3. Use the Token
 
-Clients authenticate by sending the secret as a bearer token:
+Clients authenticate by sending any configured secret as a bearer token:
 
 ```bash
 curl -X POST http://localhost:3001/speak \
-  -H "Authorization: Bearer your-secure-secret-here" \
+  -H "Authorization: Bearer sk_test_default_123" \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}'
 ```
@@ -292,7 +314,9 @@ app.listen(3000);
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AUTH_REQUIRED` | No | `false` | Enable/disable authentication |
-| `AUTH_API_SECRET` | Conditional* | - | Secret token for API Secret authentication |
+| `AUTH_API_SECRETS_JSON` | Conditional* | - | JSON array of `{id, secret}` entries for API Secret auth |
+| `AUTH_API_SECRET` | Conditional* | - | Legacy single secret for API Secret auth (use `AUTH_API_SECRETS_JSON` instead) |
+| `AUTH_API_SECRET_ID` | No | `default` | Legacy secret id when using `AUTH_API_SECRET` |
 | `AUTH_SERVICE_URL` | Conditional** | - | External auth service endpoint (JWT mode) |
 | `AUTH_SIGNING_KEY_PATH` | Conditional** | - | Path to RSA/ECDSA private key (JWT mode) |
 | `AUTH_TIMEOUT_SECONDS` | No | `5` | Auth request timeout in seconds (JWT mode only) |
@@ -300,10 +324,29 @@ app.listen(3000);
 **Configuration Requirements:**
 
 When `AUTH_REQUIRED=true`, you must configure **at least one** of:
-- **Option A (Simple)**: Set `AUTH_API_SECRET`
+- **Option A (Simple)**: Set `AUTH_API_SECRETS_JSON` (or legacy `AUTH_API_SECRET` with optional `AUTH_API_SECRET_ID`)
 - **Option B (Advanced)**: Set both `AUTH_SERVICE_URL` and `AUTH_SIGNING_KEY_PATH`
 
 **Both methods can coexist**: If both are configured, API Secret is checked first (takes priority).
+
+## Accessing Auth Context in Handlers
+
+Protected endpoints can read the authenticated method and API secret id via `Extension<AuthContext>`:
+
+```rust
+use axum::{extract::Extension, response::IntoResponse};
+use crate::auth::AuthContext;
+
+async fn speak(Extension(auth): Extension<AuthContext>) -> impl IntoResponse {
+    if let Some(secret_id) = auth.id() {
+        tracing::info!(auth_id = %secret_id, "auditing request");
+    }
+
+    // handler logic...
+}
+```
+
+`auth.id()` returns `None` for JWT-authenticated requests; use `auth.method` if you need to branch on auth type.
 
 ## JWT Payload Specification (JWT Mode Only)
 
@@ -375,16 +418,18 @@ The client authentication flow is identical for both methods - just send a beare
 #### With API Secret Authentication
 
 ```bash
-# Use your configured AUTH_API_SECRET as the bearer token
+# Use one of your configured API secrets as the bearer token
 curl -X POST http://localhost:3001/speak \
-  -H "Authorization: Bearer your-configured-secret" \
+  -H "Authorization: Bearer sk_test_default_123" \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-US-JennyNeural"}'
 
 # List available voices
 curl -X GET http://localhost:3001/voices \
-  -H "Authorization: Bearer your-configured-secret"
+  -H "Authorization: Bearer sk_test_default_123"
 ```
+
+The matched secret id is attached to `AuthContext` and logged as `api_secret_id` for auditing.
 
 #### With JWT-Based Authentication
 
@@ -647,22 +692,25 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
    ```bash
    # Verify environment variables are set
    echo $AUTH_REQUIRED
+   echo $AUTH_API_SECRETS_JSON
    echo $AUTH_API_SECRET
+   echo $AUTH_API_SECRET_ID
    ```
 
 2. **Verify token matches**:
-   ```bash
-   # Make sure you're sending the exact same string
-   # API secret comparison is case-sensitive
-   curl -v -X POST http://localhost:3001/speak \
-     -H "Authorization: Bearer $AUTH_API_SECRET" \
+    ```bash
+    # Make sure you're sending the exact same string
+    # API secret comparison is case-sensitive
+    # Replace with one of the configured secrets (or $AUTH_API_SECRET for legacy)
+    curl -v -X POST http://localhost:3001/speak \
+     -H "Authorization: Bearer sk_test_default_123" \
      -H "Content-Type: application/json" \
      -d '{"text": "test"}'
    ```
 
 3. **Review logs**:
    ```bash
-   # Look for: "API secret authentication enabled"
+   # Look for: "API secret authentication successful" (includes api_secret_id)
    # Or: "API secret authentication failed: token mismatch"
    ```
 
@@ -703,8 +751,8 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
 | Error | Cause | Solution |
 |-------|-------|----------|
 | 401 Unauthorized | Missing or invalid token | Include valid `Authorization: Bearer {token}` header |
-| 401 "Invalid API secret" | Token doesn't match AUTH_API_SECRET | Check token is exactly the same as configured secret (case-sensitive) |
-| 500 "Auth required but no method configured" | AUTH_REQUIRED=true but no auth method set | Set either AUTH_API_SECRET or (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) |
+| 401 "Invalid API secret" | Token doesn't match any configured API secret | Check token matches one of the configured secrets (case-sensitive) |
+| 500 "Auth required but no method configured" | AUTH_REQUIRED=true but no auth method set | Set either AUTH_API_SECRETS_JSON (or legacy AUTH_API_SECRET) or (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) |
 | 503 Service Unavailable | Auth service unreachable (JWT mode) | Verify auth service is running and reachable |
 
 ## Performance Considerations
@@ -773,7 +821,7 @@ Use this decision guide to select the right authentication method:
 
 ### Can I Use Both?
 Yes! Both methods can coexist:
-- Configure both `AUTH_API_SECRET` and `AUTH_SERVICE_URL`
+- Configure both `AUTH_API_SECRETS_JSON` (or legacy `AUTH_API_SECRET`) and `AUTH_SERVICE_URL`
 - API Secret is checked first (takes priority)
 - Useful for: admin access via secret + user access via JWT
 
@@ -781,7 +829,7 @@ Yes! Both methods can coexist:
 
 | Approach | Pros | Cons | Use Case |
 |----------|------|------|----------|
-| **API Secret** (Current) | Simple, fast, no external deps | Single shared secret, less flexible | Simple deployments |
+| **API Secret** (Current) | Simple, fast, no external deps, supports multiple secrets with ids | Shared-secret model, limited authorization flexibility | Simple deployments |
 | **JWT Validation** (Current) | Flexible, per-user auth, context-aware | Requires external service, latency overhead | Complex auth requirements |
 | **OAuth2 Proxy** | Standardized, battle-tested | Additional infrastructure, not integrated | Enterprise deployments |
 | **Embedded JWT** | Fast, no external service | Tightly coupled, hard to update logic | Standalone apps |

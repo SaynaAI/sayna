@@ -537,6 +537,172 @@ impl LiveKitRoomHandler {
                 LiveKitError::ConnectionFailed(format!("Failed to list participants: {e}"))
             })
     }
+
+    /// List all LiveKit rooms, optionally filtered by a name prefix
+    ///
+    /// # Arguments
+    /// * `prefix` - Optional prefix to filter room names. If None, returns all rooms.
+    ///
+    /// # Returns
+    /// * `Result<Vec<proto::Room>, LiveKitError>` - List of rooms or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // List all rooms for tenant "project1"
+    /// let rooms = handler.list_rooms(Some("project1_")).await?;
+    /// for room in rooms {
+    ///     println!("Room: {}", room.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_rooms(&self, prefix: Option<&str>) -> Result<Vec<proto::Room>, LiveKitError> {
+        // Fetch all rooms from LiveKit
+        let all_rooms =
+            self.room_client.list_rooms(vec![]).await.map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to list rooms: {e}"))
+            })?;
+
+        // Filter by prefix if provided
+        let rooms = match prefix {
+            Some(p) if !p.is_empty() => all_rooms
+                .into_iter()
+                .filter(|r| r.name.starts_with(p))
+                .collect(),
+            _ => all_rooms,
+        };
+
+        Ok(rooms)
+    }
+
+    /// Remove a participant from a LiveKit room
+    ///
+    /// This forcibly disconnects the participant from the room. Note that this
+    /// does not invalidate the participant's token - they can rejoin if they
+    /// still have a valid token.
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Identity of the participant to remove
+    ///
+    /// # Returns
+    /// * `Result<(), LiveKitError>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Remove participant from room
+    /// handler.remove_participant("my-room", "user-123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_participant(
+        &self,
+        room_name: &str,
+        identity: &str,
+    ) -> Result<(), LiveKitError> {
+        self.room_client
+            .remove_participant(room_name, identity)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to remove participant: {e}"))
+            })
+    }
+
+    /// Get detailed information about a specific LiveKit room including participants
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    ///
+    /// # Returns
+    /// * `Result<(proto::Room, Vec<proto::ParticipantInfo>), LiveKitError>` - Room info and participants or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Get room details with participants
+    /// let (room, participants) = handler.get_room_details("my-room").await?;
+    /// println!("Room: {}, Participants: {}", room.name, participants.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_room_details(
+        &self,
+        room_name: &str,
+    ) -> Result<(proto::Room, Vec<proto::ParticipantInfo>), LiveKitError> {
+        // Get room info by querying with specific room name
+        let rooms = self
+            .room_client
+            .list_rooms(vec![room_name.to_string()])
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to get room: {e}")))?;
+
+        let room = rooms.into_iter().next().ok_or_else(|| {
+            LiveKitError::ConnectionFailed(format!("Room '{}' not found", room_name))
+        })?;
+
+        // Get participants in the room
+        let participants = self
+            .room_client
+            .list_participants(room_name)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to list participants: {e}"))
+            })?;
+
+        Ok((room, participants))
+    }
+
+    /// Mute or unmute a participant's published track
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Identity of the participant
+    /// * `track_sid` - Session ID of the track to mute/unmute
+    /// * `muted` - True to mute, false to unmute
+    ///
+    /// # Returns
+    /// * `Result<proto::TrackInfo, LiveKitError>` - Updated track info or error
+    pub async fn mute_participant_track(
+        &self,
+        room_name: &str,
+        identity: &str,
+        track_sid: &str,
+        muted: bool,
+    ) -> Result<proto::TrackInfo, LiveKitError> {
+        self.room_client
+            .mute_published_track(room_name, identity, track_sid, muted)
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to mute track: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -796,5 +962,83 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Failed to list participants"));
+    }
+
+    #[tokio::test]
+    async fn test_list_rooms_with_invalid_server() {
+        // This test validates that list_rooms fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.list_rooms(None).await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to list rooms"));
+    }
+
+    #[tokio::test]
+    async fn test_list_rooms_with_prefix_invalid_server() {
+        // This test validates that list_rooms with prefix fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.list_rooms(Some("project1_")).await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to list rooms"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_participant_with_invalid_server() {
+        // This test validates that remove_participant fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler
+            .remove_participant("test-room", "test-participant")
+            .await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to remove participant"));
+    }
+
+    #[tokio::test]
+    async fn test_get_room_details_with_invalid_server() {
+        // This test validates that get_room_details fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.get_room_details("test-room").await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to get room"));
     }
 }
