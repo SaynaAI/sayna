@@ -157,6 +157,205 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   - `400 Bad Request` when any field is empty.
   - `500 Internal Server Error` if LiveKit credentials are not configured or token generation fails.
 
+#### `GET /livekit/rooms`
+- **Purpose**: List all LiveKit rooms belonging to the authenticated tenant. Rooms are filtered by the `auth.id` prefix for tenant isolation.
+- **Success** `200 OK`:
+  ```json
+  {
+    "rooms": [
+      {
+        "name": "project1_conversation-room-123",
+        "num_participants": 2,
+        "creation_time": 1703123456
+      }
+    ]
+  }
+  ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `rooms` | array | List of rooms belonging to the authenticated client. |
+| `rooms[].name` | string | The full room name (includes tenant prefix). |
+| `rooms[].num_participants` | integer | Number of current participants in the room. |
+| `rooms[].creation_time` | integer | Room creation time (Unix timestamp in seconds). |
+
+- **Failure**:
+  - `500 Internal Server Error` if LiveKit credentials are not configured or listing fails.
+
+#### `GET /livekit/rooms/{room_name}`
+- **Purpose**: Get detailed information about a specific LiveKit room including all current participants. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Path Parameters**:
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `room_name` | string | Name of the room to retrieve (without tenant prefix). |
+
+- **Success** `200 OK`:
+  ```json
+  {
+    "sid": "RM_xyz789",
+    "name": "project1_conversation-room-123",
+    "num_participants": 2,
+    "max_participants": 10,
+    "creation_time": 1703123456,
+    "metadata": "",
+    "active_recording": false,
+    "participants": [
+      {
+        "sid": "PA_abc123",
+        "identity": "user-alice-456",
+        "name": "Alice Smith",
+        "state": "ACTIVE",
+        "kind": "STANDARD",
+        "joined_at": 1703123456,
+        "metadata": "",
+        "attributes": {},
+        "is_publisher": true
+      }
+    ]
+  }
+  ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `sid` | string | Unique session ID for the room. |
+| `name` | string | The full room name (includes tenant prefix). |
+| `num_participants` | integer | Number of current participants. |
+| `max_participants` | integer | Maximum allowed participants (0 = no limit). |
+| `creation_time` | integer | Room creation time (Unix timestamp in seconds). |
+| `metadata` | string | User-specified metadata for the room. |
+| `active_recording` | boolean | Whether a recording is currently active. |
+| `participants` | array | List of participants currently in the room. |
+| `participants[].sid` | string | Unique session ID for the participant. |
+| `participants[].identity` | string | Unique identifier provided when connecting. |
+| `participants[].name` | string | Display name of the participant. |
+| `participants[].state` | string | Participant state: `JOINING`, `JOINED`, `ACTIVE`, `DISCONNECTED`, or `UNKNOWN`. |
+| `participants[].kind` | string | Participant kind: `STANDARD`, `AGENT`, `SIP`, `EGRESS`, `INGRESS`, or `UNKNOWN`. |
+| `participants[].joined_at` | integer | Timestamp when participant joined (Unix timestamp in seconds). |
+| `participants[].metadata` | string | User-specified metadata for the participant. |
+| `participants[].attributes` | object | User-specified attributes (key-value pairs). |
+| `participants[].is_publisher` | boolean | Whether the participant is publishing audio/video. |
+
+- **Failure**:
+  - `400 Bad Request` when room name is empty.
+  - `404 Not Found` when the room does not exist.
+  - `500 Internal Server Error` if LiveKit credentials are not configured.
+
+#### `DELETE /livekit/participant`
+- **Purpose**: Remove a participant from a LiveKit room, forcibly disconnecting them. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Note**: This does not invalidate the participant's token. To prevent rejoining, use short-lived tokens.
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `participant_identity` | string | Yes | The identity of the participant to remove. |
+
+- **Success** `200 OK`:
+  ```json
+  {
+    "status": "removed",
+    "room_name": "project1_conversation-room-123",
+    "participant_identity": "user-alice-456"
+  }
+  ```
+
+- **Failure**:
+  - `400 Bad Request` when room name or participant identity is empty.
+  - `404 Not Found` when the room or participant does not exist.
+  - `500 Internal Server Error` if LiveKit credentials are not configured or removal fails.
+
+**Error response format**:
+```json
+{
+  "error": "Participant 'user-123' not found in room",
+  "code": "PARTICIPANT_NOT_FOUND"
+}
+```
+
+| Error Code | Description |
+| --- | --- |
+| `INVALID_REQUEST` | Empty room name or participant identity. |
+| `PARTICIPANT_NOT_FOUND` | Room or participant not found. |
+| `LIVEKIT_NOT_CONFIGURED` | LiveKit service not configured. |
+| `REMOVAL_FAILED` | Failed to remove participant. |
+
+#### `POST /livekit/participant/mute`
+- **Purpose**: Mute or unmute a participant's published track. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `participant_identity` | string | Yes | The identity of the participant whose track to mute. |
+| `track_sid` | string | Yes | The session ID of the track to mute/unmute. |
+| `muted` | boolean | Yes | `true` to mute, `false` to unmute. |
+
+- **Success** `200 OK`:
+  ```json
+  {
+    "room_name": "project1_conversation-room-123",
+    "participant_identity": "user-alice-456",
+    "track_sid": "TR_abc123",
+    "muted": true
+  }
+  ```
+
+- **Failure**:
+  - `400 Bad Request` when any required field is empty.
+  - `404 Not Found` when the room, participant, or track does not exist.
+  - `500 Internal Server Error` if LiveKit credentials are not configured or mute operation fails.
+
+**Error response format**: Same as `DELETE /livekit/participant`.
+
+#### `POST /sip/transfer`
+- **Purpose**: Initiate a SIP REFER transfer for a participant in a LiveKit room. The transfer moves an ongoing SIP call to a different phone number.
+- **Note**: Only SIP participants can be transferred. A successful response indicates the transfer has been **initiated**, not necessarily completed.
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `participant_identity` | string | Yes | The identity of the SIP participant to transfer. |
+| `transfer_to` | string | Yes | Phone number to transfer to. Supports international (+1234567890), national (07123456789), or extensions (1234). |
+
+- **Success** `200 OK`:
+  ```json
+  {
+    "status": "initiated",
+    "room_name": "project1_call-room-123",
+    "participant_identity": "sip_participant_456",
+    "transfer_to": "tel:+15551234567"
+  }
+  ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | `initiated` or `completed`. |
+| `room_name` | string | The normalized room name. |
+| `participant_identity` | string | The identity of the transferred participant. |
+| `transfer_to` | string | The normalized phone number with `tel:` prefix. |
+
+- **Failure**:
+  - `400 Bad Request` when phone number is invalid or fields are empty.
+  - `404 Not Found` when participant is not found or is not a SIP participant.
+  - `500 Internal Server Error` if LiveKit SIP service is not configured or transfer fails.
+
+**Error response format**:
+```json
+{
+  "error": "Participant 'sip_123' not found or is not a SIP participant",
+  "code": "PARTICIPANT_NOT_FOUND"
+}
+```
+
+| Error Code | Description |
+| --- | --- |
+| `INVALID_PHONE_NUMBER` | Invalid phone number format. |
+| `PARTICIPANT_NOT_FOUND` | Participant not found or not a SIP participant. |
+| `LIVEKIT_NOT_CONFIGURED` | LiveKit SIP service not configured. |
+| `TRANSFER_FAILED` | Transfer operation failed. |
+
 #### `GET /sip/hooks`
 - **Purpose**: List all configured SIP webhook hooks from the runtime cache.
 - **Behavior**: Hosts defined in the application configuration always appear and override any cached host with the same name.
