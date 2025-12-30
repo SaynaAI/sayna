@@ -145,8 +145,7 @@ jobs:
           ---
           Once merged, a Git tag and GitHub Release will be created automatically." \
             --base master \
-            --head release/v${{ steps.version.outputs.new_version }} \
-            --label release
+            --head release/v${{ steps.version.outputs.new_version }}
 
   # =============================================================================
   # Job 2: Create Git tag when Release PR is merged
