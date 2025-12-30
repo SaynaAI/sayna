@@ -75,16 +75,18 @@ jobs:
           echo "New version: $new_version"
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
-      - name: Update version in Cargo.toml
-        run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new_version }}"/' Cargo.toml
-          echo "Updated Cargo.toml to version ${{ steps.version.outputs.new_version }}"
-          grep '^version = ' Cargo.toml
+      - name: Install release-plz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz@0.3.150
 
       - name: Run release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
+        run: |
+          release-plz release-pr \
+            --git-token "${{ secrets.GITHUB_TOKEN }}" \
+            --repo-url "https://github.com/${{ github.repository }}" \
+            -p sayna \
+            --release-version "${{ steps.version.outputs.new_version }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
