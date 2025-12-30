@@ -584,6 +584,49 @@ impl LiveKitRoomHandler {
 
         Ok(rooms)
     }
+
+    /// Remove a participant from a LiveKit room
+    ///
+    /// This forcibly disconnects the participant from the room. Note that this
+    /// does not invalidate the participant's token - they can rejoin if they
+    /// still have a valid token.
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Identity of the participant to remove
+    ///
+    /// # Returns
+    /// * `Result<(), LiveKitError>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Remove participant from room
+    /// handler.remove_participant("my-room", "user-123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_participant(
+        &self,
+        room_name: &str,
+        identity: &str,
+    ) -> Result<(), LiveKitError> {
+        self.room_client
+            .remove_participant(room_name, identity)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to remove participant: {e}"))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -881,5 +924,26 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Failed to list rooms"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_participant_with_invalid_server() {
+        // This test validates that remove_participant fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler
+            .remove_participant("test-room", "test-participant")
+            .await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to remove participant"));
     }
 }

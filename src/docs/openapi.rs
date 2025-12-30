@@ -9,7 +9,10 @@ use utoipa::OpenApi;
 use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
-    livekit::{TokenRequest, TokenResponse},
+    livekit::{
+        ListRoomsResponse, RemoveParticipantErrorResponse, RemoveParticipantRequest,
+        RemoveParticipantResponse, RoomInfo, TokenRequest, TokenResponse,
+    },
     sip::{
         DeleteSipHooksRequest, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
         SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
@@ -43,6 +46,8 @@ use crate::handlers::{
         crate::handlers::voices::list_voices,
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
+        crate::handlers::livekit::list_rooms,
+        crate::handlers::livekit::remove_participant,
         crate::handlers::recording::download_recording,
         crate::handlers::sip::list_sip_hooks,
         crate::handlers::sip::update_sip_hooks,
@@ -56,6 +61,12 @@ use crate::handlers::{
         SpeakRequest,
         TokenRequest,
         TokenResponse,
+        // LiveKit room types
+        ListRoomsResponse,
+        RoomInfo,
+        RemoveParticipantRequest,
+        RemoveParticipantResponse,
+        RemoveParticipantErrorResponse,
         // SIP hooks types
         SipHooksRequest,
         SipHooksResponse,

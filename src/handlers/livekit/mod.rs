@@ -3,19 +3,26 @@
 //! This module provides REST API endpoints for LiveKit-related operations:
 //! - Token generation for participant authentication
 //! - Room listing for tenant-isolated room management
+//! - Participant management (removal/kick)
 //! - Webhook handling for LiveKit events
 //!
 //! # Endpoints
 //!
 //! - `POST /livekit/token` - Generate JWT tokens for LiveKit room access
 //! - `GET /livekit/rooms` - List LiveKit rooms for the authenticated tenant
+//! - `DELETE /livekit/participant` - Remove a participant from a room
 //! - `POST /livekit/webhook` - Receive and process LiveKit webhook events
 
+mod participants;
 mod rooms;
 mod token;
 mod webhook;
 
 // Re-export handlers for clean API access
+pub use participants::{
+    RemoveParticipantErrorResponse, RemoveParticipantRequest, RemoveParticipantResponse,
+    remove_participant,
+};
 pub use rooms::{ListRoomsResponse, RoomInfo, list_rooms};
 pub use token::{TokenRequest, TokenResponse, generate_token};
 pub use webhook::{
@@ -24,6 +31,8 @@ pub use webhook::{
 };
 
 // Re-export utoipa-generated path types for OpenAPI spec generation
+#[cfg(feature = "openapi")]
+pub use participants::__path_remove_participant;
 #[cfg(feature = "openapi")]
 pub use rooms::__path_list_rooms;
 #[cfg(feature = "openapi")]

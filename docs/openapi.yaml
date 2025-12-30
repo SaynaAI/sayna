@@ -30,6 +30,102 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /livekit/participant:
+    delete:
+      tags:
+      - livekit
+      summary: Handler for DELETE /livekit/participant endpoint
+      description: |-
+        Removes a participant from a LiveKit room, forcibly disconnecting them.
+        The room name is normalized with the auth.id prefix for tenant isolation,
+        ensuring users can only remove participants from their own rooms.
+
+        Note: This does not invalidate the participant's token. To prevent rejoining,
+        use short-lived tokens and avoid issuing new tokens to removed participants.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+        * `request` - Request with room name and participant identity
+
+        # Returns
+        * `Response` - JSON response with removal status or error
+
+        # Errors
+        * 400 Bad Request - Empty room name or participant identity
+        * 404 Not Found - Participant not found in the room
+        * 500 Internal Server Error - LiveKit not configured or removal failed
+
+        # Flow
+        1. Validate request fields are not empty
+        2. Normalize room name with auth.id prefix
+        3. Verify participant exists in the room
+        4. Remove the participant
+        5. Return success or appropriate error
+      operationId: remove_participant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveParticipantRequest'
+        required: true
+      responses:
+        '200':
+          description: Participant removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantResponse'
+        '400':
+          description: Invalid request (empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '404':
+          description: Participant not found in room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '500':
+          description: LiveKit not configured or removal failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+      security:
+      - bearer_auth: []
+  /livekit/rooms:
+    get:
+      tags:
+      - livekit
+      summary: Handler for GET /livekit/rooms endpoint
+      description: |-
+        Lists all LiveKit rooms belonging to the authenticated client.
+        Rooms are filtered by the auth.id prefix for tenant isolation.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+
+        # Returns
+        * `Response` - JSON response with rooms list or error status
+
+        # Errors
+        * 500 Internal Server Error - LiveKit service not configured or API call failed
+      operationId: list_rooms
+      responses:
+        '200':
+          description: Rooms listed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListRoomsResponse'
+        '500':
+          description: LiveKit service not configured or failed to list rooms
+      security:
+      - bearer_auth: []
   /livekit/token:
     post:
       tags:
@@ -502,6 +598,36 @@ components:
             enum:
             - sip_transfer
       description: WebSocket message types for incoming messages
+    ListRoomsResponse:
+      type: object
+      description: |-
+        Response containing the list of LiveKit rooms
+
+        # Example
+        ```json
+        {
+          "rooms": [
+            {
+              "name": "project1_room-1",
+              "num_participants": 2,
+              "creation_time": 1703123456
+            },
+            {
+              "name": "project1_room-2",
+              "num_participants": 0,
+              "creation_time": 1703123789
+            }
+          ]
+        }
+        ```
+      required:
+      - rooms
+      properties:
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomInfo'
+          description: List of rooms belonging to the authenticated client
     LiveKitWebSocketConfig:
       type: object
       description: LiveKit configuration for WebSocket messages
@@ -709,6 +835,117 @@ components:
           type: string
           description: Word to replace
           example: API
+    RemoveParticipantErrorResponse:
+      type: object
+      description: |-
+        Error response for participant removal failures
+
+        # Example
+        ```json
+        {
+          "error": "Participant 'user-123' not found in room",
+          "code": "PARTICIPANT_NOT_FOUND"
+        }
+        ```
+      required:
+      - error
+      - code
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: PARTICIPANT_NOT_FOUND
+        error:
+          type: string
+          description: Human-readable error message
+          example: Participant not found in room
+    RemoveParticipantRequest:
+      type: object
+      description: |-
+        Request body for removing a participant from a LiveKit room
+
+        # Example
+        ```json
+        {
+          "room_name": "conversation-room-123",
+          "participant_identity": "user-alice-456"
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the participant to remove
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The LiveKit room name where the participant is connected
+          example: conversation-room-123
+    RemoveParticipantResponse:
+      type: object
+      description: |-
+        Response for a successful participant removal
+
+        # Example
+        ```json
+        {
+          "status": "removed",
+          "room_name": "project1_conversation-room-123",
+          "participant_identity": "user-alice-456"
+        }
+        ```
+      required:
+      - status
+      - room_name
+      - participant_identity
+      properties:
+        participant_identity:
+          type: string
+          description: The identity of the removed participant
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The normalized room name (with tenant prefix)
+          example: project1_conversation-room-123
+        status:
+          type: string
+          description: Status of the removal operation
+          example: removed
+    RoomInfo:
+      type: object
+      description: |-
+        Information about a LiveKit room
+
+        # Example
+        ```json
+        {
+          "name": "project1_conversation-room-123",
+          "num_participants": 2,
+          "creation_time": 1703123456
+        }
+        ```
+      required:
+      - name
+      - num_participants
+      - creation_time
+      properties:
+        creation_time:
+          type: integer
+          format: int64
+          description: Room creation time (Unix timestamp in seconds)
+          example: 1703123456
+        name:
+          type: string
+          description: The full room name (includes tenant prefix)
+          example: project1_conversation-room-123
+        num_participants:
+          type: integer
+          format: int32
+          description: Number of current participants in the room
+          example: 2
+          minimum: 0
     SIPTransferErrorResponse:
       type: object
       description: |-
