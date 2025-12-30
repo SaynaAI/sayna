@@ -2,13 +2,20 @@
 
 All notable changes to Sayna will be documented in this file.
 
-## [0.1.1] - 2025-12-30
+## [0.1.2] - 2025-12-30
+
+### Miscellaneous
+
+- Release v0.1.1 by @github-actions[bot]
+
 
 ### Bug Fixes
 
 - Adding Livekit Room Controls based on Sayna Token by @tigranbs in [#7](https://github.com/saynaai/sayna/pull/7)
 
 - Improved release workflow with manual version control by @tigranbs
+
+- Add actions:write permission for workflow dispatch by @tigranbs
 
 ## [0.1.0] - 2025-12-21
 
