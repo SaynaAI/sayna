@@ -73,16 +73,9 @@ jobs:
 
       - name: Generate changelog
         run: |
-          git-cliff --config cliff.toml --unreleased --tag v${{ steps.version.outputs.new_version }} -o CHANGELOG.md.new
-
-          if [ -f CHANGELOG.md ]; then
-            cat CHANGELOG.md.new > CHANGELOG.md.tmp
-            tail -n +2 CHANGELOG.md >> CHANGELOG.md.tmp 2>/dev/null || true
-            mv CHANGELOG.md.tmp CHANGELOG.md
-          else
-            mv CHANGELOG.md.new CHANGELOG.md
-          fi
-          rm -f CHANGELOG.md.new
+          # Generate full changelog with all releases including the new version
+          git-cliff --config cliff.toml --tag v${{ steps.version.outputs.new_version }} -o CHANGELOG.md
+          echo "Generated CHANGELOG.md"
 
       - name: Commit and tag
         run: |
@@ -96,13 +89,19 @@ jobs:
           git push origin master
           git push origin "v${{ steps.version.outputs.new_version }}"
 
-      - name: Create GitHub Release
+      - name: Trigger Release Build workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v${{ steps.version.outputs.new_version }}" \
-            --title "v${{ steps.version.outputs.new_version }}" \
-            --generate-notes
+          gh workflow run release.yml -f tag="v${{ steps.version.outputs.new_version }}"
+          echo "Triggered release.yml for v${{ steps.version.outputs.new_version }}"
+
+      - name: Trigger Docker Build workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run docker.yml -f version="${{ steps.version.outputs.new_version }}"
+          echo "Triggered docker.yml for v${{ steps.version.outputs.new_version }}"
 
       - name: Summary
         run: |
@@ -111,4 +110,5 @@ jobs:
           echo "✅ Version bumped: ${{ steps.version.outputs.current }} → ${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Changelog updated" >> $GITHUB_STEP_SUMMARY
           echo "✅ Tag created: v${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "✅ GitHub Release created" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Release build workflow triggered" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Docker build workflow triggered" >> $GITHUB_STEP_SUMMARY

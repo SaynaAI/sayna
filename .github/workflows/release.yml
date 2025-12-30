@@ -11,6 +11,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v1.0.0)"
+        required: true
+        type: string
 
 # Permissions required for release creation and attestations
 permissions:
@@ -31,6 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -38,8 +45,15 @@ jobs:
       - name: Extract and validate version
         id: version
         run: |
+          # Get tag from event (push or workflow_dispatch)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="${{ inputs.tag }}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+          fi
+
           # Extract version from Git tag (remove 'v' prefix)
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_NAME#v}"
           echo "Git tag version: $TAG_VERSION"
 
           # Extract version from Cargo.toml
@@ -55,6 +69,7 @@ jobs:
 
           echo "Version validated: $TAG_VERSION"
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
   # =============================================================================
   # Stage 2: Create draft GitHub Release with changelog
@@ -69,6 +84,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.validate.outputs.tag }}
           fetch-depth: 0 # Full history for changelog generation
 
       - name: Install git-cliff
@@ -96,11 +112,11 @@ jobs:
         id: create
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           name: Sayna v${{ needs.validate.outputs.version }}
           body_path: RELEASE_CHANGELOG.md
           draft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(needs.validate.outputs.tag, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -116,7 +132,7 @@ jobs:
   # These dependencies are easier to satisfy with native compilation.
   build-linux:
     name: Build Linux (${{ matrix.target }})
-    needs: create-release
+    needs: [validate, create-release]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     strategy:
@@ -132,6 +148,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Install system dependencies
         run: |
@@ -159,7 +177,7 @@ jobs:
       - name: Prepare archive
         id: archive
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ needs.validate.outputs.tag }}"
           VERSION="${VERSION#v}"
           ARCHIVE_NAME="sayna-${VERSION}-${{ matrix.target }}"
           ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
@@ -192,7 +210,7 @@ jobs:
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           draft: true
           files: |
             ${{ steps.archive.outputs.archive }}
@@ -207,12 +225,14 @@ jobs:
   # runners (macos-*-large). Standard free runners are ARM64 only since macOS 14.
   build-macos:
     name: Build macOS (Apple Silicon)
-    needs: build-linux
+    needs: [validate, build-linux]
     runs-on: macos-15
     timeout-minutes: 300
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -232,7 +252,7 @@ jobs:
       - name: Prepare archive
         id: archive
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ needs.validate.outputs.tag }}"
           VERSION="${VERSION#v}"
           ARCHIVE_NAME="sayna-${VERSION}-aarch64-apple-darwin"
           ARCHIVE_FILE="${ARCHIVE_NAME}.tar.gz"
@@ -265,7 +285,7 @@ jobs:
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           draft: true
           files: |
             ${{ steps.archive.outputs.archive }}
@@ -278,13 +298,15 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build Windows
-    needs: build-macos
+    needs: [validate, build-macos]
     runs-on: windows-latest
     timeout-minutes: 300
     # Note: Only x86_64 is supported - webrtc-sys doesn't have prebuilt binaries for i686
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -305,7 +327,7 @@ jobs:
         id: archive
         shell: pwsh
         run: |
-          $Version = "${{ github.ref_name }}" -replace '^v', ''
+          $Version = "${{ needs.validate.outputs.tag }}" -replace '^v', ''
           $ArchiveName = "sayna-${Version}-x86_64-pc-windows-msvc"
           $ArchiveFile = "${ArchiveName}.zip"
 
@@ -340,7 +362,7 @@ jobs:
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           draft: true
           files: |
             ${{ steps.archive.outputs.archive }}
@@ -353,7 +375,7 @@ jobs:
   # =============================================================================
   trigger-docker:
     name: Trigger Docker Build
-    needs: [build-linux, build-macos, build-windows]
+    needs: [validate, build-linux, build-macos, build-windows]
     runs-on: ubuntu-24.04
     steps:
       - name: Trigger Docker workflow
@@ -366,7 +388,10 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 workflow_id: 'docker.yml',
-                ref: context.ref
+                ref: 'master',
+                inputs: {
+                  version: '${{ needs.validate.outputs.tag }}'
+                }
               });
               console.log('Docker workflow triggered successfully');
             } catch (error) {
@@ -386,7 +411,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
