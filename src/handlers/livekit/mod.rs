@@ -23,7 +23,9 @@ pub use participants::{
     RemoveParticipantErrorResponse, RemoveParticipantRequest, RemoveParticipantResponse,
     remove_participant,
 };
-pub use rooms::{ListRoomsResponse, RoomInfo, list_rooms};
+pub use rooms::{
+    ListRoomsResponse, ParticipantInfo, RoomDetailsResponse, RoomInfo, get_room_details, list_rooms,
+};
 pub use token::{TokenRequest, TokenResponse, generate_token};
 pub use webhook::{
     SIPHookEvent, SIPHookParticipant, SIPHookRoom, SipForwardingError, extract_sip_attributes,
@@ -34,6 +36,6 @@ pub use webhook::{
 #[cfg(feature = "openapi")]
 pub use participants::__path_remove_participant;
 #[cfg(feature = "openapi")]
-pub use rooms::__path_list_rooms;
+pub use rooms::{__path_get_room_details, __path_list_rooms};
 #[cfg(feature = "openapi")]
 pub use token::__path_generate_token;

@@ -10,8 +10,9 @@ use crate::core::tts::Pronunciation;
 use crate::handlers::{
     api::HealthResponse,
     livekit::{
-        ListRoomsResponse, RemoveParticipantErrorResponse, RemoveParticipantRequest,
-        RemoveParticipantResponse, RoomInfo, TokenRequest, TokenResponse,
+        ListRoomsResponse, ParticipantInfo, RemoveParticipantErrorResponse,
+        RemoveParticipantRequest, RemoveParticipantResponse, RoomDetailsResponse, RoomInfo,
+        TokenRequest, TokenResponse,
     },
     sip::{
         DeleteSipHooksRequest, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
@@ -47,6 +48,7 @@ use crate::handlers::{
         crate::handlers::speak::speak_handler,
         crate::handlers::livekit::generate_token,
         crate::handlers::livekit::list_rooms,
+        crate::handlers::livekit::get_room_details,
         crate::handlers::livekit::remove_participant,
         crate::handlers::recording::download_recording,
         crate::handlers::sip::list_sip_hooks,
@@ -64,6 +66,8 @@ use crate::handlers::{
         // LiveKit room types
         ListRoomsResponse,
         RoomInfo,
+        RoomDetailsResponse,
+        ParticipantInfo,
         RemoveParticipantRequest,
         RemoveParticipantResponse,
         RemoveParticipantErrorResponse,
