@@ -284,3 +284,222 @@ pub async fn remove_participant(
         }
     }
 }
+
+/// Request body for muting/unmuting a participant's track
+///
+/// # Example
+/// ```json
+/// {
+///   "room_name": "conversation-room-123",
+///   "participant_identity": "user-alice-456",
+///   "track_sid": "TR_abc123",
+///   "muted": true
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MuteParticipantRequest {
+    /// The LiveKit room name where the participant is connected
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
+    pub room_name: String,
+
+    /// The identity of the participant whose track to mute
+    #[cfg_attr(feature = "openapi", schema(example = "user-alice-456"))]
+    pub participant_identity: String,
+
+    /// The session ID of the track to mute/unmute
+    #[cfg_attr(feature = "openapi", schema(example = "TR_abc123"))]
+    pub track_sid: String,
+
+    /// True to mute, false to unmute
+    #[cfg_attr(feature = "openapi", schema(example = true))]
+    pub muted: bool,
+}
+
+/// Response for a successful mute/unmute operation
+///
+/// # Example
+/// ```json
+/// {
+///   "room_name": "project1_conversation-room-123",
+///   "participant_identity": "user-alice-456",
+///   "track_sid": "TR_abc123",
+///   "muted": true
+/// }
+/// ```
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MuteParticipantResponse {
+    /// The normalized room name (with tenant prefix)
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = "project1_conversation-room-123")
+    )]
+    pub room_name: String,
+
+    /// The identity of the participant
+    #[cfg_attr(feature = "openapi", schema(example = "user-alice-456"))]
+    pub participant_identity: String,
+
+    /// The session ID of the track
+    #[cfg_attr(feature = "openapi", schema(example = "TR_abc123"))]
+    pub track_sid: String,
+
+    /// Current muted state
+    #[cfg_attr(feature = "openapi", schema(example = true))]
+    pub muted: bool,
+}
+
+/// Handler for POST /livekit/participant/mute endpoint
+///
+/// Mutes or unmutes a participant's published track. The room name is
+/// normalized with the auth.id prefix for tenant isolation.
+///
+/// # Arguments
+/// * `state` - Shared application state containing LiveKit configuration
+/// * `auth` - Authentication context from middleware
+/// * `request` - Request with room name, participant identity, track_sid, and muted state
+///
+/// # Returns
+/// * `Response` - JSON response with mute status or error
+///
+/// # Errors
+/// * 400 Bad Request - Empty fields in request
+/// * 404 Not Found - Room or participant not found
+/// * 500 Internal Server Error - LiveKit not configured or mute operation failed
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/livekit/participant/mute",
+        request_body = MuteParticipantRequest,
+        responses(
+            (status = 200, description = "Track muted/unmuted successfully", body = MuteParticipantResponse),
+            (status = 400, description = "Invalid request (empty fields)", body = RemoveParticipantErrorResponse),
+            (status = 404, description = "Room or participant not found", body = RemoveParticipantErrorResponse),
+            (status = 500, description = "LiveKit not configured or mute failed", body = RemoveParticipantErrorResponse)
+        ),
+        security(
+            ("bearer_auth" = [])
+        ),
+        tag = "livekit"
+    )
+)]
+pub async fn mute_participant(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<Auth>,
+    Json(request): Json<MuteParticipantRequest>,
+) -> Response {
+    // Validate request fields
+    if request.room_name.trim().is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Room name cannot be empty",
+            RemoveParticipantErrorCode::InvalidRequest,
+        );
+    }
+
+    if request.participant_identity.trim().is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Participant identity cannot be empty",
+            RemoveParticipantErrorCode::InvalidRequest,
+        );
+    }
+
+    if request.track_sid.trim().is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Track SID cannot be empty",
+            RemoveParticipantErrorCode::InvalidRequest,
+        );
+    }
+
+    // Normalize room name with auth prefix for tenant isolation
+    let room_name = auth.normalize_room_name(&request.room_name);
+
+    info!(
+        auth_id = ?auth.id,
+        room = %request.room_name,
+        normalized_room = %room_name,
+        participant = %request.participant_identity,
+        track_sid = %request.track_sid,
+        muted = %request.muted,
+        "Mute participant track request"
+    );
+
+    // Check LiveKit room handler is configured
+    let room_handler = match &state.livekit_room_handler {
+        Some(handler) => handler,
+        None => {
+            error!("LiveKit service not configured");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "LiveKit service not configured",
+                RemoveParticipantErrorCode::LiveKitNotConfigured,
+            );
+        }
+    };
+
+    // Mute/unmute the track
+    match room_handler
+        .mute_participant_track(
+            &room_name,
+            &request.participant_identity,
+            &request.track_sid,
+            request.muted,
+        )
+        .await
+    {
+        Ok(track_info) => {
+            info!(
+                room = %room_name,
+                participant = %request.participant_identity,
+                track_sid = %request.track_sid,
+                muted = %track_info.muted,
+                "Track mute state updated"
+            );
+            (
+                StatusCode::OK,
+                Json(MuteParticipantResponse {
+                    room_name,
+                    participant_identity: request.participant_identity,
+                    track_sid: request.track_sid,
+                    muted: track_info.muted,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("not found") {
+                warn!(
+                    room = %room_name,
+                    participant = %request.participant_identity,
+                    track_sid = %request.track_sid,
+                    "Track or participant not found"
+                );
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    &format!(
+                        "Track '{}' or participant '{}' not found in room '{}'",
+                        request.track_sid, request.participant_identity, request.room_name
+                    ),
+                    RemoveParticipantErrorCode::ParticipantNotFound,
+                );
+            }
+            error!(
+                room = %room_name,
+                participant = %request.participant_identity,
+                track_sid = %request.track_sid,
+                error = %e,
+                "Failed to mute track"
+            );
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to mute track: {}", e),
+                RemoveParticipantErrorCode::RemovalFailed,
+            )
+        }
+    }
+}

@@ -96,6 +96,61 @@ paths:
                 $ref: '#/components/schemas/RemoveParticipantErrorResponse'
       security:
       - bearer_auth: []
+  /livekit/participant/mute:
+    post:
+      tags:
+      - livekit
+      summary: Handler for POST /livekit/participant/mute endpoint
+      description: |-
+        Mutes or unmutes a participant's published track. The room name is
+        normalized with the auth.id prefix for tenant isolation.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit configuration
+        * `auth` - Authentication context from middleware
+        * `request` - Request with room name, participant identity, track_sid, and muted state
+
+        # Returns
+        * `Response` - JSON response with mute status or error
+
+        # Errors
+        * 400 Bad Request - Empty fields in request
+        * 404 Not Found - Room or participant not found
+        * 500 Internal Server Error - LiveKit not configured or mute operation failed
+      operationId: mute_participant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MuteParticipantRequest'
+        required: true
+      responses:
+        '200':
+          description: Track muted/unmuted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MuteParticipantResponse'
+        '400':
+          description: Invalid request (empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '404':
+          description: Room or participant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+        '500':
+          description: LiveKit not configured or mute failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveParticipantErrorResponse'
+      security:
+      - bearer_auth: []
   /livekit/rooms:
     get:
       tags:
@@ -706,6 +761,78 @@ components:
           - 'null'
           description: Sayna AI participant display name (defaults to "Sayna AI")
           example: Sayna AI
+    MuteParticipantRequest:
+      type: object
+      description: |-
+        Request body for muting/unmuting a participant's track
+
+        # Example
+        ```json
+        {
+          "room_name": "conversation-room-123",
+          "participant_identity": "user-alice-456",
+          "track_sid": "TR_abc123",
+          "muted": true
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - track_sid
+      - muted
+      properties:
+        muted:
+          type: boolean
+          description: True to mute, false to unmute
+          example: true
+        participant_identity:
+          type: string
+          description: The identity of the participant whose track to mute
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The LiveKit room name where the participant is connected
+          example: conversation-room-123
+        track_sid:
+          type: string
+          description: The session ID of the track to mute/unmute
+          example: TR_abc123
+    MuteParticipantResponse:
+      type: object
+      description: |-
+        Response for a successful mute/unmute operation
+
+        # Example
+        ```json
+        {
+          "room_name": "project1_conversation-room-123",
+          "participant_identity": "user-alice-456",
+          "track_sid": "TR_abc123",
+          "muted": true
+        }
+        ```
+      required:
+      - room_name
+      - participant_identity
+      - track_sid
+      - muted
+      properties:
+        muted:
+          type: boolean
+          description: Current muted state
+          example: true
+        participant_identity:
+          type: string
+          description: The identity of the participant
+          example: user-alice-456
+        room_name:
+          type: string
+          description: The normalized room name (with tenant prefix)
+          example: project1_conversation-room-123
+        track_sid:
+          type: string
+          description: The session ID of the track
+          example: TR_abc123
     OutgoingMessage:
       oneOf:
       - type: object

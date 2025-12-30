@@ -20,6 +20,7 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
         .route("/livekit/rooms", get(livekit::list_rooms))
         .route("/livekit/rooms/{room_name}", get(livekit::get_room_details))
         .route("/livekit/participant", delete(livekit::remove_participant))
+        .route("/livekit/participant/mute", post(livekit::mute_participant))
         .route("/recording/{stream_id}", get(recording::download_recording))
         // SIP hooks management
         .route(

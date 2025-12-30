@@ -680,6 +680,29 @@ impl LiveKitRoomHandler {
 
         Ok((room, participants))
     }
+
+    /// Mute or unmute a participant's published track
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `identity` - Identity of the participant
+    /// * `track_sid` - Session ID of the track to mute/unmute
+    /// * `muted` - True to mute, false to unmute
+    ///
+    /// # Returns
+    /// * `Result<proto::TrackInfo, LiveKitError>` - Updated track info or error
+    pub async fn mute_participant_track(
+        &self,
+        room_name: &str,
+        identity: &str,
+        track_sid: &str,
+        muted: bool,
+    ) -> Result<proto::TrackInfo, LiveKitError> {
+        self.room_client
+            .mute_published_track(room_name, identity, track_sid, muted)
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to mute track: {e}")))
+    }
 }
 
 #[cfg(test)]
