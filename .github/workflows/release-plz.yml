@@ -1,9 +1,5 @@
-# GitHub Actions workflow for manual version management
-# Manually trigger to create release PRs with specified version bump.
-#
-# Workflow:
-# 1. Manually trigger with version bump type -> Creates Release PR
-# 2. Merge Release PR -> Creates Git tag and GitHub Release
+# GitHub Actions workflow for manual releases
+# Manually trigger to bump version, update changelog, and create a release.
 
 name: Release
 
@@ -19,23 +15,13 @@ on:
           - patch
           - minor
           - major
-  pull_request:
-    types:
-      - closed
-    branches:
-      - master
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  # =============================================================================
-  # Job 1: Create Release PR with manual version bump
-  # =============================================================================
-  create-release-pr:
-    name: Create Release PR (${{ github.event.inputs.bump }})
-    if: github.event_name == 'workflow_dispatch'
+  release:
+    name: Release (${{ github.event.inputs.bump }})
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -47,14 +33,11 @@ jobs:
       - name: Calculate new version
         id: version
         run: |
-          # Get current version from Cargo.toml
           current=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Current version: $current"
 
-          # Parse version components
           IFS='.' read -r major minor patch <<< "$current"
 
-          # Bump based on input
           case "${{ github.event.inputs.bump }}" in
             major)
               new_version="$((major + 1)).0.0"
@@ -81,32 +64,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create release branch
-        run: |
-          # Delete remote branch if it exists from a previous failed run
-          git push origin --delete release/v${{ steps.version.outputs.new_version }} 2>/dev/null || true
-          git checkout -b release/v${{ steps.version.outputs.new_version }}
-
       - name: Update version in Cargo.toml
         run: |
           sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new_version }}"/' Cargo.toml
-          echo "Updated Cargo.toml:"
-          grep '^version = ' Cargo.toml
 
       - name: Update Cargo.lock
-        run: |
-          cargo update --workspace || true
+        run: cargo update --workspace || true
 
       - name: Generate changelog
         run: |
-          # Generate changelog for the new version
           git-cliff --config cliff.toml --unreleased --tag v${{ steps.version.outputs.new_version }} -o CHANGELOG.md.new
 
-          # If CHANGELOG.md exists, prepend new content; otherwise create it
           if [ -f CHANGELOG.md ]; then
-            # Remove the header from new changelog if it exists
             cat CHANGELOG.md.new > CHANGELOG.md.tmp
-            # Keep existing content after the new entries
             tail -n +2 CHANGELOG.md >> CHANGELOG.md.tmp 2>/dev/null || true
             mv CHANGELOG.md.tmp CHANGELOG.md
           else
@@ -114,90 +84,31 @@ jobs:
           fi
           rm -f CHANGELOG.md.new
 
-          echo "Generated CHANGELOG.md:"
-          head -50 CHANGELOG.md
-
-      - name: Commit changes
+      - name: Commit and tag
         run: |
           git add Cargo.toml CHANGELOG.md
           git add Cargo.lock 2>/dev/null || true
           git commit -m "chore: release v${{ steps.version.outputs.new_version }}"
+          git tag -a "v${{ steps.version.outputs.new_version }}" -m "Release v${{ steps.version.outputs.new_version }}"
 
-      - name: Push branch
+      - name: Push changes and tag
         run: |
-          git push origin release/v${{ steps.version.outputs.new_version }}
-
-      - name: Create Pull Request
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr create \
-            --title "Release v${{ steps.version.outputs.new_version }}" \
-            --body "## Release v${{ steps.version.outputs.new_version }}
-
-          This PR prepares the release of version **v${{ steps.version.outputs.new_version }}**.
-
-          ### Changes
-          - Version bump: ${{ steps.version.outputs.current }} → ${{ steps.version.outputs.new_version }}
-          - Updated CHANGELOG.md
-
-          ### Version Bump Type
-          **${{ github.event.inputs.bump }}**
-
-          ---
-          Once merged, a Git tag and GitHub Release will be created automatically." \
-            --base master \
-            --head release/v${{ steps.version.outputs.new_version }}
-
-  # =============================================================================
-  # Job 2: Create Git tag when Release PR is merged
-  # =============================================================================
-  create-tag:
-    name: Create Tag
-    if: |
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'release/')
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Get version from Cargo.toml
-        id: version
-        run: |
-          version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Version: $version"
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Create and push tag
-        run: |
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git push origin master
+          git push origin "v${{ steps.version.outputs.new_version }}"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Extract changelog for this version
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
+          gh release create "v${{ steps.version.outputs.new_version }}" \
+            --title "v${{ steps.version.outputs.new_version }}" \
             --generate-notes
 
       - name: Summary
         run: |
-          echo "## Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "## Release v${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** v${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The release workflow should now be triggered to build release artifacts." >> $GITHUB_STEP_SUMMARY
+          echo "✅ Version bumped: ${{ steps.version.outputs.current }} → ${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Changelog updated" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Tag created: v${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ GitHub Release created" >> $GITHUB_STEP_SUMMARY
