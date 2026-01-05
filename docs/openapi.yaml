@@ -299,6 +299,63 @@ paths:
           description: Recording storage not configured or unavailable
       security:
       - bearer_auth: []
+  /sip/call:
+    post:
+      tags:
+      - sip
+      summary: Handler for POST /sip/call endpoint
+      description: |-
+        Initiates an outbound SIP call through LiveKit.
+        The call is connected to the specified room as a SIP participant.
+
+        # Arguments
+        * `state` - Shared application state containing LiveKit handlers and config
+        * `auth` - Authentication context for room name normalization
+        * `request` - Call request with phone numbers and room details
+
+        # Returns
+        * `Response` - JSON response with call status or error
+
+        # Errors
+        * 400 Bad Request - Invalid phone number format or empty fields
+        * 500 Internal Server Error - LiveKit not configured, outbound address missing, or call failed
+
+        # Flow
+        1. Normalize room name with auth prefix for tenant isolation
+        2. Validate non-empty room name and participant identifiers
+        3. Validate phone number formats
+        4. Check SIP config exists and contains outbound_address
+        5. Check LiveKit SIP handler is available
+        6. Create outbound call (trunk is created/reused automatically)
+        7. Return success response with call identifiers
+      operationId: sip_call
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIPCallRequest'
+        required: true
+      responses:
+        '200':
+          description: Call initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPCallResponse'
+        '400':
+          description: Invalid request (bad phone number or empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPCallErrorResponse'
+        '500':
+          description: LiveKit not configured, outbound address missing, or call failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPCallErrorResponse'
+      security:
+      - bearer_auth: []
   /sip/hooks:
     get:
       tags:
@@ -1251,6 +1308,120 @@ components:
           description: Number of current participants in the room
           example: 2
           minimum: 0
+    SIPCallErrorResponse:
+      type: object
+      description: |-
+        Error response for SIP call failures
+
+        # Example
+        ```json
+        {
+          "error": "Outbound address not configured",
+          "code": "OUTBOUND_ADDRESS_NOT_CONFIGURED"
+        }
+        ```
+      required:
+      - error
+      - code
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: OUTBOUND_ADDRESS_NOT_CONFIGURED
+        error:
+          type: string
+          description: Human-readable error message
+          example: Outbound address not configured
+    SIPCallRequest:
+      type: object
+      description: |-
+        Request body for initiating an outbound SIP call
+
+        # Example
+        ```json
+        {
+          "room_name": "call-room-123",
+          "participant_name": "John Doe",
+          "participant_identity": "caller-456",
+          "from_phone_number": "+15105550123",
+          "to_phone_number": "+15551234567"
+        }
+        ```
+      required:
+      - room_name
+      - participant_name
+      - participant_identity
+      - from_phone_number
+      - to_phone_number
+      properties:
+        from_phone_number:
+          type: string
+          description: |-
+            Phone number the call will originate from.
+            Must be configured in your SIP provider.
+            Supports international format (+1234567890).
+          example: '+15105550123'
+        participant_identity:
+          type: string
+          description: Identity for the SIP participant in the room
+          example: caller-456
+        participant_name:
+          type: string
+          description: Display name for the SIP participant in the room
+          example: John Doe
+        room_name:
+          type: string
+          description: The LiveKit room name to connect the call to
+          example: call-room-123
+        to_phone_number:
+          type: string
+          description: |-
+            Phone number to dial.
+            Supports international format (+1234567890), national format (07123456789),
+            or extensions (1234).
+          example: '+15551234567'
+    SIPCallResponse:
+      type: object
+      description: |-
+        Response for a successful SIP call initiation
+
+        # Example
+        ```json
+        {
+          "status": "initiated",
+          "room_name": "call-room-123",
+          "participant_identity": "caller-456",
+          "participant_id": "PA_abc123",
+          "sip_call_id": "SC_xyz789"
+        }
+        ```
+      required:
+      - status
+      - room_name
+      - participant_identity
+      - participant_id
+      - sip_call_id
+      properties:
+        participant_id:
+          type: string
+          description: The unique participant ID assigned by LiveKit
+          example: PA_abc123
+        participant_identity:
+          type: string
+          description: The identity of the SIP participant in the room
+          example: caller-456
+        room_name:
+          type: string
+          description: The room name where the call was connected
+          example: call-room-123
+        sip_call_id:
+          type: string
+          description: The unique SIP call ID for tracking
+          example: SC_xyz789
+        status:
+          type: string
+          description: Status of the call request ("initiated")
+          example: initiated
     SIPTransferErrorResponse:
       type: object
       description: |-

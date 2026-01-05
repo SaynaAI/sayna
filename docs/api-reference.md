@@ -356,6 +356,68 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | `LIVEKIT_NOT_CONFIGURED` | LiveKit SIP service not configured. |
 | `TRANSFER_FAILED` | Transfer operation failed. |
 
+#### `POST /sip/call`
+- **Purpose**: Initiate an outbound SIP call through LiveKit. The call connects to a specified LiveKit room as a SIP participant.
+- **Note**: This endpoint requires the `sip.outbound_address` configuration to be set. Outbound trunks are automatically created or reused based on the `from_phone_number`.
+- **Request Body**:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `room_name` | string | Yes | The LiveKit room name to connect the call to (without tenant prefix). |
+| `participant_name` | string | Yes | Display name for the SIP participant in the room. |
+| `participant_identity` | string | Yes | Identity for the SIP participant in the room. |
+| `from_phone_number` | string | Yes | Phone number the call will originate from. Must be configured in your SIP provider. Supports international format (+1234567890). |
+| `to_phone_number` | string | Yes | Phone number to dial. Supports international format (+1234567890), national format (07123456789), or extensions (1234). |
+
+- **Success** `200 OK`:
+  ```json
+  {
+    "status": "initiated",
+    "room_name": "project1_call-room-123",
+    "participant_identity": "caller-456",
+    "participant_id": "PA_abc123",
+    "sip_call_id": "SC_xyz789"
+  }
+  ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | Always `initiated` for successful requests. |
+| `room_name` | string | The normalized room name (includes tenant prefix). |
+| `participant_identity` | string | The identity of the SIP participant in the room. |
+| `participant_id` | string | The unique participant ID assigned by LiveKit. |
+| `sip_call_id` | string | The unique SIP call ID for tracking. |
+
+- **Failure**:
+  - `400 Bad Request` when phone numbers are invalid or required fields are empty.
+  - `500 Internal Server Error` if LiveKit is not configured, outbound address is missing, or call fails.
+
+**Error response format**:
+```json
+{
+  "error": "Outbound address not configured",
+  "code": "OUTBOUND_ADDRESS_NOT_CONFIGURED"
+}
+```
+
+| Error Code | Description |
+| --- | --- |
+| `INVALID_PHONE_NUMBER` | Invalid phone number format or empty required field. |
+| `OUTBOUND_ADDRESS_NOT_CONFIGURED` | The `sip.outbound_address` configuration is not set. |
+| `LIVEKIT_NOT_CONFIGURED` | LiveKit SIP service not configured. |
+| `CALL_FAILED` | Call initiation failed (includes error details). |
+
+**Trunk Reuse Behavior**: When making outbound calls, Sayna automatically manages SIP outbound trunks:
+1. Searches for an existing outbound trunk that contains the `from_phone_number`.
+2. If found, reuses that trunk for the call.
+3. If not found, creates a new trunk named `sayna-outbound-{from_phone_number}`.
+
+This enables efficient trunk management without manual provisioning.
+
+**Authentication Configuration**: Outbound trunk authentication is configured at the server level via SIP configuration, not per-request. If your SIP provider requires authentication, set `sip.outbound_auth_username` and `sip.outbound_auth_password` in your server configuration (YAML or environment variables). See [Outbound Trunk Authentication](livekit_integration.md#outbound-trunk-authentication) for details.
+
+**Room Name Normalization**: The `room_name` is automatically normalized with the authenticated tenant's prefix (from `auth.id`) for tenant isolation, similar to other LiveKit endpoints.
+
 #### `GET /sip/hooks`
 - **Purpose**: List all configured SIP webhook hooks from the runtime cache.
 - **Behavior**: Hosts defined in the application configuration always appear and override any cached host with the same name.

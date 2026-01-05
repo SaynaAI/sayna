@@ -51,8 +51,11 @@ use livekit_api::services::sip::{
     CreateSIPDispatchRuleOptions, ListSIPDispatchRuleFilter, ListSIPInboundTrunkFilter, SIPClient,
 };
 use livekit_protocol as proto;
+use tracing::{debug, info, warn};
 
-use crate::utils::sip_api_client::{SIPApiClient, SIPInboundTrunkOptions};
+use crate::utils::sip_api_client::{
+    CreateSIPParticipantOptions, SIPApiClient, SIPInboundTrunkOptions, SIPOutboundTrunkOptions,
+};
 
 use super::types::LiveKitError;
 
@@ -74,6 +77,43 @@ pub struct DispatchConfig {
     pub room_prefix: String,
     /// Maximum participants in the room
     pub max_participants: u32,
+}
+
+/// Configuration for SIP outbound trunk.
+///
+/// Reference: <https://docs.livekit.io/telephony/making-calls/outbound-trunk/>
+///
+/// # Authentication
+///
+/// LiveKit Cloud nodes do not have a static IP address range, so username/password
+/// authentication is recommended over IP-based authentication with SIP providers.
+/// Set `auth_username` and `auth_password` when your SIP provider requires credentials.
+#[derive(Debug, Clone)]
+pub struct OutboundTrunkConfig {
+    /// Phone number that calls will originate from (e.g., "+15105550123")
+    pub from_phone_number: String,
+    /// SIP server address (e.g., "sip.telnyx.com")
+    pub address: String,
+    /// Optional SIP authentication username.
+    /// Maps to `SipOutboundTrunkInfo.auth_username` in LiveKit API.
+    pub auth_username: Option<String>,
+    /// Optional SIP authentication password.
+    /// Maps to `SipOutboundTrunkInfo.auth_password` in LiveKit API.
+    /// SECURITY: Never log this value.
+    pub auth_password: Option<String>,
+}
+
+/// Result of creating an outbound SIP call
+#[derive(Debug, Clone)]
+pub struct OutboundCallResult {
+    /// Unique ID for the SIP call
+    pub sip_call_id: String,
+    /// Participant ID in the LiveKit room
+    pub participant_id: String,
+    /// Participant identity in the LiveKit room
+    pub participant_identity: String,
+    /// Room name the participant was connected to
+    pub room_name: String,
 }
 
 /// Handler for LiveKit SIP management
@@ -311,6 +351,304 @@ impl LiveKitSipHandler {
             .await
     }
 
+    /// Normalize a phone number for trunk matching.
+    ///
+    /// LiveKit stores phone numbers without the `tel:` prefix in trunk configurations.
+    /// This helper ensures consistent matching by stripping the prefix if present.
+    ///
+    /// # Arguments
+    /// * `phone_number` - Phone number to normalize (with or without tel: prefix)
+    ///
+    /// # Returns
+    /// * The normalized phone number without tel: prefix
+    pub fn normalize_phone_number(phone_number: &str) -> String {
+        phone_number
+            .strip_prefix("tel:")
+            .unwrap_or(phone_number)
+            .to_string()
+    }
+
+    /// Generate a deterministic trunk name from a phone number.
+    ///
+    /// Creates a consistent name for outbound trunks based on the from_phone_number
+    /// to enable trunk reuse across calls from the same number.
+    ///
+    /// # Arguments
+    /// * `from_phone_number` - Phone number that calls will originate from
+    ///
+    /// # Returns
+    /// * A deterministic trunk name like "sayna-outbound-+15105550123"
+    pub fn generate_outbound_trunk_name(from_phone_number: &str) -> String {
+        let normalized = Self::normalize_phone_number(from_phone_number);
+        format!("sayna-outbound-{}", normalized)
+    }
+
+    /// Ensure an outbound trunk exists for the given phone number.
+    ///
+    /// This method checks if an outbound trunk already exists for the specified
+    /// `from_phone_number`, and creates one if it doesn't. This enables trunk reuse
+    /// across multiple outbound calls from the same number.
+    ///
+    /// Reference: <https://docs.livekit.io/telephony/making-calls/outbound-trunk/>
+    ///
+    /// # Arguments
+    /// * `config` - Outbound trunk configuration including optional authentication credentials
+    ///
+    /// # Authentication
+    ///
+    /// If `auth_username` and `auth_password` are provided, they will be included
+    /// in the trunk configuration. This is required for SIP providers that use
+    /// username/password authentication (recommended over IP-based auth for LiveKit Cloud).
+    ///
+    /// SECURITY: Authentication credentials are never logged.
+    ///
+    /// # Returns
+    /// * `Result<String, LiveKitError>` - The trunk ID on success
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::sip_handler::{LiveKitSipHandler, OutboundTrunkConfig};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitSipHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    /// );
+    ///
+    /// let config = OutboundTrunkConfig {
+    ///     from_phone_number: "+15105550123".to_string(),
+    ///     address: "sip.telnyx.com".to_string(),
+    ///     auth_username: Some("user".to_string()),
+    ///     auth_password: Some("pass".to_string()),
+    /// };
+    ///
+    /// let trunk_id = handler.ensure_outbound_trunk(config).await?;
+    /// println!("Using trunk: {}", trunk_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ensure_outbound_trunk(
+        &self,
+        config: OutboundTrunkConfig,
+    ) -> Result<String, LiveKitError> {
+        let normalized_number = Self::normalize_phone_number(&config.from_phone_number);
+        let trunk_name = Self::generate_outbound_trunk_name(&config.from_phone_number);
+
+        debug!(
+            from_phone_number = %config.from_phone_number,
+            trunk_name = %trunk_name,
+            "Looking up existing outbound trunk"
+        );
+
+        // List existing outbound trunks filtering by phone number
+        // The API returns trunks containing this number, including wildcard trunks
+        let existing_trunks = self
+            .sip_api_client
+            .list_sip_outbound_trunk(Some(vec![normalized_number.clone()]))
+            .await?;
+
+        // Check if any trunk matches our phone number
+        for trunk in &existing_trunks {
+            // Check if this trunk contains our phone number
+            // (numbers can include wildcards like "*")
+            if trunk.numbers.contains(&normalized_number)
+                || trunk.numbers.contains(&"*".to_string())
+            {
+                info!(
+                    trunk_id = %trunk.sip_trunk_id,
+                    trunk_name = %trunk.name,
+                    from_phone_number = %config.from_phone_number,
+                    "Found existing outbound trunk"
+                );
+                return Ok(trunk.sip_trunk_id.clone());
+            }
+        }
+
+        // No matching trunk found, create a new one
+        // Log auth presence without exposing credential values (security best practice)
+        info!(
+            from_phone_number = %config.from_phone_number,
+            trunk_name = %trunk_name,
+            address = %config.address,
+            auth_configured = config.auth_username.is_some(),
+            "Creating new outbound trunk"
+        );
+
+        let options = SIPOutboundTrunkOptions {
+            auth_username: config.auth_username,
+            auth_password: config.auth_password,
+            ..Default::default()
+        };
+
+        // Create the trunk
+        let trunk_result = self
+            .sip_api_client
+            .create_sip_outbound_trunk(
+                trunk_name.clone(),
+                config.address,
+                vec![normalized_number],
+                options,
+            )
+            .await;
+
+        match trunk_result {
+            Ok(trunk) => {
+                info!(
+                    trunk_id = %trunk.sip_trunk_id,
+                    trunk_name = %trunk.name,
+                    "Created new outbound trunk"
+                );
+                Ok(trunk.sip_trunk_id)
+            }
+            Err(e) => {
+                // Check if error indicates trunk already exists (concurrent creation race)
+                let error_msg = e.to_string();
+                if error_msg.contains("already exists") || error_msg.contains("duplicate") {
+                    warn!(
+                        trunk_name = %trunk_name,
+                        "Trunk creation race detected, retrying lookup"
+                    );
+                    // Race condition: another request created the trunk
+                    // Re-list to find the trunk that was just created
+                    let trunks = self.sip_api_client.list_sip_outbound_trunk(None).await?;
+                    for trunk in trunks {
+                        if trunk.name == trunk_name {
+                            info!(
+                                trunk_id = %trunk.sip_trunk_id,
+                                trunk_name = %trunk.name,
+                                "Found trunk after race condition"
+                            );
+                            return Ok(trunk.sip_trunk_id);
+                        }
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Create an outbound SIP call.
+    ///
+    /// This method ensures an outbound trunk exists for the `from_phone_number`,
+    /// then initiates a call to the `to_phone_number` and connects it to the
+    /// specified LiveKit room.
+    ///
+    /// Reference: https://docs.livekit.io/sip/outbound-calls/
+    ///
+    /// # Arguments
+    /// * `room_name` - LiveKit room to connect the call to
+    /// * `to_phone_number` - Phone number to dial
+    /// * `from_phone_number` - Phone number the call will originate from
+    /// * `outbound_address` - SIP server address (e.g., "sip.telnyx.com")
+    /// * `participant_identity` - Identity for the SIP participant in the room
+    /// * `participant_name` - Display name for the SIP participant
+    /// * `auth_username` - Optional SIP authentication username
+    /// * `auth_password` - Optional SIP authentication password
+    ///
+    /// # Returns
+    /// * `Result<OutboundCallResult, LiveKitError>` - Call info on success
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::sip_handler::LiveKitSipHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitSipHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    /// );
+    ///
+    /// let result = handler.create_outbound_call(
+    ///     "my-room",
+    ///     "+15105551234",       // to
+    ///     "+15105550123",       // from
+    ///     "sip.telnyx.com",
+    ///     "caller-1",           // identity
+    ///     "Caller Name",        // name
+    ///     Some("user".to_string()),
+    ///     Some("pass".to_string()),
+    /// ).await?;
+    ///
+    /// println!("Call ID: {}", result.sip_call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_outbound_call(
+        &self,
+        room_name: &str,
+        to_phone_number: &str,
+        from_phone_number: &str,
+        outbound_address: &str,
+        participant_identity: &str,
+        participant_name: &str,
+        auth_username: Option<String>,
+        auth_password: Option<String>,
+    ) -> Result<OutboundCallResult, LiveKitError> {
+        debug!(
+            room_name = %room_name,
+            to_phone_number = %to_phone_number,
+            from_phone_number = %from_phone_number,
+            participant_identity = %participant_identity,
+            "Creating outbound SIP call"
+        );
+
+        // Ensure the outbound trunk exists
+        let trunk_config = OutboundTrunkConfig {
+            from_phone_number: from_phone_number.to_string(),
+            address: outbound_address.to_string(),
+            auth_username,
+            auth_password,
+        };
+
+        let trunk_id = self.ensure_outbound_trunk(trunk_config).await?;
+
+        debug!(
+            trunk_id = %trunk_id,
+            "Using outbound trunk for call"
+        );
+
+        // Normalize phone numbers (strip tel: prefix for API)
+        let normalized_to = Self::normalize_phone_number(to_phone_number);
+        let normalized_from = Self::normalize_phone_number(from_phone_number);
+
+        // Create the outbound call
+        let options = CreateSIPParticipantOptions {
+            ringing_timeout: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        };
+
+        let participant = self
+            .sip_api_client
+            .create_sip_participant(
+                &trunk_id,
+                &normalized_to,
+                room_name,
+                participant_identity,
+                participant_name,
+                Some(&normalized_from),
+                options,
+            )
+            .await?;
+
+        info!(
+            sip_call_id = %participant.sip_call_id,
+            participant_id = %participant.participant_id,
+            participant_identity = %participant.participant_identity,
+            room_name = %participant.room_name,
+            "Outbound call created successfully"
+        );
+
+        Ok(OutboundCallResult {
+            sip_call_id: participant.sip_call_id,
+            participant_id: participant.participant_id,
+            participant_identity: participant.participant_identity,
+            room_name: participant.room_name,
+        })
+    }
+
     /// Get the LiveKit server URL
     pub fn url(&self) -> &str {
         &self.url
@@ -523,5 +861,202 @@ mod tests {
         assert_eq!(cloned.dispatch_name, config.dispatch_name);
         assert_eq!(cloned.room_prefix, config.room_prefix);
         assert_eq!(cloned.max_participants, config.max_participants);
+    }
+
+    #[test]
+    fn test_normalize_phone_number() {
+        // Test phone number normalization (strip tel: prefix)
+        let test_cases = vec![
+            ("tel:+1234567890", "+1234567890"),
+            ("+1234567890", "+1234567890"),
+            ("tel:1234567890", "1234567890"),
+            ("1234567890", "1234567890"),
+            ("tel:+1-510-555-0123", "+1-510-555-0123"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = LiveKitSipHandler::normalize_phone_number(input);
+            assert_eq!(result, expected, "Input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_generate_outbound_trunk_name() {
+        // Test deterministic trunk name generation
+        let test_cases = vec![
+            ("+15105550123", "sayna-outbound-+15105550123"),
+            ("tel:+15105550123", "sayna-outbound-+15105550123"),
+            ("1234567890", "sayna-outbound-1234567890"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = LiveKitSipHandler::generate_outbound_trunk_name(input);
+            assert_eq!(result, expected, "Input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_outbound_trunk_config_creation() {
+        let config = OutboundTrunkConfig {
+            from_phone_number: "+15105550123".to_string(),
+            address: "sip.telnyx.com".to_string(),
+            auth_username: Some("user".to_string()),
+            auth_password: Some("pass".to_string()),
+        };
+
+        assert_eq!(config.from_phone_number, "+15105550123");
+        assert_eq!(config.address, "sip.telnyx.com");
+        assert_eq!(config.auth_username, Some("user".to_string()));
+        assert_eq!(config.auth_password, Some("pass".to_string()));
+    }
+
+    #[test]
+    fn test_outbound_trunk_config_without_auth() {
+        let config = OutboundTrunkConfig {
+            from_phone_number: "+15105550123".to_string(),
+            address: "sip.example.com".to_string(),
+            auth_username: None,
+            auth_password: None,
+        };
+
+        assert!(config.auth_username.is_none());
+        assert!(config.auth_password.is_none());
+    }
+
+    #[test]
+    fn test_outbound_call_result_creation() {
+        let result = OutboundCallResult {
+            sip_call_id: "call-123".to_string(),
+            participant_id: "participant-456".to_string(),
+            participant_identity: "caller-1".to_string(),
+            room_name: "my-room".to_string(),
+        };
+
+        assert_eq!(result.sip_call_id, "call-123");
+        assert_eq!(result.participant_id, "participant-456");
+        assert_eq!(result.participant_identity, "caller-1");
+        assert_eq!(result.room_name, "my-room");
+    }
+
+    #[test]
+    fn test_outbound_trunk_config_clone() {
+        let config = OutboundTrunkConfig {
+            from_phone_number: "+15105550123".to_string(),
+            address: "sip.telnyx.com".to_string(),
+            auth_username: Some("user".to_string()),
+            auth_password: Some("pass".to_string()),
+        };
+
+        let cloned = config.clone();
+        assert_eq!(cloned.from_phone_number, config.from_phone_number);
+        assert_eq!(cloned.address, config.address);
+        assert_eq!(cloned.auth_username, config.auth_username);
+        assert_eq!(cloned.auth_password, config.auth_password);
+    }
+
+    #[test]
+    fn test_outbound_call_result_clone() {
+        let result = OutboundCallResult {
+            sip_call_id: "call-123".to_string(),
+            participant_id: "participant-456".to_string(),
+            participant_identity: "caller-1".to_string(),
+            room_name: "my-room".to_string(),
+        };
+
+        let cloned = result.clone();
+        assert_eq!(cloned.sip_call_id, result.sip_call_id);
+        assert_eq!(cloned.participant_id, result.participant_id);
+        assert_eq!(cloned.participant_identity, result.participant_identity);
+        assert_eq!(cloned.room_name, result.room_name);
+    }
+
+    /// Test that SIPOutboundTrunkOptions correctly receives auth credentials
+    /// from OutboundTrunkConfig. This validates the config-to-options mapping
+    /// without exposing credentials in logs.
+    #[test]
+    fn test_outbound_trunk_options_auth_mapping() {
+        use crate::utils::sip_api_client::SIPOutboundTrunkOptions;
+
+        // Test with auth credentials
+        let config_with_auth = OutboundTrunkConfig {
+            from_phone_number: "+15105550123".to_string(),
+            address: "sip.provider.com".to_string(),
+            auth_username: Some("sip_user".to_string()),
+            auth_password: Some("sip_secret".to_string()),
+        };
+
+        let options: SIPOutboundTrunkOptions = SIPOutboundTrunkOptions {
+            auth_username: config_with_auth.auth_username.clone(),
+            auth_password: config_with_auth.auth_password.clone(),
+            ..Default::default()
+        };
+
+        assert_eq!(options.auth_username, Some("sip_user".to_string()));
+        assert_eq!(options.auth_password, Some("sip_secret".to_string()));
+
+        // Test without auth credentials
+        let config_no_auth = OutboundTrunkConfig {
+            from_phone_number: "+15105550456".to_string(),
+            address: "sip.other.com".to_string(),
+            auth_username: None,
+            auth_password: None,
+        };
+
+        let options_no_auth: SIPOutboundTrunkOptions = SIPOutboundTrunkOptions {
+            auth_username: config_no_auth.auth_username.clone(),
+            auth_password: config_no_auth.auth_password.clone(),
+            ..Default::default()
+        };
+
+        assert!(options_no_auth.auth_username.is_none());
+        assert!(options_no_auth.auth_password.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_outbound_trunk_with_invalid_server() {
+        // This test validates that ensure_outbound_trunk fails when the server is unreachable
+        let handler = LiveKitSipHandler::new(
+            "http://localhost:7880".to_string(),
+            "invalid_key".to_string(),
+            "invalid_secret".to_string(),
+        );
+
+        let config = OutboundTrunkConfig {
+            from_phone_number: "+15105550123".to_string(),
+            address: "sip.telnyx.com".to_string(),
+            auth_username: None,
+            auth_password: None,
+        };
+
+        let result = handler.ensure_outbound_trunk(config).await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_outbound_call_with_invalid_server() {
+        // This test validates that create_outbound_call fails when the server is unreachable
+        let handler = LiveKitSipHandler::new(
+            "http://localhost:7880".to_string(),
+            "invalid_key".to_string(),
+            "invalid_secret".to_string(),
+        );
+
+        let result = handler
+            .create_outbound_call(
+                "my-room",
+                "+15105551234",
+                "+15105550123",
+                "sip.telnyx.com",
+                "caller-1",
+                "Caller Name",
+                None,
+                None,
+            )
+            .await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
     }
 }

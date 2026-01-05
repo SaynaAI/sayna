@@ -126,6 +126,7 @@ pub fn validate_auth_api_secrets(
 /// - hooks list has no duplicate hosts
 /// - when hooks exist, each hook has an effective secret (either per-hook or global)
 /// - all secrets meet minimum length requirements and are not whitespace-only
+/// - outbound_address (if provided) is non-empty and not whitespace-only
 pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::error::Error>> {
     let Some(config) = sip else {
         return Ok(());
@@ -201,7 +202,64 @@ pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::e
         }
     }
 
+    // Validate outbound_address if provided
+    if let Some(outbound_addr) = &config.outbound_address {
+        validate_outbound_address(outbound_addr)?;
+    }
+
+    // Validate outbound auth credentials
+    validate_outbound_auth(
+        config.outbound_auth_username.as_deref(),
+        config.outbound_auth_password.as_deref(),
+    )?;
+
     Ok(())
+}
+
+/// Validate outbound SIP address
+///
+/// Ensures that:
+/// - Address is not empty or whitespace-only
+fn validate_outbound_address(address: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for empty or whitespace-only
+    if address.trim().is_empty() {
+        return Err("SIP outbound_address cannot be empty or whitespace-only".into());
+    }
+
+    Ok(())
+}
+
+/// Validate outbound trunk authentication credentials
+///
+/// Ensures that:
+/// - If either username or password is set, both must be set
+/// - Both must be non-empty and not whitespace-only
+fn validate_outbound_auth(
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (username, password) {
+        (Some(user), Some(pass)) => {
+            // Both are set - validate them
+            if user.trim().is_empty() {
+                return Err("SIP outbound_auth_username cannot be empty or whitespace-only".into());
+            }
+            if pass.trim().is_empty() {
+                return Err("SIP outbound_auth_password cannot be empty or whitespace-only".into());
+            }
+            Ok(())
+        }
+        (Some(_), None) => {
+            Err("SIP outbound_auth_password is required when outbound_auth_username is set".into())
+        }
+        (None, Some(_)) => {
+            Err("SIP outbound_auth_username is required when outbound_auth_password is set".into())
+        }
+        (None, None) => {
+            // Both are None - that's valid (auth is optional)
+            Ok(())
+        }
+    }
 }
 
 /// Validate a hook secret for security requirements
@@ -366,6 +424,9 @@ mod tests {
                 secret: None,
             }],
             Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -378,6 +439,9 @@ mod tests {
             "".to_string(),
             vec!["192.168.1.0/24".to_string()],
             vec![],
+            None,
+            None,
+            None,
             None,
         );
 
@@ -398,6 +462,9 @@ mod tests {
             vec!["192.168.1.0/24".to_string()],
             vec![],
             None,
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -412,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_validate_sip_config_empty_allowed_addresses() {
-        let config = SipConfig::new("sip-".to_string(), vec![], vec![], None);
+        let config = SipConfig::new("sip-".to_string(), vec![], vec![], None, None, None, None);
 
         let result = validate_sip_config(&Some(config));
         assert!(result.is_err());
@@ -430,6 +497,9 @@ mod tests {
             "sip-".to_string(),
             vec!["not-an-ip".to_string()],
             vec![],
+            None,
+            None,
+            None,
             None,
         );
 
@@ -461,6 +531,9 @@ mod tests {
                 },
             ],
             Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -498,6 +571,9 @@ mod tests {
             vec!["192.168.1.0/24".to_string(), "10.0.0.0/8".to_string()],
             vec![],
             None,
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -510,6 +586,9 @@ mod tests {
             "sip-call_123".to_string(),
             vec!["192.168.1.0/24".to_string()],
             vec![],
+            None,
+            None,
+            None,
             None,
         );
 
@@ -530,6 +609,9 @@ mod tests {
                 secret: None,
             }],
             None, // No global secret
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -553,6 +635,9 @@ mod tests {
                 secret: None,
             }],
             Some("short".to_string()), // Too short
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -576,6 +661,9 @@ mod tests {
                 secret: None,
             }],
             Some("                ".to_string()), // Whitespace only
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -606,6 +694,9 @@ mod tests {
                 },
             ],
             Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -623,6 +714,9 @@ mod tests {
                 secret: Some("short".to_string()), // Too short
             }],
             Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
         );
 
         let result = validate_sip_config(&Some(config));
@@ -633,5 +727,205 @@ mod tests {
                 .to_string()
                 .contains("must be at least 16 characters")
         );
+    }
+
+    // Outbound address validation tests
+
+    #[test]
+    fn test_validate_sip_config_valid_outbound_address() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com:5060".to_string()),
+            None,
+            None,
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_address_empty() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("".to_string()),
+            None,
+            None,
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_address cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_address_whitespace_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("   ".to_string()),
+            None,
+            None,
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_address cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_address_none_is_valid() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            None, // No outbound address is valid (for inbound-only deployments)
+            None,
+            None,
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_ok());
+    }
+
+    // Outbound auth validation tests
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_both_set() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            Some("my-user".to_string()),
+            Some("my-pass".to_string()),
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_username_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            Some("my-user".to_string()),
+            None, // Password missing
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_auth_password is required when outbound_auth_username is set")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_password_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            None, // Username missing
+            Some("my-pass".to_string()),
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_auth_username is required when outbound_auth_password is set")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_username_whitespace_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            Some("   ".to_string()), // Whitespace only
+            Some("my-pass".to_string()),
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_auth_username cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_password_whitespace_only() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            Some("my-user".to_string()),
+            Some("   ".to_string()), // Whitespace only
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outbound_auth_password cannot be empty or whitespace-only")
+        );
+    }
+
+    #[test]
+    fn test_validate_sip_config_outbound_auth_none_is_valid() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            None, // No auth is valid
+            None,
+        );
+
+        let result = validate_sip_config(&Some(config));
+        assert!(result.is_ok());
     }
 }

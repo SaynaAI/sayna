@@ -15,8 +15,9 @@ use crate::handlers::{
         RoomDetailsResponse, RoomInfo, TokenRequest, TokenResponse,
     },
     sip::{
-        DeleteSipHooksRequest, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
-        SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
+        DeleteSipHooksRequest, SIPCallErrorResponse, SIPCallRequest, SIPCallResponse,
+        SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse, SipHookEntry,
+        SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
     },
     speak::SpeakRequest,
     voices::Voice,
@@ -56,6 +57,7 @@ use crate::handlers::{
         crate::handlers::sip::update_sip_hooks,
         crate::handlers::sip::delete_sip_hooks,
         crate::handlers::sip::sip_transfer,
+        crate::handlers::sip::sip_call,
     ),
     components(schemas(
         // REST API types
@@ -84,6 +86,10 @@ use crate::handlers::{
         SIPTransferRequest,
         SIPTransferResponse,
         SIPTransferErrorResponse,
+        // SIP call types
+        SIPCallRequest,
+        SIPCallResponse,
+        SIPCallErrorResponse,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,
