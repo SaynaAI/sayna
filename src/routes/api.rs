@@ -31,5 +31,7 @@ pub fn create_api_router() -> Router<Arc<AppState>> {
         )
         // SIP call transfer
         .route("/sip/transfer", post(sip::sip_transfer))
+        // SIP outbound call
+        .route("/sip/call", post(sip::sip_call))
         .layer(TraceLayer::new_for_http())
 }

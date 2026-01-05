@@ -148,6 +148,9 @@ impl ServerConfig {
 /// - SIP_ALLOWED_ADDRESSES: Comma-separated list of IP addresses/CIDRs
 /// - SIP_HOOKS_JSON: JSON array of hook objects with host/url/secret fields
 /// - SIP_HOOK_SECRET: Global signing secret for webhook requests
+/// - SIP_OUTBOUND_ADDRESS: Target SIP server address for outbound trunks
+/// - SIP_OUTBOUND_AUTH_USERNAME: Username for outbound trunk authentication
+/// - SIP_OUTBOUND_AUTH_PASSWORD: Password for outbound trunk authentication
 ///
 /// # Returns
 /// * `Result<Option<SipConfig>, Box<dyn std::error::Error>>` - The SIP config or None
@@ -161,12 +164,18 @@ fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
     let allowed_addresses_str = env::var("SIP_ALLOWED_ADDRESSES").ok();
     let hooks_json = env::var("SIP_HOOKS_JSON").ok();
     let hook_secret = env::var("SIP_HOOK_SECRET").ok();
+    let outbound_address = env::var("SIP_OUTBOUND_ADDRESS").ok();
+    let outbound_auth_username = env::var("SIP_OUTBOUND_AUTH_USERNAME").ok();
+    let outbound_auth_password = env::var("SIP_OUTBOUND_AUTH_PASSWORD").ok();
 
     // If none of the SIP env vars are set, return None
     if room_prefix.is_none()
         && allowed_addresses_str.is_none()
         && hooks_json.is_none()
         && hook_secret.is_none()
+        && outbound_address.is_none()
+        && outbound_auth_username.is_none()
+        && outbound_auth_password.is_none()
     {
         return Ok(None);
     }
@@ -199,6 +208,9 @@ fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
         allowed_addresses,
         hooks,
         hook_secret,
+        outbound_address,
+        outbound_auth_username,
+        outbound_auth_password,
     )))
 }
 
@@ -250,6 +262,9 @@ mod tests {
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
             env::remove_var("SIP_HOOK_SECRET");
+            env::remove_var("SIP_OUTBOUND_ADDRESS");
+            env::remove_var("SIP_OUTBOUND_AUTH_USERNAME");
+            env::remove_var("SIP_OUTBOUND_AUTH_PASSWORD");
             env::remove_var("RECORDING_S3_PREFIX");
         }
     }
@@ -852,6 +867,156 @@ mod tests {
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].secret, None);
         assert_eq!(sip.hooks[1].secret, Some("override-secret".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_with_outbound_address() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.trunk.example.com:5060");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.trunk.example.com:5060".to_string())
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_outbound_address_only_requires_room_prefix() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.trunk.example.com");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("SIP_ROOM_PREFIX is required")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_outbound_address_with_whitespace() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_OUTBOUND_ADDRESS", "  sip.example.com  ");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        // Whitespace should be trimmed by SipConfig::new
+        assert_eq!(sip.outbound_address, Some("sip.example.com".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_with_outbound_auth() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.trunk.example.com:5060");
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "my-user");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "my-pass");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.trunk.example.com:5060".to_string())
+        );
+        assert_eq!(sip.outbound_auth_username, Some("my-user".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("my-pass".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_outbound_auth_trims_whitespace() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "  my-user  ");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "  my-pass  ");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        // Whitespace should be trimmed by SipConfig::new
+        assert_eq!(sip.outbound_auth_username, Some("my-user".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("my-pass".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_outbound_auth_requires_room_prefix() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "my-user");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "my-pass");
+        }
+
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("SIP_ROOM_PREFIX is required")
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_outbound_auth_defaults_to_none() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert!(sip.outbound_auth_username.is_none());
+        assert!(sip.outbound_auth_password.is_none());
 
         cleanup_env_vars();
     }

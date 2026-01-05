@@ -105,6 +105,17 @@ sip:
     - "192.168.1.0/24"
     - "10.0.0.1"
 
+  # Target SIP server address for outbound trunks (required for outbound calls)
+  # Format: hostname or hostname:port (e.g., "sip.example.com" or "sip.example.com:5060")
+  # This is required when using the /sip/call endpoint for outbound SIP calls
+  outbound_address: "sip.trunk.example.com:5060"  # ENV: SIP_OUTBOUND_ADDRESS
+
+  # Outbound trunk authentication credentials (optional)
+  # Only required if your SIP provider requires authentication for outbound calls.
+  # Both username and password must be set together if authentication is needed.
+  # outbound_auth_username: "your-sip-username"   # ENV: SIP_OUTBOUND_AUTH_USERNAME
+  # outbound_auth_password: "your-sip-password"   # ENV: SIP_OUTBOUND_AUTH_PASSWORD
+
   # REQUIRED if hooks are configured: Global signing secret for webhook authentication
   # All outbound SIP webhooks are signed with HMAC-SHA256 for security
   # Generate with: openssl rand -hex 32

@@ -42,6 +42,8 @@ impl AsRef<str> for SipHookConfig {
 /// - Allowed IP addresses/CIDRs for SIP connections
 /// - Downstream webhook targets for event forwarding
 /// - Global signing secret for webhook requests
+/// - Outbound SIP trunk target address for outbound calls
+/// - Outbound trunk authentication credentials (optional, for providers requiring auth)
 #[derive(Debug, Clone)]
 pub struct SipConfig {
     /// Prefix for SIP room names (alphanumeric, '-', '_')
@@ -52,6 +54,13 @@ pub struct SipConfig {
     pub hooks: Vec<SipHookConfig>,
     /// Global signing secret for webhook requests (can be overridden per hook)
     pub hook_secret: Option<String>,
+    /// Target SIP server address for outbound trunks (e.g., "sip.example.com" or "sip.example.com:5060")
+    /// Required when making outbound SIP calls via `/sip/call`
+    pub outbound_address: Option<String>,
+    /// Username for outbound trunk authentication (optional, only if provider requires auth)
+    pub outbound_auth_username: Option<String>,
+    /// Password for outbound trunk authentication (optional, only if provider requires auth)
+    pub outbound_auth_password: Option<String>,
 }
 
 impl SipConfig {
@@ -65,6 +74,9 @@ impl SipConfig {
         allowed_addresses: Vec<String>,
         hooks: Vec<SipHookConfig>,
         hook_secret: Option<String>,
+        outbound_address: Option<String>,
+        outbound_auth_username: Option<String>,
+        outbound_auth_password: Option<String>,
     ) -> Self {
         // Normalize addresses (trim whitespace)
         let allowed_addresses = allowed_addresses
@@ -85,11 +97,21 @@ impl SipConfig {
         // Normalize global secret (trim only, no logging)
         let hook_secret = hook_secret.map(|s| s.trim().to_string());
 
+        // Normalize outbound address (trim whitespace, keep case as-is)
+        let outbound_address = outbound_address.map(|s| s.trim().to_string());
+
+        // Normalize outbound auth credentials (trim only, no logging for security)
+        let outbound_auth_username = outbound_auth_username.map(|s| s.trim().to_string());
+        let outbound_auth_password = outbound_auth_password.map(|s| s.trim().to_string());
+
         Self {
             room_prefix,
             allowed_addresses,
             hooks,
             hook_secret,
+            outbound_address,
+            outbound_auth_username,
+            outbound_auth_password,
         }
     }
 }
@@ -124,6 +146,9 @@ mod tests {
             vec!["192.168.1.0/24".to_string(), " 10.0.0.1 ".to_string()],
             hooks,
             Some("global-secret".to_string()),
+            Some("sip.example.com".to_string()),
+            Some("auth-user".to_string()),
+            Some("auth-pass".to_string()),
         );
 
         assert_eq!(config.room_prefix, "sip-");
@@ -133,6 +158,9 @@ mod tests {
         assert_eq!(config.hooks.len(), 1);
         assert_eq!(config.hooks[0].host, "example.com");
         assert_eq!(config.hook_secret, Some("global-secret".to_string()));
+        assert_eq!(config.outbound_address, Some("sip.example.com".to_string()));
+        assert_eq!(config.outbound_auth_username, Some("auth-user".to_string()));
+        assert_eq!(config.outbound_auth_password, Some("auth-pass".to_string()));
     }
 
     #[test]
@@ -150,7 +178,7 @@ mod tests {
             },
         ];
 
-        let config = SipConfig::new("sip-".to_string(), vec![], hooks, None);
+        let config = SipConfig::new("sip-".to_string(), vec![], hooks, None, None, None, None);
 
         assert_eq!(config.hooks[0].host, "example.com"); // normalized to lowercase
         assert_eq!(config.hooks[1].host, "another.host"); // normalized to lowercase
@@ -162,6 +190,9 @@ mod tests {
             "sip-".to_string(),
             vec!["  192.168.1.0/24  ".to_string(), "\t10.0.0.1\n".to_string()],
             vec![],
+            None,
+            None,
+            None,
             None,
         );
 
@@ -182,9 +213,77 @@ mod tests {
             vec![],
             hooks,
             Some("  global-secret  ".to_string()),
+            None,
+            None,
+            None,
         );
 
         assert_eq!(config.hook_secret, Some("global-secret".to_string())); // trimmed
         assert_eq!(config.hooks[0].secret, Some("hook-secret".to_string())); // trimmed
+    }
+
+    #[test]
+    fn test_sip_config_trims_outbound_address() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("  sip.example.com:5060  ".to_string()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            config.outbound_address,
+            Some("sip.example.com:5060".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sip_config_outbound_address_none() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(config.outbound_address.is_none());
+    }
+
+    #[test]
+    fn test_sip_config_trims_outbound_auth_credentials() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            Some("  auth-user  ".to_string()),
+            Some("  auth-pass  ".to_string()),
+        );
+
+        assert_eq!(config.outbound_auth_username, Some("auth-user".to_string())); // trimmed
+        assert_eq!(config.outbound_auth_password, Some("auth-pass".to_string())); // trimmed
+    }
+
+    #[test]
+    fn test_sip_config_outbound_auth_none() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![],
+            None,
+            Some("sip.example.com".to_string()),
+            None,
+            None,
+        );
+
+        assert!(config.outbound_auth_username.is_none());
+        assert!(config.outbound_auth_password.is_none());
     }
 }

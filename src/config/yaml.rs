@@ -50,6 +50,9 @@ use std::path::PathBuf;
 ///     - "192.168.1.0/24"
 ///     - "10.0.0.1"
 ///   hook_secret: "global-signing-secret"
+///   outbound_address: "sip.example.com:5060"
+///   outbound_auth_username: "my-sip-username"     # Optional, only if provider requires auth
+///   outbound_auth_password: "my-sip-password"     # Optional, only if provider requires auth
 ///   hooks:
 ///     - host: "example.com"
 ///       url: "https://webhook.example.com/events"
@@ -160,6 +163,12 @@ pub struct SipYaml {
     #[serde(default)]
     pub hooks: Vec<SipHookYaml>,
     pub hook_secret: Option<String>,
+    /// Target SIP server address for outbound trunks (e.g., "sip.example.com:5060")
+    pub outbound_address: Option<String>,
+    /// Username for outbound trunk authentication (optional, only if provider requires auth)
+    pub outbound_auth_username: Option<String>,
+    /// Password for outbound trunk authentication (optional, only if provider requires auth)
+    pub outbound_auth_password: Option<String>,
 }
 
 /// SIP webhook hook configuration from YAML
@@ -425,6 +434,7 @@ sip:
     - "192.168.1.0/24"
     - "10.0.0.1"
   hook_secret: "global-secret"
+  outbound_address: "sip.example.com:5060"
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
@@ -441,6 +451,10 @@ sip:
         assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(sip.allowed_addresses[1], "10.0.0.1");
         assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.example.com:5060".to_string())
+        );
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].host, "example.com");
         assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
@@ -480,5 +494,63 @@ sip:
         assert_eq!(sip.room_prefix, Some("sip-".to_string()));
         assert!(sip.allowed_addresses.is_empty()); // default to empty vec
         assert!(sip.hooks.is_empty()); // default to empty vec
+        assert!(sip.outbound_address.is_none()); // defaults to None
+    }
+
+    #[test]
+    fn test_yaml_config_sip_outbound_address_only() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  outbound_address: "sip.trunk.example.com"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.room_prefix, Some("sip-".to_string()));
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.trunk.example.com".to_string())
+        );
+        assert!(sip.allowed_addresses.is_empty());
+        assert!(sip.hooks.is_empty());
+    }
+
+    #[test]
+    fn test_yaml_config_sip_with_outbound_auth() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  outbound_address: "sip.trunk.example.com:5060"
+  outbound_auth_username: "my-username"
+  outbound_auth_password: "my-password"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.room_prefix, Some("sip-".to_string()));
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.trunk.example.com:5060".to_string())
+        );
+        assert_eq!(sip.outbound_auth_username, Some("my-username".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("my-password".to_string()));
+    }
+
+    #[test]
+    fn test_yaml_config_sip_outbound_auth_defaults_to_none() {
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  outbound_address: "sip.trunk.example.com"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert!(sip.outbound_auth_username.is_none());
+        assert!(sip.outbound_auth_password.is_none());
     }
 }

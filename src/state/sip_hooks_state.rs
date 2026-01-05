@@ -99,6 +99,9 @@ mod tests {
             allowed_addresses: vec![],
             hooks: config_hooks.clone(),
             hook_secret: Some("global".to_string()),
+            outbound_address: None,
+            outbound_auth_username: None,
+            outbound_auth_password: None,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -124,6 +127,9 @@ mod tests {
             allowed_addresses: vec![],
             hooks: config_hooks,
             hook_secret: Some("global".to_string()),
+            outbound_address: None,
+            outbound_auth_username: None,
+            outbound_auth_password: None,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -154,6 +160,9 @@ mod tests {
             allowed_addresses: vec![],
             hooks: vec![],
             hook_secret: Some("global-secret".to_string()),
+            outbound_address: None,
+            outbound_auth_username: None,
+            outbound_auth_password: None,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -180,6 +189,9 @@ mod tests {
             allowed_addresses: vec![],
             hooks: config_hooks.clone(),
             hook_secret: Some("global".to_string()),
+            outbound_address: None,
+            outbound_auth_username: None,
+            outbound_auth_password: None,
         };
 
         let state = SipHooksState::new(&sip_config, None).await;
@@ -213,6 +225,9 @@ mod tests {
             allowed_addresses: vec![],
             hooks: config_hooks,
             hook_secret: Some("global".to_string()),
+            outbound_address: None,
+            outbound_auth_username: None,
+            outbound_auth_password: None,
         };
 
         let state = SipHooksState::new(&sip_config, None).await;

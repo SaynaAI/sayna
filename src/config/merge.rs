@@ -295,11 +295,17 @@ fn merge_sip_config(
     let env_allowed_addresses = env::var("SIP_ALLOWED_ADDRESSES").ok();
     let env_hooks_json = env::var("SIP_HOOKS_JSON").ok();
     let env_hook_secret = env::var("SIP_HOOK_SECRET").ok();
+    let env_outbound_address = env::var("SIP_OUTBOUND_ADDRESS").ok();
+    let env_outbound_auth_username = env::var("SIP_OUTBOUND_AUTH_USERNAME").ok();
+    let env_outbound_auth_password = env::var("SIP_OUTBOUND_AUTH_PASSWORD").ok();
 
     let has_env_sip = env_room_prefix.is_some()
         || env_allowed_addresses.is_some()
         || env_hooks_json.is_some()
-        || env_hook_secret.is_some();
+        || env_hook_secret.is_some()
+        || env_outbound_address.is_some()
+        || env_outbound_auth_username.is_some()
+        || env_outbound_auth_password.is_some();
 
     // If no YAML and no ENV, return None
     if yaml_sip.is_none() && !has_env_sip {
@@ -355,11 +361,29 @@ fn merge_sip_config(
         .and_then(|s| s.hook_secret.clone())
         .or(env_hook_secret);
 
+    // Merge outbound_address (YAML > ENV)
+    let outbound_address = yaml_sip
+        .and_then(|s| s.outbound_address.clone())
+        .or(env_outbound_address);
+
+    // Merge outbound_auth_username (YAML > ENV)
+    let outbound_auth_username = yaml_sip
+        .and_then(|s| s.outbound_auth_username.clone())
+        .or(env_outbound_auth_username);
+
+    // Merge outbound_auth_password (YAML > ENV)
+    let outbound_auth_password = yaml_sip
+        .and_then(|s| s.outbound_auth_password.clone())
+        .or(env_outbound_auth_password);
+
     Ok(Some(SipConfig::new(
         room_prefix,
         allowed_addresses,
         hooks,
         hook_secret,
+        outbound_address,
+        outbound_auth_username,
+        outbound_auth_password,
     )))
 }
 
@@ -417,6 +441,9 @@ mod tests {
             env::remove_var("SIP_ALLOWED_ADDRESSES");
             env::remove_var("SIP_HOOKS_JSON");
             env::remove_var("SIP_HOOK_SECRET");
+            env::remove_var("SIP_OUTBOUND_ADDRESS");
+            env::remove_var("SIP_OUTBOUND_AUTH_USERNAME");
+            env::remove_var("SIP_OUTBOUND_AUTH_PASSWORD");
             env::remove_var("RECORDING_S3_PREFIX");
         }
     }
@@ -707,6 +734,9 @@ mod tests {
                     secret: None,
                 }],
                 hook_secret: Some("global-secret".to_string()),
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
             }),
             ..Default::default()
         };
@@ -735,6 +765,9 @@ mod tests {
                 allowed_addresses: vec!["192.168.1.0/24".to_string()],
                 hooks: vec![],
                 hook_secret: Some("yaml-secret".to_string()),
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
             }),
             ..Default::default()
         };
@@ -802,6 +835,9 @@ mod tests {
                 allowed_addresses: vec![],
                 hooks: vec![],
                 hook_secret: None,
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
             }),
             ..Default::default()
         };
@@ -845,6 +881,9 @@ mod tests {
                     },
                 ],
                 hook_secret: Some("global-secret".to_string()),
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
             }),
             ..Default::default()
         };
@@ -856,6 +895,233 @@ mod tests {
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].secret, None); // will use global
         assert_eq!(sip.hooks[1].secret, Some("per-hook-override".to_string())); // overrides global
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_address_yaml_overrides_env() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: Some("sip.yaml.example.com".to_string()),
+                outbound_auth_username: None,
+                outbound_auth_password: None,
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.env.example.com");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.yaml.example.com".to_string())
+        ); // YAML overrides ENV
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_address_env_only() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.env.example.com:5060");
+        }
+
+        let config = merge_config(None).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.env.example.com:5060".to_string())
+        );
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_address_none_when_unset() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
+            }),
+            ..Default::default()
+        };
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert!(sip.outbound_address.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_address_env_fallback_when_yaml_none() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: None, // Not set in YAML
+                outbound_auth_username: None,
+                outbound_auth_password: None,
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_ADDRESS", "sip.fallback.example.com");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(
+            sip.outbound_address,
+            Some("sip.fallback.example.com".to_string())
+        ); // Falls back to ENV
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_auth_yaml_overrides_env() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: Some("sip.example.com".to_string()),
+                outbound_auth_username: Some("yaml-user".to_string()),
+                outbound_auth_password: Some("yaml-pass".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "env-user");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "env-pass");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        // YAML overrides ENV
+        assert_eq!(sip.outbound_auth_username, Some("yaml-user".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("yaml-pass".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_auth_env_only() {
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "env-user");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "env-pass");
+        }
+
+        let config = merge_config(None).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.outbound_auth_username, Some("env-user".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("env-pass".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_auth_env_fallback_when_yaml_none() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: Some("sip.example.com".to_string()),
+                outbound_auth_username: None, // Not set in YAML
+                outbound_auth_password: None, // Not set in YAML
+            }),
+            ..Default::default()
+        };
+
+        unsafe {
+            env::set_var("SIP_OUTBOUND_AUTH_USERNAME", "env-user");
+            env::set_var("SIP_OUTBOUND_AUTH_PASSWORD", "env-pass");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        // Falls back to ENV when YAML is None
+        assert_eq!(sip.outbound_auth_username, Some("env-user".to_string()));
+        assert_eq!(sip.outbound_auth_password, Some("env-pass".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_sip_outbound_auth_defaults_to_none() {
+        cleanup_env_vars();
+
+        let yaml = YamlConfig {
+            sip: Some(super::super::yaml::SipYaml {
+                room_prefix: Some("sip-".to_string()),
+                allowed_addresses: vec!["192.168.1.0/24".to_string()],
+                hooks: vec![],
+                hook_secret: None,
+                outbound_address: Some("sip.example.com".to_string()),
+                outbound_auth_username: None,
+                outbound_auth_password: None,
+            }),
+            ..Default::default()
+        };
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert!(sip.outbound_auth_username.is_none());
+        assert!(sip.outbound_auth_password.is_none());
 
         cleanup_env_vars();
     }

@@ -20,11 +20,12 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 2. [Configuration](#configuration)
 3. [Inbound Webhooks (LiveKit → Sayna)](#inbound-webhooks-livekit--sayna)
 4. [SIP Configuration & Auto-Provisioning](#sip-configuration--auto-provisioning)
-5. [Outbound Webhooks (Sayna → Downstream)](#outbound-webhooks-sayna--downstream)
-6. [Webhook Signing](#webhook-signing)
-7. [Testing & Development](#testing--development)
-8. [Operations & Troubleshooting](#operations--troubleshooting)
-9. [Security Considerations](#security-considerations)
+5. [Outbound SIP Calls](#outbound-sip-calls)
+6. [Outbound Webhooks (Sayna → Downstream)](#outbound-webhooks-sayna--downstream)
+7. [Webhook Signing](#webhook-signing)
+8. [Testing & Development](#testing--development)
+9. [Operations & Troubleshooting](#operations--troubleshooting)
+10. [Security Considerations](#security-considerations)
 
 ---
 
@@ -393,6 +394,192 @@ After successful provisioning, verify in your LiveKit dashboard:
 2. Find trunk: `sayna-{your-room-prefix}-trunk`
 3. Navigate to **SIP** → **Dispatch Rules**
 4. Find dispatch: `sayna-{your-room-prefix}-dispatch`
+
+---
+
+## Outbound SIP Calls
+
+### Overview
+
+Sayna supports initiating outbound SIP calls through the `/sip/call` REST endpoint. This enables programmatic calling from your LiveKit rooms to external phone numbers via SIP.
+
+### Configuration
+
+To enable outbound SIP calls, you must configure the `sip.outbound_address` setting:
+
+**YAML Configuration** (`config.yaml`):
+
+```yaml
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+
+  # Target SIP server address for outbound trunks (required for outbound calls)
+  # Format: hostname or hostname:port (e.g., "sip.example.com" or "sip.example.com:5060")
+  outbound_address: "sip.trunk.example.com:5060"  # ENV: SIP_OUTBOUND_ADDRESS
+```
+
+**Environment Variable**:
+
+```bash
+SIP_OUTBOUND_ADDRESS="sip.trunk.example.com:5060"
+```
+
+### How Outbound Calls Work
+
+When you initiate an outbound call via `POST /sip/call`, the following sequence occurs:
+
+```
+┌──────────┐     ┌────────────────┐     ┌──────────────────┐     ┌─────────────┐
+│  Client  │     │  Sayna Server  │     │  LiveKit Server  │     │ SIP Gateway │
+└────┬─────┘     └───────┬────────┘     └────────┬─────────┘     └──────┬──────┘
+     │                   │                       │                      │
+     │ POST /sip/call    │                       │                      │
+     │ {room_name,       │                       │                      │
+     │  from_phone,      │                       │                      │
+     │  to_phone, ...}   │                       │                      │
+     │──────────────────>│                       │                      │
+     │                   │                       │                      │
+     │                   │ 1. Validate request   │                      │
+     │                   │    & phone numbers    │                      │
+     │                   │                       │                      │
+     │                   │ 2. List outbound      │                      │
+     │                   │    trunks             │                      │
+     │                   │──────────────────────>│                      │
+     │                   │                       │                      │
+     │                   │<──────────────────────│                      │
+     │                   │   [existing trunks]   │                      │
+     │                   │                       │                      │
+     │                   │ 3a. Reuse trunk OR    │                      │
+     │                   │ 3b. Create trunk      │                      │
+     │                   │──────────────────────>│                      │
+     │                   │                       │                      │
+     │                   │<──────────────────────│                      │
+     │                   │   trunk_id            │                      │
+     │                   │                       │                      │
+     │                   │ 4. Create SIP         │                      │
+     │                   │    participant        │                      │
+     │                   │──────────────────────>│                      │
+     │                   │                       │                      │
+     │                   │                       │ 5. Initiate SIP call │
+     │                   │                       │─────────────────────>│
+     │                   │                       │                      │
+     │                   │                       │<─────────────────────│
+     │                   │                       │   SIP 200 OK         │
+     │                   │<──────────────────────│                      │
+     │                   │   {participant_id,    │                      │
+     │                   │    sip_call_id}       │                      │
+     │                   │                       │                      │
+     │<──────────────────│                       │                      │
+     │  200 OK           │                       │                      │
+     │  {status,         │                       │                      │
+     │   participant_id, │                       │                      │
+     │   sip_call_id}    │                       │                      │
+     └───────────────────┴───────────────────────┴──────────────────────┘
+```
+
+### Trunk Reuse Logic
+
+Sayna automatically manages outbound SIP trunks to avoid creating duplicate trunks:
+
+1. **Lookup**: When a call is initiated, Sayna queries LiveKit for existing outbound trunks that contain the specified `from_phone_number`.
+
+2. **Reuse**: If a matching trunk is found (the trunk's `numbers` list includes the `from_phone_number` or a wildcard `*`), that trunk is reused.
+
+3. **Create**: If no matching trunk exists, Sayna creates a new trunk with a deterministic name: `sayna-outbound-{from_phone_number}`.
+
+4. **Race Condition Handling**: If concurrent requests attempt to create the same trunk, Sayna detects the conflict and retries the lookup.
+
+This approach ensures efficient trunk management without requiring manual provisioning.
+
+### API Endpoint
+
+See [POST /sip/call](api-reference.md#post-sipcall) in the API reference for complete request/response documentation.
+
+**Quick Example**:
+
+```bash
+curl -X POST https://api.example.com/sip/call \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "room_name": "my-call-room",
+    "participant_name": "Outbound Caller",
+    "participant_identity": "caller-1",
+    "from_phone_number": "+15105550123",
+    "to_phone_number": "+15551234567"
+  }'
+```
+
+**Response**:
+
+```json
+{
+  "status": "initiated",
+  "room_name": "tenant_my-call-room",
+  "participant_identity": "caller-1",
+  "participant_id": "PA_abc123",
+  "sip_call_id": "SC_xyz789"
+}
+```
+
+### Outbound Trunk Authentication
+
+Some SIP providers require authentication credentials for outbound calls. Sayna supports optional username/password authentication for outbound SIP trunks.
+
+**YAML Configuration** (`config.yaml`):
+
+```yaml
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+
+  # Target SIP server address for outbound trunks (required for outbound calls)
+  outbound_address: "sip.trunk.example.com:5060"
+
+  # Outbound trunk authentication credentials (optional)
+  # Only required if your SIP provider requires authentication for outbound calls.
+  # Both username and password must be set together if authentication is needed.
+  outbound_auth_username: "your-sip-username"
+  outbound_auth_password: "your-sip-password"
+```
+
+**Environment Variables**:
+
+```bash
+# Required for outbound calls
+SIP_OUTBOUND_ADDRESS="sip.trunk.example.com:5060"
+
+# Optional: Authentication credentials (both must be set together)
+SIP_OUTBOUND_AUTH_USERNAME="your-sip-username"
+SIP_OUTBOUND_AUTH_PASSWORD="your-sip-password"
+```
+
+**Validation Rules**:
+
+- If either `outbound_auth_username` or `outbound_auth_password` is set, **both must be set**
+- Neither can be empty or whitespace-only when provided
+- Authentication is optional—omit both fields if your SIP provider doesn't require auth
+
+**Security Considerations**:
+
+- Store credentials in environment variables or secret management systems
+- Never commit credentials to version control
+- Credentials are trimmed of whitespace but never logged
+
+For more information on LiveKit's outbound trunk authentication, see:
+- [LiveKit Outbound Trunk Auth](https://docs.livekit.io/sip/outbound-trunk/#authentication)
+
+### LiveKit SIP Documentation
+
+For more details on LiveKit's SIP capabilities, see:
+
+- [LiveKit SIP Overview](https://docs.livekit.io/sip/)
+- [Making Outbound Calls](https://docs.livekit.io/sip/outbound-calls/)
+- [Outbound SIP Trunks](https://docs.livekit.io/sip/outbound-trunk/)
+- [SIP Participant API](https://docs.livekit.io/sip/participants/)
 
 ---
 

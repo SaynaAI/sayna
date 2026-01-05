@@ -357,6 +357,9 @@ mod tests {
                 allowed_addresses: vec!["192.168.1.0/24".to_string()],
                 hooks: vec![],
                 hook_secret: None,
+                outbound_address: None,
+                outbound_auth_username: None,
+                outbound_auth_password: None,
             }),
         };
 
