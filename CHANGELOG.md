@@ -8,6 +8,8 @@ All notable changes to Sayna will be documented in this file.
 
 - Release v0.1.1 by @github-actions[bot]
 
+- Release v0.1.2 by @github-actions[bot]
+
 
 ### Bug Fixes
 
