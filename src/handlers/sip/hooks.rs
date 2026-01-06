@@ -26,6 +26,10 @@ pub struct SipHooksRequest {
 }
 
 /// A single SIP hook entry.
+///
+/// Note: The `auth_id` field is conditionally required based on `AUTH_REQUIRED`:
+/// - When `AUTH_REQUIRED=true`: `auth_id` must be provided and cannot be empty
+/// - When `AUTH_REQUIRED=false`: `auth_id` may be empty (unauthenticated mode)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SipHookEntry {
@@ -40,7 +44,9 @@ pub struct SipHookEntry {
     )]
     pub url: String,
 
-    /// Tenant identifier for this hook (written to LiveKit room metadata)
+    /// Tenant identifier for this hook (written to LiveKit room metadata).
+    /// Required when AUTH_REQUIRED=true; may be empty when AUTH_REQUIRED=false.
+    /// When empty, room metadata updates are skipped.
     #[cfg_attr(feature = "openapi", schema(example = "tenant-123"))]
     pub auth_id: String,
 }
