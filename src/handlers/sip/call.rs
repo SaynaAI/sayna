@@ -12,9 +12,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::auth::Auth;
+use crate::handlers::livekit::room_guard::{RoomAccessError, check_room_access};
+use crate::livekit::LiveKitError;
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
 
@@ -128,6 +130,7 @@ enum SIPCallErrorCode {
     LiveKitNotConfigured,
     OutboundAddressNotConfigured,
     CallFailed,
+    RoomAccessDenied,
 }
 
 impl SIPCallErrorCode {
@@ -137,6 +140,7 @@ impl SIPCallErrorCode {
             SIPCallErrorCode::LiveKitNotConfigured => "LIVEKIT_NOT_CONFIGURED",
             SIPCallErrorCode::OutboundAddressNotConfigured => "OUTBOUND_ADDRESS_NOT_CONFIGURED",
             SIPCallErrorCode::CallFailed => "CALL_FAILED",
+            SIPCallErrorCode::RoomAccessDenied => "ROOM_ACCESS_DENIED",
         }
     }
 }
@@ -159,7 +163,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
 ///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit handlers and config
-/// * `auth` - Authentication context for room name normalization
+/// * `auth` - Authentication context for room metadata authorization
 /// * `request` - Call request with phone numbers and room details
 ///
 /// # Returns
@@ -167,16 +171,19 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
 ///
 /// # Errors
 /// * 400 Bad Request - Invalid phone number format or empty fields
+/// * 403 Forbidden - Room exists with different auth_id (cross-tenant)
+/// * 404 Not Found - Room exists with different auth_id (masked as 404)
 /// * 500 Internal Server Error - LiveKit not configured, outbound address missing, or call failed
 ///
 /// # Flow
-/// 1. Normalize room name with auth prefix for tenant isolation
-/// 2. Validate non-empty room name and participant identifiers
-/// 3. Validate phone number formats
-/// 4. Check SIP config exists and contains outbound_address
-/// 5. Check LiveKit SIP handler is available
+/// 1. Validate non-empty room name and participant identifiers
+/// 2. Validate phone number formats
+/// 3. Check SIP config exists and contains outbound_address
+/// 4. Check LiveKit SIP handler is available
+/// 5. Check room access via metadata auth_id (if room exists)
 /// 6. Create outbound call (trunk is created/reused automatically)
-/// 7. Return success response with call identifiers
+/// 7. Ensure room metadata contains auth_id for tenant isolation
+/// 8. Return success response with call identifiers
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -186,6 +193,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
         responses(
             (status = 200, description = "Call initiated successfully", body = SIPCallResponse),
             (status = 400, description = "Invalid request (bad phone number or empty fields)", body = SIPCallErrorResponse),
+            (status = 404, description = "Room not found or not accessible", body = SIPCallErrorResponse),
             (status = 500, description = "LiveKit not configured, outbound address missing, or call failed", body = SIPCallErrorResponse)
         ),
         security(
@@ -199,20 +207,20 @@ pub async fn sip_call(
     Extension(auth): Extension<Auth>,
     Json(request): Json<SIPCallRequest>,
 ) -> Response {
-    // Step 1: Normalize room name with auth prefix for tenant isolation
-    let room_name = auth.normalize_room_name(&request.room_name);
+    // Use clean room name directly (no prefix)
+    let room_name = &request.room_name;
 
     info!(
-        room_name = %request.room_name,
-        normalized_room = %room_name,
+        room_name = %room_name,
+        auth_id = ?auth.id,
         participant_identity = %request.participant_identity,
         to_phone_number = %request.to_phone_number,
         from_phone_number = %request.from_phone_number,
         "SIP call request received"
     );
 
-    // Step 2: Validate room name
-    if request.room_name.trim().is_empty() {
+    // Step 1: Validate room name
+    if room_name.trim().is_empty() {
         warn!("SIP call validation failed: empty room_name");
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -221,7 +229,7 @@ pub async fn sip_call(
         );
     }
 
-    // Step 3: Validate participant identifiers
+    // Step 2: Validate participant identifiers
     if request.participant_name.trim().is_empty() {
         warn!("SIP call validation failed: empty participant_name");
         return error_response(
@@ -240,7 +248,7 @@ pub async fn sip_call(
         );
     }
 
-    // Step 4: Validate phone numbers
+    // Step 3: Validate phone numbers
     let validated_to_phone = match validate_phone_number(&request.to_phone_number) {
         Ok(phone) => phone,
         Err(validation_error) => {
@@ -273,7 +281,7 @@ pub async fn sip_call(
         }
     };
 
-    // Step 5: Check SIP config exists and contains outbound_address
+    // Step 4: Check SIP config exists and contains outbound_address
     // Also extract optional auth credentials for trunk creation
     let (outbound_address, auth_username, auth_password) = match &state.config.sip {
         Some(sip_config) => match &sip_config.outbound_address {
@@ -301,7 +309,7 @@ pub async fn sip_call(
         }
     };
 
-    // Step 6: Check LiveKit SIP handler is available
+    // Step 5: Check LiveKit SIP handler is available
     let sip_handler = match &state.livekit_sip_handler {
         Some(handler) => handler.clone(),
         None => {
@@ -314,7 +322,62 @@ pub async fn sip_call(
         }
     };
 
-    // Step 7: Create outbound call
+    // Step 6: Check LiveKit room handler is available for auth_id management
+    let room_handler = match &state.livekit_room_handler {
+        Some(handler) => handler.clone(),
+        None => {
+            warn!("SIP call failed: LiveKit room handler not configured");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "LiveKit room service not configured",
+                SIPCallErrorCode::LiveKitNotConfigured,
+            );
+        }
+    };
+
+    // Step 7: Check room access via metadata auth_id (if room exists)
+    // For outbound calls, the room might not exist yet. We handle two cases:
+    // - Room exists: verify auth_id matches, deny if mismatch
+    // - Room doesn't exist: allow (room will be created with call)
+    // Note: Empty/whitespace auth.id is treated as unauthenticated mode (skip check)
+    if auth.effective_id().is_some() {
+        match check_room_access(&auth, room_name, &room_handler).await {
+            Ok(()) => {
+                // Room exists and access granted - proceed
+            }
+            Err(RoomAccessError::NotFound(_)) => {
+                // Room doesn't exist - that's fine for outbound calls
+                // Room will be created when we place the call
+            }
+            Err(RoomAccessError::AccessDenied { room_name: r, .. }) => {
+                warn!(
+                    room_name = %r,
+                    auth_id = ?auth.id,
+                    "SIP call denied: room belongs to different tenant"
+                );
+                // Return 404 to avoid leaking room existence
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "Room not found or not accessible",
+                    SIPCallErrorCode::RoomAccessDenied,
+                );
+            }
+            Err(RoomAccessError::LiveKitError(msg)) => {
+                error!(
+                    room_name = %room_name,
+                    error = %msg,
+                    "SIP call failed: LiveKit error during room access check"
+                );
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to verify room access: {}", msg),
+                    SIPCallErrorCode::CallFailed,
+                );
+            }
+        }
+    }
+
+    // Step 8: Create outbound call
     // The create_outbound_call method handles trunk creation/reuse internally
     // Log auth presence without exposing credential values (security best practice)
     info!(
@@ -329,7 +392,7 @@ pub async fn sip_call(
 
     match sip_handler
         .create_outbound_call(
-            &room_name,
+            room_name,
             &validated_to_phone,
             &validated_from_phone,
             &outbound_address,
@@ -341,6 +404,46 @@ pub async fn sip_call(
         .await
     {
         Ok(result) => {
+            // Step 9: Ensure room metadata contains auth_id for tenant isolation
+            // The call was successful - now associate the room with the tenant
+            // Note: Only write auth_id when it's present and non-empty (effective_id returns Some)
+            if let Some(auth_id) = auth.effective_id() {
+                if let Err(e) = room_handler
+                    .ensure_room_auth_id(&result.room_name, auth_id)
+                    .await
+                {
+                    // Log the error but don't fail the call - the call was already placed
+                    match &e {
+                        LiveKitError::MetadataConflict {
+                            existing,
+                            attempted,
+                        } => {
+                            // This shouldn't happen if check_room_access passed, but handle defensively
+                            error!(
+                                room_name = %result.room_name,
+                                existing_auth_id = %existing,
+                                attempted_auth_id = %attempted,
+                                "Room metadata conflict after call placement - this indicates a race condition"
+                            );
+                        }
+                        _ => {
+                            warn!(
+                                room_name = %result.room_name,
+                                auth_id = %auth_id,
+                                error = %e,
+                                "Failed to set room auth_id metadata after call placement"
+                            );
+                        }
+                    }
+                }
+            } else {
+                debug!(
+                    room_name = %result.room_name,
+                    raw_auth_id = ?auth.id,
+                    "Skipping room metadata enforcement - unauthenticated mode (no effective auth_id)"
+                );
+            }
+
             info!(
                 sip_call_id = %result.sip_call_id,
                 participant_id = %result.participant_id,
