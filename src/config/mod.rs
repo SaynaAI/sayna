@@ -173,7 +173,7 @@ impl ServerConfig {
             &config.auth_signing_key_path,
             &config.auth_api_secrets,
         )?;
-        validation::validate_sip_config(&config.sip)?;
+        validation::validate_sip_config(&config.sip, config.auth_required)?;
 
         Ok(config)
     }

@@ -127,7 +127,15 @@ pub fn validate_auth_api_secrets(
 /// - when hooks exist, each hook has an effective secret (either per-hook or global)
 /// - all secrets meet minimum length requirements and are not whitespace-only
 /// - outbound_address (if provided) is non-empty and not whitespace-only
-pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::error::Error>> {
+/// - when auth_required is true, auth_id must be non-empty for all hooks
+///
+/// # Arguments
+/// * `sip` - Optional SIP configuration to validate
+/// * `auth_required` - When true, enforces non-empty auth_id for all hooks
+pub fn validate_sip_config(
+    sip: &Option<SipConfig>,
+    auth_required: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let Some(config) = sip else {
         return Ok(());
     };
@@ -174,6 +182,11 @@ pub fn validate_sip_config(sip: &Option<SipConfig>) -> Result<(), Box<dyn std::e
         let host_lower = hook.host.to_lowercase();
         if !seen_hosts.insert(host_lower.clone()) {
             return Err(format!("Duplicate SIP hook host: {}", host_lower).into());
+        }
+
+        // Validate auth_id only when auth_required is true
+        if auth_required {
+            validate_hook_auth_id(&hook.auth_id, &hook.host)?;
         }
     }
 
@@ -262,6 +275,26 @@ fn validate_outbound_auth(
     }
 }
 
+/// Validate a hook auth_id
+///
+/// Ensures that:
+/// - auth_id is not empty or whitespace-only
+fn validate_hook_auth_id(
+    auth_id: &str,
+    hook_identifier: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for empty or whitespace-only
+    if auth_id.trim().is_empty() {
+        return Err(format!(
+            "SIP hook auth_id for '{}' cannot be empty or whitespace-only",
+            hook_identifier
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Validate a hook secret for security requirements
 ///
 /// Ensures that:
@@ -302,7 +335,10 @@ mod tests {
 
     #[test]
     fn test_validate_sip_config_none() {
-        let result = validate_sip_config(&None);
+        // Should pass regardless of auth_required
+        let result = validate_sip_config(&None, true);
+        assert!(result.is_ok());
+        let result = validate_sip_config(&None, false);
         assert!(result.is_ok());
     }
 
@@ -422,6 +458,7 @@ mod tests {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-123".to_string(),
             }],
             Some("global-secret-1234567890".to_string()),
             None,
@@ -429,7 +466,11 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        // Should pass with auth_required=true (auth_id is set)
+        let result = validate_sip_config(&Some(config.clone()), true);
+        assert!(result.is_ok());
+        // Should also pass with auth_required=false
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -445,7 +486,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -467,7 +508,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -481,7 +522,7 @@ mod tests {
     fn test_validate_sip_config_empty_allowed_addresses() {
         let config = SipConfig::new("sip-".to_string(), vec![], vec![], None, None, None, None);
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -503,7 +544,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -523,11 +564,13 @@ mod tests {
                     host: "example.com".to_string(),
                     url: "https://webhook1.example.com/events".to_string(),
                     secret: None,
+                    auth_id: "tenant-1".to_string(),
                 },
                 SipHookConfig {
                     host: "Example.COM".to_string(), // case-insensitive duplicate
                     url: "https://webhook2.example.com/events".to_string(),
                     secret: None,
+                    auth_id: "tenant-2".to_string(),
                 },
             ],
             Some("global-secret-1234567890".to_string()),
@@ -536,7 +579,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_err());
         assert!(
             result
@@ -576,7 +619,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -592,7 +635,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -607,6 +650,7 @@ mod tests {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-123".to_string(),
             }],
             None, // No global secret
             None,
@@ -614,7 +658,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_err());
         assert!(
             result
@@ -633,6 +677,7 @@ mod tests {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-123".to_string(),
             }],
             Some("short".to_string()), // Too short
             None,
@@ -640,7 +685,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_err());
         assert!(
             result
@@ -659,6 +704,7 @@ mod tests {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-123".to_string(),
             }],
             Some("                ".to_string()), // Whitespace only
             None,
@@ -666,7 +712,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_err());
         assert!(
             result
@@ -686,11 +732,13 @@ mod tests {
                     host: "example.com".to_string(),
                     url: "https://webhook.example.com/events".to_string(),
                     secret: None, // Uses global
+                    auth_id: "tenant-1".to_string(),
                 },
                 SipHookConfig {
                     host: "override.com".to_string(),
                     url: "https://webhook.override.com/events".to_string(),
                     secret: Some("per-hook-secret-1234567890".to_string()), // Override
+                    auth_id: "tenant-2".to_string(),
                 },
             ],
             Some("global-secret-1234567890".to_string()),
@@ -699,7 +747,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_ok());
     }
 
@@ -712,6 +760,7 @@ mod tests {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
                 secret: Some("short".to_string()), // Too short
+                auth_id: "tenant-123".to_string(),
             }],
             Some("global-secret-1234567890".to_string()),
             None,
@@ -719,7 +768,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), true);
         assert!(result.is_err());
         assert!(
             result
@@ -727,6 +776,72 @@ mod tests {
                 .to_string()
                 .contains("must be at least 16 characters")
         );
+    }
+
+    // auth_id validation tests
+
+    #[test]
+    fn test_validate_sip_config_auth_id_empty_when_auth_required() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: None,
+                auth_id: "".to_string(), // Empty auth_id
+            }],
+            Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        // Should fail when auth_required=true
+        let result = validate_sip_config(&Some(config.clone()), true);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("auth_id for 'example.com' cannot be empty or whitespace-only")
+        );
+
+        // Should pass when auth_required=false
+        let result = validate_sip_config(&Some(config), false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sip_config_auth_id_whitespace_only_when_auth_required() {
+        let config = SipConfig::new(
+            "sip-".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            vec![SipHookConfig {
+                host: "example.com".to_string(),
+                url: "https://webhook.example.com/events".to_string(),
+                secret: None,
+                auth_id: "   ".to_string(), // Whitespace only auth_id
+            }],
+            Some("global-secret-1234567890".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        // Should fail when auth_required=true
+        let result = validate_sip_config(&Some(config.clone()), true);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("auth_id for 'example.com' cannot be empty or whitespace-only")
+        );
+
+        // Should pass when auth_required=false
+        let result = validate_sip_config(&Some(config), false);
+        assert!(result.is_ok());
     }
 
     // Outbound address validation tests
@@ -743,7 +858,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -759,7 +874,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -781,7 +896,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -803,7 +918,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -821,7 +936,7 @@ mod tests {
             Some("my-pass".to_string()),
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 
@@ -837,7 +952,7 @@ mod tests {
             None, // Password missing
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -859,7 +974,7 @@ mod tests {
             Some("my-pass".to_string()),
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -881,7 +996,7 @@ mod tests {
             Some("my-pass".to_string()),
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -903,7 +1018,7 @@ mod tests {
             Some("   ".to_string()), // Whitespace only
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_err());
         assert!(
             result
@@ -925,7 +1040,7 @@ mod tests {
             None,
         );
 
-        let result = validate_sip_config(&Some(config));
+        let result = validate_sip_config(&Some(config), false);
         assert!(result.is_ok());
     }
 }

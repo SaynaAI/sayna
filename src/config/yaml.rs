@@ -178,6 +178,10 @@ pub struct SipHookYaml {
     pub url: String,
     #[serde(default)]
     pub secret: Option<String>,
+    /// Tenant identifier for this hook (written to LiveKit room metadata).
+    /// Required when AUTH_REQUIRED=true; optional/empty allowed when AUTH_REQUIRED=false.
+    #[serde(default)]
+    pub auth_id: String,
 }
 
 impl YamlConfig {
@@ -438,9 +442,11 @@ sip:
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
+      auth_id: "tenant-1"
     - host: "another.com"
       url: "https://webhook2.example.com/events"
       secret: "per-hook-secret"
+      auth_id: "tenant-2"
 "#;
 
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
@@ -459,9 +465,11 @@ sip:
         assert_eq!(sip.hooks[0].host, "example.com");
         assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
         assert_eq!(sip.hooks[0].secret, None);
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
         assert_eq!(sip.hooks[1].host, "another.com");
         assert_eq!(sip.hooks[1].url, "https://webhook2.example.com/events");
         assert_eq!(sip.hooks[1].secret, Some("per-hook-secret".to_string()));
+        assert_eq!(sip.hooks[1].auth_id, "tenant-2");
     }
 
     #[test]
@@ -552,5 +560,52 @@ sip:
         let sip = config.sip.as_ref().unwrap();
         assert!(sip.outbound_auth_username.is_none());
         assert!(sip.outbound_auth_password.is_none());
+    }
+
+    #[test]
+    fn test_yaml_config_sip_hook_missing_auth_id_defaults_to_empty() {
+        // When auth_id is not specified in YAML, it should default to empty string.
+        // This allows older configs to work when AUTH_REQUIRED=false.
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+  hook_secret: "global-secret-1234567890"
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.example.com/events"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+        // auth_id should default to empty string when not specified
+        assert_eq!(sip.hooks[0].auth_id, "");
+    }
+
+    #[test]
+    fn test_yaml_config_sip_hook_explicit_empty_auth_id() {
+        // Explicit empty auth_id should also parse correctly
+        let yaml = r#"
+sip:
+  room_prefix: "sip-"
+  allowed_addresses:
+    - "192.168.1.0/24"
+  hook_secret: "global-secret-1234567890"
+  hooks:
+    - host: "example.com"
+      url: "https://webhook.example.com/events"
+      auth_id: ""
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let sip = config.sip.as_ref().unwrap();
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].auth_id, "");
     }
 }

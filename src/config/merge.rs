@@ -347,6 +347,7 @@ fn merge_sip_config(
                 host: h.host.clone(),
                 url: h.url.clone(),
                 secret: h.secret.clone(),
+                auth_id: h.auth_id.clone(),
             })
             .collect()
     } else if let Some(hooks_json) = env_hooks_json {
@@ -388,6 +389,9 @@ fn merge_sip_config(
 }
 
 /// Parse SIP hooks from JSON string
+///
+/// Note: auth_id is optional and defaults to empty string when not provided.
+/// Validation enforces non-empty auth_id only when AUTH_REQUIRED=true.
 fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn std::error::Error>> {
     #[derive(serde::Deserialize)]
     struct HookJson {
@@ -395,6 +399,8 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
         url: String,
         #[serde(default)]
         secret: Option<String>,
+        #[serde(default)]
+        auth_id: String,
     }
 
     let hooks: Vec<HookJson> = serde_json::from_str(json_str)
@@ -406,6 +412,7 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
             host: h.host,
             url: h.url,
             secret: h.secret,
+            auth_id: h.auth_id,
         })
         .collect())
 }
@@ -732,6 +739,7 @@ mod tests {
                     host: "example.com".to_string(),
                     url: "https://webhook.example.com/events".to_string(),
                     secret: None,
+                    auth_id: "tenant-1".to_string(),
                 }],
                 hook_secret: Some("global-secret".to_string()),
                 outbound_address: None,
@@ -749,6 +757,7 @@ mod tests {
         assert_eq!(sip.allowed_addresses[0], "192.168.1.0/24");
         assert_eq!(sip.hooks.len(), 1);
         assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
         assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
 
         cleanup_env_vars();
@@ -799,7 +808,7 @@ mod tests {
             env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
             env::set_var(
                 "SIP_HOOKS_JSON",
-                r#"[{"host": "example.com", "url": "https://webhook.example.com/events"}]"#,
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events", "auth_id": "tenant-1"}]"#,
             );
         }
 
@@ -809,6 +818,7 @@ mod tests {
         assert_eq!(sip.room_prefix, "sip-");
         assert_eq!(sip.allowed_addresses.len(), 1);
         assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
 
         cleanup_env_vars();
     }
@@ -873,11 +883,13 @@ mod tests {
                         host: "example.com".to_string(),
                         url: "https://webhook.example.com/events".to_string(),
                         secret: None, // uses global
+                        auth_id: "tenant-1".to_string(),
                     },
                     SipHookYaml {
                         host: "override.com".to_string(),
                         url: "https://webhook.override.com/events".to_string(),
                         secret: Some("per-hook-override".to_string()), // overrides global
+                        auth_id: "tenant-2".to_string(),
                     },
                 ],
                 hook_secret: Some("global-secret".to_string()),
@@ -894,7 +906,9 @@ mod tests {
         assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].secret, None); // will use global
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
         assert_eq!(sip.hooks[1].secret, Some("per-hook-override".to_string())); // overrides global
+        assert_eq!(sip.hooks[1].auth_id, "tenant-2");
 
         cleanup_env_vars();
     }

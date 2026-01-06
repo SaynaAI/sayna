@@ -216,7 +216,9 @@ fn parse_sip_env() -> Result<Option<SipConfig>, Box<dyn std::error::Error>> {
 
 /// Parse SIP hooks from JSON string
 ///
-/// Expected format: [{"host": "example.com", "url": "https://...", "secret": "optional"}]
+/// Expected format: [{"host": "example.com", "url": "https://...", "secret": "optional", "auth_id": "tenant-id"}]
+/// Note: auth_id is optional and defaults to empty string when not provided.
+/// Validation enforces non-empty auth_id only when AUTH_REQUIRED=true.
 fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn std::error::Error>> {
     #[derive(serde::Deserialize)]
     struct HookJson {
@@ -224,6 +226,8 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
         url: String,
         #[serde(default)]
         secret: Option<String>,
+        #[serde(default)]
+        auth_id: String,
     }
 
     let hooks: Vec<HookJson> = serde_json::from_str(json_str)
@@ -235,6 +239,7 @@ fn parse_sip_hooks_json(json_str: &str) -> Result<Vec<SipHookConfig>, Box<dyn st
             host: h.host,
             url: h.url,
             secret: h.secret,
+            auth_id: h.auth_id,
         })
         .collect())
 }
@@ -706,7 +711,7 @@ mod tests {
             env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24, 10.0.0.1");
             env::set_var(
                 "SIP_HOOKS_JSON",
-                r#"[{"host": "example.com", "url": "https://webhook.example.com/events"}]"#,
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events", "auth_id": "tenant-1"}]"#,
             );
         }
 
@@ -720,6 +725,7 @@ mod tests {
         assert_eq!(sip.hooks.len(), 1);
         assert_eq!(sip.hooks[0].host, "example.com");
         assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
 
         cleanup_env_vars();
     }
@@ -788,8 +794,8 @@ mod tests {
             env::set_var(
                 "SIP_HOOKS_JSON",
                 r#"[
-                    {"host": "example.com", "url": "https://webhook1.example.com/events"},
-                    {"host": "another.com", "url": "https://webhook2.example.com/events"}
+                    {"host": "example.com", "url": "https://webhook1.example.com/events", "auth_id": "tenant-1"},
+                    {"host": "another.com", "url": "https://webhook2.example.com/events", "auth_id": "tenant-2"}
                 ]"#,
             );
         }
@@ -799,7 +805,9 @@ mod tests {
 
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
         assert_eq!(sip.hooks[1].host, "another.com");
+        assert_eq!(sip.hooks[1].auth_id, "tenant-2");
 
         cleanup_env_vars();
     }
@@ -854,8 +862,8 @@ mod tests {
             env::set_var(
                 "SIP_HOOKS_JSON",
                 r#"[
-                    {"host": "example.com", "url": "https://webhook.example.com/events"},
-                    {"host": "override.com", "url": "https://webhook.override.com/events", "secret": "override-secret"}
+                    {"host": "example.com", "url": "https://webhook.example.com/events", "auth_id": "tenant-1"},
+                    {"host": "override.com", "url": "https://webhook.override.com/events", "secret": "override-secret", "auth_id": "tenant-2"}
                 ]"#,
             );
         }
@@ -866,7 +874,9 @@ mod tests {
         assert_eq!(sip.hook_secret, Some("global-secret".to_string()));
         assert_eq!(sip.hooks.len(), 2);
         assert_eq!(sip.hooks[0].secret, None);
+        assert_eq!(sip.hooks[0].auth_id, "tenant-1");
         assert_eq!(sip.hooks[1].secret, Some("override-secret".to_string()));
+        assert_eq!(sip.hooks[1].auth_id, "tenant-2");
 
         cleanup_env_vars();
     }
@@ -1017,6 +1027,58 @@ mod tests {
 
         assert!(sip.outbound_auth_username.is_none());
         assert!(sip.outbound_auth_password.is_none());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_hooks_json_missing_auth_id_defaults_to_empty() {
+        // When auth_id is not specified in SIP_HOOKS_JSON, it should default to empty string.
+        // This allows older configs to work when AUTH_REQUIRED=false.
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events"}]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].host, "example.com");
+        assert_eq!(sip.hooks[0].url, "https://webhook.example.com/events");
+        // auth_id should default to empty string when not specified
+        assert_eq!(sip.hooks[0].auth_id, "");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_sip_hooks_json_explicit_empty_auth_id() {
+        // Explicit empty auth_id should also parse correctly
+        cleanup_env_vars();
+
+        unsafe {
+            env::set_var("SIP_ROOM_PREFIX", "sip-");
+            env::set_var("SIP_ALLOWED_ADDRESSES", "192.168.1.0/24");
+            env::set_var(
+                "SIP_HOOKS_JSON",
+                r#"[{"host": "example.com", "url": "https://webhook.example.com/events", "auth_id": ""}]"#,
+            );
+        }
+
+        let config = ServerConfig::from_env().expect("Should load config");
+        let sip = config.sip.expect("SIP config should be present");
+
+        assert_eq!(sip.hooks.len(), 1);
+        assert_eq!(sip.hooks[0].auth_id, "");
 
         cleanup_env_vars();
     }
