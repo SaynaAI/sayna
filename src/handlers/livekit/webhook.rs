@@ -23,6 +23,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
+use crate::livekit::LiveKitError;
+use crate::livekit::room_handler::LiveKitRoomHandler;
 use crate::state::SipHooksState;
 use crate::utils::req_manager::ReqManager;
 
@@ -315,9 +317,16 @@ pub async fn handle_livekit_webhook(
             let state_clone = state.clone();
             let event_clone = event.clone();
             let hooks_state_clone = sip_hooks_state.clone();
+            // Clone the room handler if available for metadata updates
+            let room_handler_clone = state.livekit_room_handler.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    forward_to_sip_hook(&state_clone, &hooks_state_clone, &event_clone).await
+                if let Err(e) = forward_to_sip_hook(
+                    &state_clone,
+                    &hooks_state_clone,
+                    &event_clone,
+                    room_handler_clone.as_deref(),
+                )
+                .await
                 {
                     // Log with appropriate severity based on error type
                     let room_name = event_clone.room.as_ref().map(|r| r.name.as_str());
@@ -567,10 +576,22 @@ fn generate_webhook_signature(
 /// Uses ReqManager for connection pooling and concurrency control.
 /// Does not block the main webhook handler - errors are logged but not propagated.
 ///
+/// # Room Metadata
+///
+/// When a `livekit_room_handler` is provided, this function also sets the
+/// `room.metadata.auth_id` field using the matched hook's `auth_id` configuration.
+/// This associates the room with the tenant that owns the SIP hook, enabling
+/// proper tenant isolation for SIP-created rooms.
+///
+/// Metadata errors are logged but do not fail the webhook forwarding:
+/// - If the room already has a different `auth_id`, a security warning is logged
+/// - If the metadata update fails for other reasons, an error is logged
+///
 /// # Arguments
 /// * `state` - Application state containing ReqManager instances
 /// * `hooks_state` - SIP hooks runtime state (must contain hooks). Caller ensures this is non-empty.
 /// * `event` - The LiveKit webhook event to forward
+/// * `livekit_room_handler` - Optional room handler for setting room metadata
 ///
 /// # Returns
 /// * `Ok(())` if the event was successfully forwarded
@@ -580,6 +601,7 @@ fn generate_webhook_signature(
 /// - All outbound webhooks are signed with HMAC-SHA256
 /// - Requires either per-hook `secret` or global `hook_secret` in configuration
 /// - Secrets are never logged; only timing and status information is recorded
+/// - Room metadata auth_id conflicts are logged as security warnings
 ///
 /// # Panics
 /// This function assumes SIP hooks are configured and present in state.
@@ -588,6 +610,7 @@ async fn forward_to_sip_hook(
     state: &Arc<AppState>,
     hooks_state: &Arc<RwLock<SipHooksState>>,
     event: &WebhookEvent,
+    livekit_room_handler: Option<&LiveKitRoomHandler>,
 ) -> Result<(), SipForwardingError> {
     // Step 0: Only process participant_joined events, ignore all others
     if event.event != "participant_joined" {
@@ -637,7 +660,7 @@ async fn forward_to_sip_hook(
     })?;
 
     // Step 7/8: Look up hook configuration and resolve signing secret (case-insensitive)
-    let (hook_url, signing_secret, room_prefix) = {
+    let (hook_url, signing_secret, room_prefix, auth_id) = {
         let hooks_guard = hooks_state.read().await;
         let hook = hooks_guard.get_hook_for_domain(&domain).ok_or_else(|| {
             SipForwardingError::NoHookConfigured {
@@ -655,8 +678,74 @@ async fn forward_to_sip_hook(
             hook.url.clone(),
             signing_secret.to_string(),
             hooks_guard.get_room_prefix().to_string(),
+            hook.auth_id.clone(),
         )
     };
+
+    // Step 8.5: Set room metadata auth_id if LiveKit room handler is available
+    // This associates the SIP-created room with the tenant that owns the hook.
+    // Done before webhook forwarding so downstream sees consistent state.
+    // Skip when auth_id is empty (unauthenticated mode - no tenant enforcement)
+    if let Some(room_handler) = livekit_room_handler {
+        if auth_id.trim().is_empty() {
+            debug!(
+                event_id = %event.id,
+                room_name = %room.name,
+                sip_domain = %domain,
+                "Skipping room metadata auth_id update: auth_id is empty (unauthenticated mode)"
+            );
+        } else {
+            let room_name = &room.name;
+            match room_handler.ensure_room_auth_id(room_name, &auth_id).await {
+                Ok(()) => {
+                    info!(
+                        event_id = %event.id,
+                        room_name = %room_name,
+                        auth_id = %auth_id,
+                        sip_domain = %domain,
+                        "Set room metadata auth_id for SIP call"
+                    );
+                }
+                Err(LiveKitError::MetadataConflict {
+                    existing,
+                    attempted,
+                }) => {
+                    // Security warning: room already has a different auth_id
+                    // This could indicate a cross-tenant attempt or misconfiguration
+                    warn!(
+                        event_id = %event.id,
+                        room_name = %room_name,
+                        existing_auth_id = %existing,
+                        attempted_auth_id = %attempted,
+                        sip_domain = %domain,
+                        "SECURITY: Room metadata auth_id conflict - room belongs to different tenant"
+                    );
+                    // Continue with webhook forwarding - don't block the call flow
+                }
+                Err(LiveKitError::RoomNotFound(name)) => {
+                    // Room doesn't exist yet or was deleted - not expected for participant_joined
+                    warn!(
+                        event_id = %event.id,
+                        room_name = %name,
+                        auth_id = %auth_id,
+                        sip_domain = %domain,
+                        "Room not found when setting auth_id (race condition or deleted)"
+                    );
+                }
+                Err(e) => {
+                    // Other errors (network, API errors)
+                    warn!(
+                        event_id = %event.id,
+                        room_name = %room_name,
+                        auth_id = %auth_id,
+                        sip_domain = %domain,
+                        error = %e,
+                        "Failed to set room metadata auth_id"
+                    );
+                }
+            }
+        }
+    }
 
     // Step 9: Build SIPHookEvent payload
     let sip_event = SIPHookEvent {

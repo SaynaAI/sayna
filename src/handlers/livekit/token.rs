@@ -2,6 +2,15 @@
 //!
 //! This module provides the REST API endpoint for LiveKit token generation,
 //! allowing multiple participants to join the same LiveKit room.
+//!
+//! ## Authentication
+//!
+//! When authentication is enabled (`auth.id` is present), this endpoint:
+//! - Creates the room if it doesn't exist
+//! - Sets `room.metadata.auth_id` to the authenticated tenant's ID
+//! - Rejects token generation if the room exists with a different tenant's `auth_id`
+//!
+//! This ensures room ownership is established before any token is issued.
 
 use axum::{
     Extension,
@@ -11,9 +20,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::auth::Auth;
+use crate::livekit::LiveKitError;
 use crate::state::AppState;
 
 /// Request body for generating a LiveKit token
@@ -75,6 +85,11 @@ pub struct TokenResponse {
 ///
 /// Generates a LiveKit JWT token for a participant to join a specific room.
 ///
+/// When authentication is enabled (`auth.id` is present), this handler:
+/// 1. Creates the room if it doesn't exist
+/// 2. Sets `room.metadata.auth_id` to the authenticated tenant's ID
+/// 3. Issues the token only after metadata is verified/set
+///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit configuration
 /// * `request` - Token request with room name and participant details
@@ -84,7 +99,8 @@ pub struct TokenResponse {
 ///
 /// # Errors
 /// * 400 Bad Request - Invalid request data (empty fields)
-/// * 500 Internal Server Error - LiveKit service not configured or token generation failed
+/// * 403 Forbidden - Room exists with a different tenant's `auth_id`
+/// * 500 Internal Server Error - LiveKit service not configured, room creation failed, or token generation failed
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -92,9 +108,10 @@ pub struct TokenResponse {
         path = "/livekit/token",
         request_body = TokenRequest,
         responses(
-            (status = 200, description = "Token generated successfully", body = TokenResponse),
+            (status = 200, description = "Token generated successfully. Room is created if it doesn't exist and metadata.auth_id is set.", body = TokenResponse),
             (status = 400, description = "Invalid request (missing or empty fields)"),
-            (status = 500, description = "LiveKit service not configured or token generation failed")
+            (status = 403, description = "Access denied: room exists with a different tenant's auth_id"),
+            (status = 500, description = "LiveKit service not configured, room creation failed, or token generation failed")
         ),
         security(
             ("bearer_auth" = [])
@@ -107,12 +124,15 @@ pub async fn generate_token(
     Extension(auth): Extension<Auth>,
     Json(request): Json<TokenRequest>,
 ) -> Response {
-    // Normalize room name with auth prefix for tenant isolation
-    let room_name = auth.normalize_room_name(&request.room_name);
+    // Use room name as-is (no prefixing) - tenant isolation is via metadata
+    let room_name = &request.room_name;
 
     info!(
-        "Token generation request - room: {} (normalized: {}), participant: {} ({})",
-        request.room_name, room_name, request.participant_name, request.participant_identity
+        auth_id = ?auth.id,
+        room = %room_name,
+        participant = %request.participant_name,
+        identity = %request.participant_identity,
+        "Token generation request"
     );
 
     // Validate that LiveKit handler is configured
@@ -161,9 +181,75 @@ pub async fn generate_token(
             .into_response();
     }
 
-    // Generate token using normalized room name and custom participant identity
+    // If auth.id exists (and is non-empty/non-whitespace), ensure room exists and has
+    // correct auth_id in metadata. This creates the room if needed and associates it
+    // with the tenant. Token issuance only proceeds after metadata is set.
+    // Empty or whitespace-only auth.id is treated as unauthenticated mode.
+    if let Some(auth_id) = auth.effective_id() {
+        match room_handler
+            .ensure_room_with_auth_id(room_name, auth_id)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    room = %room_name,
+                    auth_id = %auth_id,
+                    "Room exists with correct auth_id"
+                );
+            }
+            Err(LiveKitError::MetadataConflict {
+                existing,
+                attempted,
+            }) => {
+                warn!(
+                    room = %room_name,
+                    existing_auth_id = %existing,
+                    attempted_auth_id = %attempted,
+                    "Token generation denied: room belongs to different tenant"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Access denied: room belongs to a different tenant"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(LiveKitError::RoomNotFound(_)) => {
+                // This should not happen after create attempt - indicates a serious issue
+                error!(
+                    room = %room_name,
+                    auth_id = %auth_id,
+                    "Room could not be created or found after creation attempt"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Failed to create room: room not found after creation attempt"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                error!(
+                    room = %room_name,
+                    error = %e,
+                    "Failed to ensure room with auth_id"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to prepare room: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Generate token using raw room name
     let token = match room_handler.user_token(
-        &room_name,
+        room_name,
         &request.participant_identity,
         &request.participant_name,
     ) {
@@ -180,12 +266,16 @@ pub async fn generate_token(
         }
     };
 
-    info!("Successfully generated token for room: {}", room_name);
+    info!(
+        room = %room_name,
+        identity = %request.participant_identity,
+        "Successfully generated token"
+    );
 
-    // Build response with normalized room name so clients know the actual room
+    // Build response with clean room name (no prefixing)
     let response = TokenResponse {
         token,
-        room_name,
+        room_name: room_name.clone(),
         participant_identity: request.participant_identity,
         livekit_url: state.config.livekit_public_url.clone(),
     };

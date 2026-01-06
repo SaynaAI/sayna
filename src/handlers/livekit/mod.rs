@@ -14,8 +14,19 @@
 //! - `DELETE /livekit/participant` - Remove a participant from a room
 //! - `POST /livekit/participant/mute` - Mute/unmute a participant's track
 //! - `POST /livekit/webhook` - Receive and process LiveKit webhook events
+//!
+//! # Authentication
+//!
+//! Tenant isolation is enforced via `room.metadata.auth_id`:
+//! - Token generation sets `auth_id` in room metadata
+//! - Room listing filters by matching `auth_id`
+//! - Room access is validated against `auth_id` before operations
+//!
+//! When authentication is disabled (`auth.id` is None), all rooms are accessible
+//! for backward compatibility.
 
 mod participants;
+pub mod room_guard;
 mod rooms;
 mod token;
 mod webhook;

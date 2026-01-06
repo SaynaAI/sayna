@@ -1,8 +1,15 @@
 //! LiveKit rooms listing handler
 //!
 //! This module provides REST API endpoints for listing LiveKit rooms
-//! and retrieving detailed room information with participants,
-//! filtered by the authenticated client's ID prefix for tenant isolation.
+//! and retrieving detailed room information with participants.
+//!
+//! ## Authentication
+//!
+//! Tenant isolation is enforced via `room.metadata.auth_id`:
+//! - `list_rooms`: Returns only rooms with matching `auth_id` in metadata
+//! - `get_room_details`: Validates `auth_id` before returning room data
+//!
+//! When authentication is disabled (`auth.id` is None), all rooms are accessible.
 
 use axum::{
     Extension, Json,
@@ -14,8 +21,9 @@ use livekit_protocol::participant_info;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
+use super::room_guard::{check_room_access_with_data, filter_rooms_by_auth};
 use crate::auth::Auth;
 use crate::state::AppState;
 
@@ -24,7 +32,7 @@ use crate::state::AppState;
 /// # Example
 /// ```json
 /// {
-///   "name": "project1_conversation-room-123",
+///   "name": "conversation-room-123",
 ///   "num_participants": 2,
 ///   "creation_time": 1703123456
 /// }
@@ -32,11 +40,8 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RoomInfo {
-    /// The full room name (includes tenant prefix)
-    #[cfg_attr(
-        feature = "openapi",
-        schema(example = "project1_conversation-room-123")
-    )]
+    /// The room name
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
     pub name: String,
     /// Number of current participants in the room
     #[cfg_attr(feature = "openapi", schema(example = 2))]
@@ -53,12 +58,12 @@ pub struct RoomInfo {
 /// {
 ///   "rooms": [
 ///     {
-///       "name": "project1_room-1",
+///       "name": "room-1",
 ///       "num_participants": 2,
 ///       "creation_time": 1703123456
 ///     },
 ///     {
-///       "name": "project1_room-2",
+///       "name": "room-2",
 ///       "num_participants": 0,
 ///       "creation_time": 1703123789
 ///     }
@@ -68,14 +73,14 @@ pub struct RoomInfo {
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListRoomsResponse {
-    /// List of rooms belonging to the authenticated client
+    /// List of rooms belonging to the authenticated client (filtered by metadata.auth_id)
     pub rooms: Vec<RoomInfo>,
 }
 
 /// Handler for GET /livekit/rooms endpoint
 ///
 /// Lists all LiveKit rooms belonging to the authenticated client.
-/// Rooms are filtered by the auth.id prefix for tenant isolation.
+/// Rooms are filtered by `metadata.auth_id` for tenant isolation.
 ///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit configuration
@@ -83,6 +88,10 @@ pub struct ListRoomsResponse {
 ///
 /// # Returns
 /// * `Response` - JSON response with rooms list or error status
+///
+/// # Filtering
+/// - When `auth.id` is present: Returns only rooms where `metadata.auth_id == auth.id`
+/// - When `auth.id` is absent: Returns all rooms (backward-compatible mode)
 ///
 /// # Errors
 /// * 500 Internal Server Error - LiveKit service not configured or API call failed
@@ -105,12 +114,8 @@ pub async fn list_rooms(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<Auth>,
 ) -> Response {
-    // Build the prefix for filtering rooms by tenant
-    let prefix = auth.id.as_ref().map(|id| format!("{}_", id));
-
     info!(
         auth_id = ?auth.id,
-        prefix = ?prefix,
         "Listing LiveKit rooms"
     );
 
@@ -129,8 +134,8 @@ pub async fn list_rooms(
         }
     };
 
-    // List rooms with prefix filter
-    let rooms = match room_handler.list_rooms(prefix.as_deref()).await {
+    // Fetch all rooms (no prefix filtering at LiveKit level)
+    let all_rooms = match room_handler.list_rooms(None).await {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to list LiveKit rooms: {:?}", e);
@@ -144,14 +149,17 @@ pub async fn list_rooms(
         }
     };
 
+    // Filter rooms by metadata.auth_id (tenant isolation)
+    let filtered_rooms = filter_rooms_by_auth(&auth, all_rooms);
+
     info!(
         auth_id = ?auth.id,
-        count = rooms.len(),
+        count = filtered_rooms.len(),
         "Successfully listed LiveKit rooms"
     );
 
     // Convert to response format
-    let room_infos: Vec<RoomInfo> = rooms
+    let room_infos: Vec<RoomInfo> = filtered_rooms
         .into_iter()
         .map(|r| RoomInfo {
             name: r.name,
@@ -225,11 +233,11 @@ pub struct ParticipantInfo {
 /// ```json
 /// {
 ///   "sid": "RM_xyz789",
-///   "name": "project1_conversation-room-123",
+///   "name": "conversation-room-123",
 ///   "num_participants": 2,
 ///   "max_participants": 10,
 ///   "creation_time": 1703123456,
-///   "metadata": "",
+///   "metadata": "{\"auth_id\": \"tenant-123\"}",
 ///   "active_recording": false,
 ///   "participants": [...]
 /// }
@@ -241,11 +249,8 @@ pub struct RoomDetailsResponse {
     #[cfg_attr(feature = "openapi", schema(example = "RM_xyz789"))]
     pub sid: String,
 
-    /// The full room name (includes tenant prefix)
-    #[cfg_attr(
-        feature = "openapi",
-        schema(example = "project1_conversation-room-123")
-    )]
+    /// The room name
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
     pub name: String,
 
     /// Number of current participants in the room
@@ -298,8 +303,7 @@ fn participant_kind_to_string(kind: i32) -> String {
 /// Handler for GET /livekit/rooms/{room_name} endpoint
 ///
 /// Returns detailed information about a specific LiveKit room including
-/// all current participants. The room name is normalized with the auth.id
-/// prefix for tenant isolation.
+/// all current participants. Access is authorized via `metadata.auth_id` check.
 ///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit configuration
@@ -309,8 +313,12 @@ fn participant_kind_to_string(kind: i32) -> String {
 /// # Returns
 /// * `Response` - JSON response with room details or error status
 ///
+/// # Authorization
+/// - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+/// - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+///
 /// # Errors
-/// * 404 Not Found - Room not found or not accessible
+/// * 404 Not Found - Room not found or access denied (masked as not found)
 /// * 500 Internal Server Error - LiveKit service not configured or API call failed
 #[cfg_attr(
     feature = "openapi",
@@ -347,13 +355,9 @@ pub async fn get_room_details(
             .into_response();
     }
 
-    // Normalize room name with auth prefix for tenant isolation
-    let normalized_room_name = auth.normalize_room_name(&room_name);
-
     info!(
         auth_id = ?auth.id,
         room = %room_name,
-        normalized_room = %normalized_room_name,
         "Getting LiveKit room details"
     );
 
@@ -372,38 +376,19 @@ pub async fn get_room_details(
         }
     };
 
-    // Get room details with participants
-    let (room, participants) = match room_handler.get_room_details(&normalized_room_name).await {
-        Ok(result) => result,
-        Err(e) => {
-            let error_msg = e.to_string();
-            if error_msg.contains("not found") {
-                warn!(
-                    room = %normalized_room_name,
-                    "Room not found"
-                );
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "error": format!("Room '{}' not found", room_name)
-                    })),
-                )
-                    .into_response();
+    // Get room details with authorization check via metadata.auth_id
+    let (room, participants) =
+        match check_room_access_with_data(&auth, &room_name, room_handler).await {
+            Ok(result) => result,
+            Err(e) => {
+                // Return masked error (404) to avoid leaking room existence
+                return e.into_response_masked();
             }
-            error!("Failed to get room details: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to get room details: {}", e)
-                })),
-            )
-                .into_response();
-        }
-    };
+        };
 
     info!(
         auth_id = ?auth.id,
-        room = %normalized_room_name,
+        room = %room_name,
         num_participants = participants.len(),
         "Successfully retrieved room details"
     );
