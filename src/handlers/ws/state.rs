@@ -36,7 +36,7 @@ pub struct ConnectionState {
     pub livekit_local_identity: Option<String>,
     /// Recording egress ID for cleanup operations
     pub recording_egress_id: Option<String>,
-    /// Auth context for this connection (used for room name normalization)
+    /// Auth context for this connection (used for room metadata auth_id guard)
     pub auth: Auth,
 }
 

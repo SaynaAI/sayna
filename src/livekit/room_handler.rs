@@ -703,6 +703,292 @@ impl LiveKitRoomHandler {
             .await
             .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to mute track: {e}")))
     }
+
+    /// Update room metadata for a specified room
+    ///
+    /// This is a low-level method that directly sets the room metadata. For setting
+    /// the `auth_id` field specifically, prefer using [`ensure_room_auth_id`] which
+    /// handles conflict detection and preserves existing metadata.
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `metadata` - New metadata string (typically JSON)
+    ///
+    /// # Returns
+    /// * `Result<(), LiveKitError>` - Success or error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// handler.update_room_metadata("my-room", r#"{"auth_id": "tenant-123"}"#).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_room_metadata(
+        &self,
+        room_name: &str,
+        metadata: &str,
+    ) -> Result<(), LiveKitError> {
+        self.room_client
+            .update_room_metadata(room_name, metadata)
+            .await
+            .map_err(|e| {
+                LiveKitError::ConnectionFailed(format!("Failed to update room metadata: {e}"))
+            })?;
+
+        Ok(())
+    }
+
+    /// Ensure a room has the specified `auth_id` in its metadata
+    ///
+    /// This method safely associates a room with a tenant identifier (`auth_id`) by:
+    /// - Reading the current room metadata
+    /// - Merging the `auth_id` into existing metadata (preserving other keys)
+    /// - Only updating if the metadata actually changed
+    ///
+    /// # Security
+    ///
+    /// This method prevents cross-tenant hijacking: if the room already has a
+    /// different `auth_id`, it returns a `MetadataConflict` error rather than
+    /// overwriting the existing value.
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the LiveKit room
+    /// * `auth_id` - The tenant identifier to associate with the room
+    ///
+    /// # Returns
+    /// * `Ok(())` - Room metadata now contains the auth_id
+    /// * `Err(MetadataConflict)` - Room has a different auth_id (cross-tenant attempt)
+    /// * `Err(RoomNotFound)` - Room does not exist
+    /// * `Err(ConnectionFailed)` - Network or API error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Associate room with tenant
+    /// handler.ensure_room_auth_id("my-room", "tenant-123").await?;
+    ///
+    /// // Calling again with same auth_id is idempotent
+    /// handler.ensure_room_auth_id("my-room", "tenant-123").await?;
+    ///
+    /// // Different auth_id returns error
+    /// let result = handler.ensure_room_auth_id("my-room", "tenant-456").await;
+    /// assert!(result.is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ensure_room_auth_id(
+        &self,
+        room_name: &str,
+        auth_id: &str,
+    ) -> Result<(), LiveKitError> {
+        use super::metadata::{MetadataError, get_auth_id, merge_auth_id};
+
+        // Get current room details
+        let rooms = self
+            .room_client
+            .list_rooms(vec![room_name.to_string()])
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to get room: {e}")))?;
+
+        let room = rooms
+            .into_iter()
+            .next()
+            .ok_or_else(|| LiveKitError::RoomNotFound(room_name.to_string()))?;
+
+        let current_metadata = &room.metadata;
+
+        // Check if auth_id is already set correctly (optimization to avoid unnecessary update)
+        if let Some(existing_id) = get_auth_id(current_metadata)
+            && existing_id == auth_id
+        {
+            // Already set correctly, nothing to do
+            return Ok(());
+        }
+
+        // Merge auth_id into metadata
+        let new_metadata = merge_auth_id(current_metadata, auth_id).map_err(|e| match e {
+            MetadataError::AuthIdConflict {
+                existing,
+                attempted,
+            } => LiveKitError::MetadataConflict {
+                existing,
+                attempted,
+            },
+            MetadataError::InvalidJson(msg) => {
+                LiveKitError::ConnectionFailed(format!("Invalid room metadata JSON: {msg}"))
+            }
+            MetadataError::NotAnObject(msg) => {
+                LiveKitError::ConnectionFailed(format!("Room metadata is not a JSON object: {msg}"))
+            }
+        })?;
+
+        // Update room metadata
+        self.update_room_metadata(room_name, &new_metadata).await
+    }
+
+    /// Ensure a room exists and has the correct `auth_id` in its metadata.
+    ///
+    /// This method implements a create-if-not-exists pattern with proper race condition handling:
+    /// 1. Try to ensure the room has the correct auth_id
+    /// 2. If the room doesn't exist, create it
+    /// 3. Retry ensuring auth_id after creation (handles race conditions)
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the room to create/verify
+    /// * `auth_id` - Tenant identifier to set in room metadata
+    ///
+    /// # Returns
+    /// * `Ok(())` - Room exists (or was created) with correct auth_id
+    /// * `Err(LiveKitError::MetadataConflict)` - Room exists with different auth_id
+    /// * `Err(LiveKitError::RoomNotFound)` - Room could not be created (unexpected state)
+    /// * `Err(LiveKitError::ConnectionFailed)` - Network or API error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Creates room if missing and sets auth_id
+    /// handler.ensure_room_with_auth_id("my-room", "tenant-123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ensure_room_with_auth_id(
+        &self,
+        room_name: &str,
+        auth_id: &str,
+    ) -> Result<(), LiveKitError> {
+        use tracing::{debug, info, warn};
+
+        // First attempt: check if room exists and has correct auth_id
+        match self.ensure_room_auth_id(room_name, auth_id).await {
+            Ok(()) => {
+                debug!(room = %room_name, auth_id = %auth_id, "Room auth_id verified");
+                return Ok(());
+            }
+            Err(LiveKitError::RoomNotFound(_)) => {
+                debug!(room = %room_name, "Room not found, will create");
+                // Fall through to create room
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Room doesn't exist, try to create it
+        match self.create_room(room_name).await {
+            Ok(()) => {
+                info!(room = %room_name, "Created room, now setting auth_id");
+            }
+            Err(e) => {
+                // Creation failed - might be a race condition (room created by another process)
+                // or a genuine error. Either way, retry ensure_room_auth_id to check.
+                warn!(
+                    room = %room_name,
+                    error = %e,
+                    "Room creation failed, retrying ensure_room_auth_id"
+                );
+            }
+        }
+
+        // Second attempt: room should now exist (either we created it or someone else did)
+        self.ensure_room_auth_id(room_name, auth_id).await
+    }
+
+    /// Ensure a room exists (create if missing) without modifying metadata.
+    ///
+    /// This is used for unauthenticated mode where no tenant isolation is required.
+    /// The room is created if it doesn't exist, but no metadata is set.
+    ///
+    /// # Arguments
+    /// * `room_name` - Name of the room to create/verify
+    ///
+    /// # Returns
+    /// * `Ok(())` - Room exists (or was created)
+    /// * `Err(LiveKitError::ConnectionFailed)` - Network or API error
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use sayna::livekit::room_handler::LiveKitRoomHandler;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let handler = LiveKitRoomHandler::new(
+    ///     "http://localhost:7880".to_string(),
+    ///     "api_key".to_string(),
+    ///     "api_secret".to_string(),
+    ///     None,
+    /// )?;
+    ///
+    /// // Creates room if missing, does not set metadata
+    /// handler.ensure_room_exists("my-room").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ensure_room_exists(&self, room_name: &str) -> Result<(), LiveKitError> {
+        use tracing::{debug, info, warn};
+
+        // Try to check if room exists by querying it
+        let rooms = self
+            .room_client
+            .list_rooms(vec![room_name.to_string()])
+            .await
+            .map_err(|e| LiveKitError::ConnectionFailed(format!("Failed to check room: {e}")))?;
+
+        if rooms.iter().any(|r| r.name == room_name) {
+            debug!(room = %room_name, "Room already exists");
+            return Ok(());
+        }
+
+        // Room doesn't exist, try to create it
+        match self.create_room(room_name).await {
+            Ok(()) => {
+                info!(room = %room_name, "Created room (no metadata)");
+                Ok(())
+            }
+            Err(e) => {
+                // Creation failed - might be race condition, re-check existence
+                let rooms = self
+                    .room_client
+                    .list_rooms(vec![room_name.to_string()])
+                    .await
+                    .map_err(|e| {
+                        LiveKitError::ConnectionFailed(format!("Failed to check room: {e}"))
+                    })?;
+
+                if rooms.iter().any(|r| r.name == room_name) {
+                    debug!(room = %room_name, "Room exists after creation attempt (race condition)");
+                    Ok(())
+                } else {
+                    warn!(room = %room_name, error = %e, "Room creation failed and room does not exist");
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1040,5 +1326,149 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Failed to get room"));
+    }
+
+    #[tokio::test]
+    async fn test_update_room_metadata_with_invalid_server() {
+        // This test validates that update_room_metadata fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler
+            .update_room_metadata("test-room", r#"{"auth_id": "tenant-123"}"#)
+            .await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to update room metadata"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_room_auth_id_with_invalid_server() {
+        // This test validates that ensure_room_auth_id fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.ensure_room_auth_id("test-room", "tenant-123").await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+        // The error should be about failing to get the room (first operation)
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to get room"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_room_with_auth_id_with_invalid_server() {
+        // This test validates that ensure_room_with_auth_id fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler
+            .ensure_room_with_auth_id("test-room", "tenant-123")
+            .await;
+
+        // We expect an error because there's no real LiveKit server
+        // After room creation attempt, it should try ensure_room_auth_id again
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_room_exists_with_invalid_server() {
+        // This test validates that ensure_room_exists fails gracefully when server is unreachable
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.ensure_room_exists("test-room").await;
+
+        // We expect an error because there's no real LiveKit server
+        assert!(result.is_err());
+    }
+
+    // Unit tests for metadata error conversion in ensure_room_auth_id
+    // The actual metadata logic is tested in the metadata module
+    mod metadata_integration {
+        use super::super::super::metadata::{MetadataError, merge_auth_id};
+        use super::*;
+
+        #[test]
+        fn test_metadata_conflict_detection() {
+            // Test that merge_auth_id correctly detects conflicts
+            let result = merge_auth_id(r#"{"auth_id": "tenant-A"}"#, "tenant-B");
+            match result {
+                Err(MetadataError::AuthIdConflict {
+                    existing,
+                    attempted,
+                }) => {
+                    assert_eq!(existing, "tenant-A");
+                    assert_eq!(attempted, "tenant-B");
+                }
+                _ => panic!("Expected AuthIdConflict error"),
+            }
+        }
+
+        #[test]
+        fn test_metadata_preserves_existing_keys() {
+            // Test that merge_auth_id preserves other metadata keys
+            let result =
+                merge_auth_id(r#"{"existing": "value", "count": 42}"#, "tenant-new").unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(parsed["auth_id"], "tenant-new");
+            assert_eq!(parsed["existing"], "value");
+            assert_eq!(parsed["count"], 42);
+        }
+
+        #[test]
+        fn test_metadata_idempotent_same_auth_id() {
+            // Test that setting the same auth_id is idempotent
+            let original = r#"{"auth_id": "tenant-same", "other": "data"}"#;
+            let result = merge_auth_id(original, "tenant-same").unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(parsed["auth_id"], "tenant-same");
+            assert_eq!(parsed["other"], "data");
+        }
+
+        #[test]
+        fn test_livekit_error_metadata_conflict_display() {
+            // Test the display format of MetadataConflict error
+            let err = LiveKitError::MetadataConflict {
+                existing: "tenant-A".to_string(),
+                attempted: "tenant-B".to_string(),
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("tenant-A"));
+            assert!(msg.contains("tenant-B"));
+            assert!(msg.contains("metadata conflict"));
+        }
+
+        #[test]
+        fn test_livekit_error_room_not_found_display() {
+            // Test the display format of RoomNotFound error
+            let err = LiveKitError::RoomNotFound("my-room".to_string());
+            let msg = err.to_string();
+            assert!(msg.contains("my-room"));
+            assert!(msg.contains("not found"));
+        }
     }
 }

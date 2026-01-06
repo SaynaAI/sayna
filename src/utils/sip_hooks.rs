@@ -48,20 +48,39 @@ pub struct CachedSipHook {
     pub host: String,
     /// HTTPS URL to forward webhook events to
     pub url: String,
+    /// Tenant identifier for this hook (written to LiveKit room metadata).
+    /// Defaults to "default" for backward compatibility with cache files
+    /// created before the auth_id field was added.
+    #[serde(default = "default_auth_id")]
+    pub auth_id: String,
+}
+
+/// Default auth_id value for backward compatibility.
+///
+/// Used when deserializing cache files that were created before
+/// the `auth_id` field was added to `CachedSipHook`.
+fn default_auth_id() -> String {
+    "default".to_string()
 }
 
 impl CachedSipHook {
     /// Creates a new cached SIP hook with normalized host.
-    pub fn new(host: impl Into<String>, url: impl Into<String>) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        url: impl Into<String>,
+        auth_id: impl Into<String>,
+    ) -> Self {
         Self {
             host: host.into().trim().to_lowercase(),
             url: url.into(),
+            auth_id: auth_id.into().trim().to_string(),
         }
     }
 
-    /// Normalizes the host to lowercase.
+    /// Normalizes the host to lowercase and auth_id by trimming.
     pub fn normalize(&mut self) {
         self.host = self.host.trim().to_lowercase();
+        self.auth_id = self.auth_id.trim().to_string();
     }
 }
 
@@ -152,7 +171,7 @@ pub async fn write_hooks_cache(cache_dir: &Path, hooks: &[CachedSipHook]) -> Res
     // Normalize hosts before validation
     let normalized_hooks: Vec<CachedSipHook> = hooks
         .iter()
-        .map(|h| CachedSipHook::new(h.host.clone(), h.url.clone()))
+        .map(|h| CachedSipHook::new(h.host.clone(), h.url.clone(), h.auth_id.clone()))
         .collect();
 
     // Validate no duplicate hosts
@@ -225,6 +244,7 @@ where
             CachedSipHook {
                 host,
                 url: hook.url().to_string(),
+                auth_id: hook.auth_id().to_string(),
             },
         );
     }
@@ -266,6 +286,7 @@ pub fn merge_hooks_with_secrets(
                 host,
                 url: hook.url.clone(),
                 secret: hook.secret.clone(),
+                auth_id: hook.auth_id.clone(),
             },
         );
     }
@@ -284,6 +305,7 @@ pub fn merge_hooks_with_secrets(
                 host,
                 url: hook.url.clone(),
                 secret: None,
+                auth_id: hook.auth_id.clone(),
             },
         );
     }
@@ -297,6 +319,7 @@ pub fn merge_hooks_with_secrets(
 pub trait SipHookInfo {
     fn host(&self) -> &str;
     fn url(&self) -> &str;
+    fn auth_id(&self) -> &str;
 }
 
 impl SipHookInfo for CachedSipHook {
@@ -306,6 +329,10 @@ impl SipHookInfo for CachedSipHook {
 
     fn url(&self) -> &str {
         &self.url
+    }
+
+    fn auth_id(&self) -> &str {
+        &self.auth_id
     }
 }
 
@@ -344,7 +371,7 @@ where
             // Return existing hooks converted to CachedSipHook
             return existing_hooks
                 .iter()
-                .map(|h| CachedSipHook::new(h.host(), h.url()))
+                .map(|h| CachedSipHook::new(h.host(), h.url(), h.auth_id()))
                 .collect();
         }
     };
@@ -356,7 +383,7 @@ where
         );
         return existing_hooks
             .iter()
-            .map(|h| CachedSipHook::new(h.host(), h.url()))
+            .map(|h| CachedSipHook::new(h.host(), h.url(), h.auth_id()))
             .collect();
     }
 
@@ -433,14 +460,65 @@ mod tests {
 
     #[test]
     fn test_cached_sip_hook_new_normalizes_host() {
-        let hook = CachedSipHook::new("Example.COM", "https://example.com/webhook");
+        let hook = CachedSipHook::new("Example.COM", "https://example.com/webhook", "tenant-1");
         assert_eq!(hook.host, "example.com");
     }
 
     #[test]
     fn test_cached_sip_hook_new_trims_host() {
-        let hook = CachedSipHook::new("  example.com  ", "https://example.com/webhook");
+        let hook = CachedSipHook::new("  example.com  ", "https://example.com/webhook", "tenant-1");
         assert_eq!(hook.host, "example.com");
+    }
+
+    #[test]
+    fn test_cached_sip_hook_new_trims_auth_id() {
+        let hook = CachedSipHook::new("example.com", "https://example.com/webhook", "  tenant-1  ");
+        assert_eq!(hook.auth_id, "tenant-1");
+    }
+
+    #[test]
+    fn test_cached_sip_hook_deserialize_missing_auth_id_defaults_to_default() {
+        // Backward compatibility: old cache files without auth_id should get "default"
+        let json = r#"{"host": "example.com", "url": "https://example.com/webhook"}"#;
+        let hook: CachedSipHook = serde_json::from_str(json).unwrap();
+        assert_eq!(hook.host, "example.com");
+        assert_eq!(hook.url, "https://example.com/webhook");
+        assert_eq!(hook.auth_id, "default");
+    }
+
+    #[test]
+    fn test_cached_sip_hook_deserialize_existing_auth_id_preserved() {
+        // Existing auth_id values should be preserved
+        let json = r#"{"host": "example.com", "url": "https://example.com/webhook", "auth_id": "tenant-123"}"#;
+        let hook: CachedSipHook = serde_json::from_str(json).unwrap();
+        assert_eq!(hook.host, "example.com");
+        assert_eq!(hook.url, "https://example.com/webhook");
+        assert_eq!(hook.auth_id, "tenant-123");
+    }
+
+    #[tokio::test]
+    async fn test_read_hooks_cache_backward_compat_missing_auth_id() {
+        // Test reading a cache file with entries missing auth_id (backward compatibility)
+        let temp_dir = TempDir::new().unwrap();
+        let cache_file = temp_dir.path().join(SIP_HOOKS_CACHE_FILE);
+
+        // Write a cache file in the old format without auth_id
+        let old_format_json = r#"[
+            {"host": "legacy.com", "url": "https://legacy.com/webhook"},
+            {"host": "modern.com", "url": "https://modern.com/webhook", "auth_id": "tenant-modern"}
+        ]"#;
+        fs::write(&cache_file, old_format_json).await.unwrap();
+
+        let hooks = read_hooks_cache(temp_dir.path()).await.unwrap();
+        assert_eq!(hooks.len(), 2);
+
+        // Legacy entry should have default auth_id
+        let legacy_hook = hooks.iter().find(|h| h.host == "legacy.com").unwrap();
+        assert_eq!(legacy_hook.auth_id, "default");
+
+        // Modern entry should preserve existing auth_id
+        let modern_hook = hooks.iter().find(|h| h.host == "modern.com").unwrap();
+        assert_eq!(modern_hook.auth_id, "tenant-modern");
     }
 
     #[test]
@@ -452,8 +530,8 @@ mod tests {
     #[test]
     fn test_validate_no_duplicate_hosts_unique() {
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://a.com"),
-            CachedSipHook::new("other.com", "https://b.com"),
+            CachedSipHook::new("example.com", "https://a.com", "tenant-1"),
+            CachedSipHook::new("other.com", "https://b.com", "tenant-2"),
         ];
         let result = validate_no_duplicate_hosts(&hooks);
         assert!(result.is_ok());
@@ -462,8 +540,8 @@ mod tests {
     #[test]
     fn test_validate_no_duplicate_hosts_duplicate() {
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://a.com"),
-            CachedSipHook::new("EXAMPLE.COM", "https://b.com"),
+            CachedSipHook::new("example.com", "https://a.com", "tenant-1"),
+            CachedSipHook::new("EXAMPLE.COM", "https://b.com", "tenant-2"),
         ];
         let result = validate_no_duplicate_hosts(&hooks);
         assert!(result.is_err());
@@ -493,8 +571,16 @@ mod tests {
     async fn test_write_and_read_hooks_cache() {
         let temp_dir = TempDir::new().unwrap();
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://webhook.example.com/events"),
-            CachedSipHook::new("another.com", "https://webhook.another.com/events"),
+            CachedSipHook::new(
+                "example.com",
+                "https://webhook.example.com/events",
+                "tenant-1",
+            ),
+            CachedSipHook::new(
+                "another.com",
+                "https://webhook.another.com/events",
+                "tenant-2",
+            ),
         ];
 
         // Write
@@ -516,6 +602,7 @@ mod tests {
         let hooks = vec![CachedSipHook {
             host: "EXAMPLE.COM".to_string(),
             url: "https://webhook.example.com/events".to_string(),
+            auth_id: "tenant-1".to_string(),
         }];
 
         write_hooks_cache(temp_dir.path(), &hooks).await.unwrap();
@@ -528,8 +615,8 @@ mod tests {
     async fn test_write_hooks_cache_rejects_duplicates() {
         let temp_dir = TempDir::new().unwrap();
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://a.com"),
-            CachedSipHook::new("EXAMPLE.COM", "https://b.com"),
+            CachedSipHook::new("example.com", "https://a.com", "tenant-1"),
+            CachedSipHook::new("EXAMPLE.COM", "https://b.com", "tenant-2"),
         ];
 
         let result = write_hooks_cache(temp_dir.path(), &hooks).await;
@@ -547,7 +634,11 @@ mod tests {
     #[tokio::test]
     async fn test_delete_hooks_cache_exists() {
         let temp_dir = TempDir::new().unwrap();
-        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let hooks = vec![CachedSipHook::new(
+            "example.com",
+            "https://example.com",
+            "tenant-1",
+        )];
         write_hooks_cache(temp_dir.path(), &hooks).await.unwrap();
 
         let result = delete_hooks_cache(temp_dir.path()).await;
@@ -569,7 +660,11 @@ mod tests {
 
     #[test]
     fn test_merge_hooks_only_existing() {
-        let existing = vec![CachedSipHook::new("example.com", "https://existing.com")];
+        let existing = vec![CachedSipHook::new(
+            "example.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
         let cached: Vec<CachedSipHook> = vec![];
         let result = merge_hooks(&existing, &cached);
         assert_eq!(result.len(), 1);
@@ -579,7 +674,11 @@ mod tests {
     #[test]
     fn test_merge_hooks_only_cached() {
         let existing: Vec<CachedSipHook> = vec![];
-        let cached = vec![CachedSipHook::new("example.com", "https://cached.com")];
+        let cached = vec![CachedSipHook::new(
+            "example.com",
+            "https://cached.com",
+            "tenant-1",
+        )];
         let result = merge_hooks(&existing, &cached);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://cached.com");
@@ -587,17 +686,34 @@ mod tests {
 
     #[test]
     fn test_merge_hooks_cached_overrides_existing() {
-        let existing = vec![CachedSipHook::new("example.com", "https://existing.com")];
-        let cached = vec![CachedSipHook::new("example.com", "https://cached.com")];
+        let existing = vec![CachedSipHook::new(
+            "example.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
+        let cached = vec![CachedSipHook::new(
+            "example.com",
+            "https://cached.com",
+            "tenant-cached",
+        )];
         let result = merge_hooks(&existing, &cached);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://cached.com");
+        assert_eq!(result[0].auth_id, "tenant-cached");
     }
 
     #[test]
     fn test_merge_hooks_case_insensitive_override() {
-        let existing = vec![CachedSipHook::new("Example.COM", "https://existing.com")];
-        let cached = vec![CachedSipHook::new("EXAMPLE.com", "https://cached.com")];
+        let existing = vec![CachedSipHook::new(
+            "Example.COM",
+            "https://existing.com",
+            "tenant-1",
+        )];
+        let cached = vec![CachedSipHook::new(
+            "EXAMPLE.com",
+            "https://cached.com",
+            "tenant-cached",
+        )];
         let result = merge_hooks(&existing, &cached);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://cached.com");
@@ -605,8 +721,16 @@ mod tests {
 
     #[test]
     fn test_merge_hooks_combines_different_hosts() {
-        let existing = vec![CachedSipHook::new("existing.com", "https://existing.com")];
-        let cached = vec![CachedSipHook::new("cached.com", "https://cached.com")];
+        let existing = vec![CachedSipHook::new(
+            "existing.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
+        let cached = vec![CachedSipHook::new(
+            "cached.com",
+            "https://cached.com",
+            "tenant-2",
+        )];
         let result = merge_hooks(&existing, &cached);
         assert_eq!(result.len(), 2);
 
@@ -621,12 +745,14 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
 
         let result = merge_hooks_with_secrets(&config_hooks, &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://existing.com");
         assert_eq!(result[0].secret.as_deref(), Some("secret-1"));
+        assert_eq!(result[0].auth_id, "tenant-1");
     }
 
     #[test]
@@ -635,13 +761,19 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
-        let cached_hooks = vec![CachedSipHook::new("example.com", "https://cached.com")];
+        let cached_hooks = vec![CachedSipHook::new(
+            "example.com",
+            "https://cached.com",
+            "tenant-cached",
+        )];
 
         let result = merge_hooks_with_secrets(&config_hooks, &cached_hooks);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].url, "https://existing.com");
         assert_eq!(result[0].secret.as_deref(), Some("secret-1"));
+        assert_eq!(result[0].auth_id, "tenant-1");
     }
 
     #[test]
@@ -650,8 +782,13 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
-        let cached_hooks = vec![CachedSipHook::new("new.com", "https://cached.com")];
+        let cached_hooks = vec![CachedSipHook::new(
+            "new.com",
+            "https://cached.com",
+            "tenant-new",
+        )];
 
         let result = merge_hooks_with_secrets(&config_hooks, &cached_hooks);
         assert_eq!(result.len(), 2);
@@ -660,12 +797,17 @@ mod tests {
             .find(|h| h.host == "new.com")
             .expect("new hook should be present");
         assert_eq!(new_hook.secret, None);
+        assert_eq!(new_hook.auth_id, "tenant-new");
     }
 
     #[tokio::test]
     async fn test_read_and_merge_hooks_no_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let existing = vec![CachedSipHook::new("example.com", "https://existing.com")];
+        let existing = vec![CachedSipHook::new(
+            "example.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
 
         let result = read_and_merge_hooks(temp_dir.path(), &existing).await;
         assert_eq!(result.len(), 1);
@@ -677,10 +819,18 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Write cached hooks
-        let cached = vec![CachedSipHook::new("new.com", "https://cached.com")];
+        let cached = vec![CachedSipHook::new(
+            "new.com",
+            "https://cached.com",
+            "tenant-cached",
+        )];
         write_hooks_cache(temp_dir.path(), &cached).await.unwrap();
 
-        let existing = vec![CachedSipHook::new("example.com", "https://existing.com")];
+        let existing = vec![CachedSipHook::new(
+            "example.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
         let result = read_and_merge_hooks(temp_dir.path(), &existing).await;
 
         assert_eq!(result.len(), 2);
@@ -694,10 +844,18 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Write cached hooks that override existing
-        let cached = vec![CachedSipHook::new("example.com", "https://cached.com")];
+        let cached = vec![CachedSipHook::new(
+            "example.com",
+            "https://cached.com",
+            "tenant-cached",
+        )];
         write_hooks_cache(temp_dir.path(), &cached).await.unwrap();
 
-        let existing = vec![CachedSipHook::new("example.com", "https://existing.com")];
+        let existing = vec![CachedSipHook::new(
+            "example.com",
+            "https://existing.com",
+            "tenant-1",
+        )];
         let result = read_and_merge_hooks(temp_dir.path(), &existing).await;
 
         assert_eq!(result.len(), 1);
@@ -706,7 +864,11 @@ mod tests {
 
     #[test]
     fn test_remove_hooks_by_hosts_empty_list() {
-        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let hooks = vec![CachedSipHook::new(
+            "example.com",
+            "https://example.com",
+            "tenant-1",
+        )];
         let result = remove_hooks_by_hosts(&hooks, &[]);
         assert_eq!(result.len(), 1);
     }
@@ -714,8 +876,8 @@ mod tests {
     #[test]
     fn test_remove_hooks_by_hosts_removes_matching() {
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://example.com"),
-            CachedSipHook::new("other.com", "https://other.com"),
+            CachedSipHook::new("example.com", "https://example.com", "tenant-1"),
+            CachedSipHook::new("other.com", "https://other.com", "tenant-2"),
         ];
         let result = remove_hooks_by_hosts(&hooks, &["example.com".to_string()]);
         assert_eq!(result.len(), 1);
@@ -725,8 +887,8 @@ mod tests {
     #[test]
     fn test_remove_hooks_by_hosts_case_insensitive() {
         let hooks = vec![
-            CachedSipHook::new("example.com", "https://example.com"),
-            CachedSipHook::new("other.com", "https://other.com"),
+            CachedSipHook::new("example.com", "https://example.com", "tenant-1"),
+            CachedSipHook::new("other.com", "https://other.com", "tenant-2"),
         ];
         let result = remove_hooks_by_hosts(&hooks, &["EXAMPLE.COM".to_string()]);
         assert_eq!(result.len(), 1);
@@ -736,9 +898,9 @@ mod tests {
     #[test]
     fn test_remove_hooks_by_hosts_removes_multiple() {
         let hooks = vec![
-            CachedSipHook::new("a.com", "https://a.com"),
-            CachedSipHook::new("b.com", "https://b.com"),
-            CachedSipHook::new("c.com", "https://c.com"),
+            CachedSipHook::new("a.com", "https://a.com", "tenant-a"),
+            CachedSipHook::new("b.com", "https://b.com", "tenant-b"),
+            CachedSipHook::new("c.com", "https://c.com", "tenant-c"),
         ];
         let result = remove_hooks_by_hosts(&hooks, &["a.com".to_string(), "c.com".to_string()]);
         assert_eq!(result.len(), 1);
@@ -747,7 +909,11 @@ mod tests {
 
     #[test]
     fn test_remove_hooks_by_hosts_nonexistent_host() {
-        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let hooks = vec![CachedSipHook::new(
+            "example.com",
+            "https://example.com",
+            "tenant-1",
+        )];
         let result = remove_hooks_by_hosts(&hooks, &["nonexistent.com".to_string()]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].host, "example.com");
@@ -755,7 +921,11 @@ mod tests {
 
     #[test]
     fn test_remove_hooks_by_hosts_trims_whitespace() {
-        let hooks = vec![CachedSipHook::new("example.com", "https://example.com")];
+        let hooks = vec![CachedSipHook::new(
+            "example.com",
+            "https://example.com",
+            "tenant-1",
+        )];
         let result = remove_hooks_by_hosts(&hooks, &["  example.com  ".to_string()]);
         assert_eq!(result.len(), 0);
     }

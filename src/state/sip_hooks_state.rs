@@ -93,6 +93,7 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
         let sip_config = SipConfig {
             room_prefix: "sip-".to_string(),
@@ -109,6 +110,7 @@ mod tests {
 
         assert_eq!(state.get_hooks().len(), 1);
         assert_eq!(state.get_hooks()[0].url, "https://existing.com");
+        assert_eq!(state.get_hooks()[0].auth_id, "tenant-1");
         assert_eq!(
             state.get_signing_secret(&state.get_hooks()[0]),
             Some("secret-1")
@@ -121,6 +123,7 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
         let sip_config = SipConfig {
             room_prefix: "sip-".to_string(),
@@ -134,8 +137,8 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let cached = vec![
-            CachedSipHook::new("example.com", "https://cached.com"),
-            CachedSipHook::new("new.com", "https://new.com/hook"),
+            CachedSipHook::new("example.com", "https://cached.com", "tenant-cached"),
+            CachedSipHook::new("new.com", "https://new.com/hook", "tenant-new"),
         ];
         sip_hooks::write_hooks_cache(temp_dir.path(), &cached)
             .await
@@ -147,10 +150,12 @@ mod tests {
         let hook = state.get_hook_for_domain("example.com").unwrap();
         assert_eq!(hook.url, "https://existing.com");
         assert_eq!(hook.secret.as_deref(), Some("secret-1"));
+        assert_eq!(hook.auth_id, "tenant-1");
 
         let new_hook = state.get_hook_for_domain("new.com").unwrap();
         assert_eq!(new_hook.url, "https://new.com/hook");
         assert!(new_hook.secret.is_none());
+        assert_eq!(new_hook.auth_id, "tenant-new");
     }
 
     #[tokio::test]
@@ -166,7 +171,11 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let cached = vec![CachedSipHook::new("cached.com", "https://cached.com/hook")];
+        let cached = vec![CachedSipHook::new(
+            "cached.com",
+            "https://cached.com/hook",
+            "tenant-cached",
+        )];
         sip_hooks::write_hooks_cache(temp_dir.path(), &cached)
             .await
             .unwrap();
@@ -175,6 +184,7 @@ mod tests {
         let hook = state.get_hook_for_domain("cached.com").unwrap();
 
         assert_eq!(state.get_signing_secret(hook), Some("global-secret"));
+        assert_eq!(hook.auth_id, "tenant-cached");
     }
 
     #[tokio::test]
@@ -183,6 +193,7 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://existing.com".to_string(),
             secret: Some("secret-1".to_string()),
+            auth_id: "tenant-1".to_string(),
         }];
         let sip_config = SipConfig {
             room_prefix: "sip-".to_string(),
@@ -197,8 +208,8 @@ mod tests {
         let state = SipHooksState::new(&sip_config, None).await;
         let mut state = state;
         let updated = vec![
-            CachedSipHook::new("example.com", "https://updated.com"),
-            CachedSipHook::new("runtime.com", "https://runtime.com"),
+            CachedSipHook::new("example.com", "https://updated.com", "tenant-updated"),
+            CachedSipHook::new("runtime.com", "https://runtime.com", "tenant-runtime"),
         ];
 
         let result = state.update_hooks(updated, &config_hooks);
@@ -206,10 +217,12 @@ mod tests {
 
         let config_hook = state.get_hook_for_domain("example.com").unwrap();
         assert_eq!(config_hook.url, "https://existing.com");
+        assert_eq!(config_hook.auth_id, "tenant-1");
         assert_eq!(state.get_signing_secret(config_hook), Some("secret-1"));
 
         let runtime_hook = state.get_hook_for_domain("runtime.com").unwrap();
         assert_eq!(runtime_hook.url, "https://runtime.com");
+        assert_eq!(runtime_hook.auth_id, "tenant-runtime");
         assert_eq!(state.get_signing_secret(runtime_hook), Some("global"));
     }
 
@@ -219,6 +232,7 @@ mod tests {
             host: "Example.COM".to_string(),
             url: "https://existing.com".to_string(),
             secret: None,
+            auth_id: "tenant-1".to_string(),
         }];
         let sip_config = SipConfig {
             room_prefix: "sip-".to_string(),
@@ -234,5 +248,6 @@ mod tests {
         let hook = state.get_hook_for_domain("example.com").unwrap();
         assert_eq!(hook.url, "https://existing.com");
         assert_eq!(hook.host, "example.com");
+        assert_eq!(hook.auth_id, "tenant-1");
     }
 }
