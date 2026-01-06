@@ -206,10 +206,14 @@ All domains are normalized to lowercase for case-insensitive matching against ho
 │     └── If no match: Log warning, skip forwarding                    │
 │                          │                                           │
 │                          ▼                                           │
-│  6. Sign payload with HMAC-SHA256                                    │
+│  6. Set room metadata auth_id (from hook config)                     │
+│     └── Enables tenant isolation without changing room name          │
 │                          │                                           │
 │                          ▼                                           │
-│  7. Forward to customer webhook (async, non-blocking)                │
+│  7. Sign payload with HMAC-SHA256                                    │
+│                          │                                           │
+│                          ▼                                           │
+│  8. Forward to customer webhook (async, non-blocking)                │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -235,12 +239,18 @@ sip:
   hooks:
     - host: "customer-a.com"
       url: "https://webhook.customer-a.com/sip-events"
+      # auth_id: Tenant identifier (written to LiveKit room metadata)
+      # - Required when AUTH_REQUIRED=true
+      # - Optional/empty when AUTH_REQUIRED=false (defaults to "")
+      auth_id: "tenant-a"
 
     - host: "customer-b.com"
       url: "https://webhook.customer-b.com/sip-events"
+      auth_id: "tenant-b"
 
     - host: "customer-c.example.org"
       url: "https://api.customer-c.example.org/webhooks/voice"
+      auth_id: "tenant-c"
 ```
 
 ### Runtime Hook Management
@@ -257,7 +267,7 @@ GET /sip/hooks
 POST /sip/hooks
 {
   "hooks": [
-    {"host": "new-customer.com", "url": "https://webhook.new-customer.com/events"}
+    {"host": "new-customer.com", "url": "https://webhook.new-customer.com/events", "auth_id": "tenant-new"}
   ]
 }
 ```
@@ -353,7 +363,8 @@ See [LiveKit Integration - Webhook Signing](livekit_integration.md#webhook-signi
 5. **Sayna Processing**:
    - Receives webhook, verifies LiveKit signature
    - Extracts domain: `customer-a.com` (from `sip.h.x-to-ip`)
-   - Looks up hook: finds `https://webhook.customer-a.com/sip-events`
+   - Looks up hook: finds `https://webhook.customer-a.com/sip-events` with `auth_id: tenant-a`
+   - Sets room metadata: `{"auth_id": "tenant-a"}` (enables tenant isolation)
    - Signs and forwards payload to Customer A's webhook
 
 6. **Customer A's System**:

@@ -135,7 +135,10 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   - `500 Internal Server Error` for credential issues or synthesis errors.
 
 #### `POST /livekit/token`
-- **Purpose**: Issue a LiveKit access token for a participant so clients can join the room announced in the WebSocket `ready` payload.
+- **Purpose**: Issue a LiveKit access token for a participant so clients can join a room.
+- **Room Creation**: When authentication is enabled (`auth.id` is present), this endpoint **creates the room if it doesn't exist** and sets `room.metadata.auth_id` to the authenticated tenant's ID before issuing any token. This ensures room ownership is established before participants can join.
+- **Tenant Isolation**: If the room already exists with a different `auth_id`, the request is rejected with `403 Forbidden`. This prevents cross-tenant access to rooms.
+- **Token Timing**: The token is only issued **after** the room exists and metadata is verified/set, ensuring no participant can join before ownership is established.
 - **Request Body**:
 
 | Field | Type | Description |
@@ -149,22 +152,24 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | Field | Type | Description |
 | --- | --- | --- |
 | `token` | string | Signed LiveKit JWT for the participant. |
-| `room_name` | string | Echo of the requested room. |
+| `room_name` | string | The room name (unchanged from request). |
 | `participant_identity` | string | Echo of the requested identity. |
 | `livekit_url` | string | Client-facing LiveKit URL pulled from server config. |
 
 - **Failure**:
   - `400 Bad Request` when any field is empty.
-  - `500 Internal Server Error` if LiveKit credentials are not configured or token generation fails.
+  - `403 Forbidden` if the room exists with a different tenant's `auth_id`.
+  - `500 Internal Server Error` if LiveKit credentials are not configured, room creation fails, or token generation fails.
 
 #### `GET /livekit/rooms`
-- **Purpose**: List all LiveKit rooms belonging to the authenticated tenant. Rooms are filtered by the `auth.id` prefix for tenant isolation.
+- **Purpose**: List all LiveKit rooms belonging to the authenticated tenant. Rooms are filtered by `room.metadata.auth_id` for tenant isolation.
+- **Tenant Isolation**: When `auth.id` is present, only rooms where `metadata.auth_id` matches are returned. When `auth.id` is absent, all rooms are returned (backward-compatible mode).
 - **Success** `200 OK`:
   ```json
   {
     "rooms": [
       {
-        "name": "project1_conversation-room-123",
+        "name": "conversation-room-123",
         "num_participants": 2,
         "creation_time": 1703123456
       }
@@ -174,8 +179,8 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `rooms` | array | List of rooms belonging to the authenticated client. |
-| `rooms[].name` | string | The full room name (includes tenant prefix). |
+| `rooms` | array | List of rooms belonging to the authenticated client (filtered by metadata.auth_id). |
+| `rooms[].name` | string | The room name. |
 | `rooms[].num_participants` | integer | Number of current participants in the room. |
 | `rooms[].creation_time` | integer | Room creation time (Unix timestamp in seconds). |
 
@@ -183,22 +188,23 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   - `500 Internal Server Error` if LiveKit credentials are not configured or listing fails.
 
 #### `GET /livekit/rooms/{room_name}`
-- **Purpose**: Get detailed information about a specific LiveKit room including all current participants. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Purpose**: Get detailed information about a specific LiveKit room including all current participants. Access is authorized via `room.metadata.auth_id` check.
+- **Tenant Isolation**: When `auth.id` is present, access requires `room.metadata.auth_id == auth.id`. When `auth.id` is absent, access is allowed (backward-compatible mode).
 - **Path Parameters**:
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `room_name` | string | Name of the room to retrieve (without tenant prefix). |
+| `room_name` | string | Name of the room to retrieve. |
 
 - **Success** `200 OK`:
   ```json
   {
     "sid": "RM_xyz789",
-    "name": "project1_conversation-room-123",
+    "name": "conversation-room-123",
     "num_participants": 2,
     "max_participants": 10,
     "creation_time": 1703123456,
-    "metadata": "",
+    "metadata": "{\"auth_id\": \"tenant-123\"}",
     "active_recording": false,
     "participants": [
       {
@@ -219,11 +225,11 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | Field | Type | Description |
 | --- | --- | --- |
 | `sid` | string | Unique session ID for the room. |
-| `name` | string | The full room name (includes tenant prefix). |
+| `name` | string | The room name. |
 | `num_participants` | integer | Number of current participants. |
 | `max_participants` | integer | Maximum allowed participants (0 = no limit). |
 | `creation_time` | integer | Room creation time (Unix timestamp in seconds). |
-| `metadata` | string | User-specified metadata for the room. |
+| `metadata` | string | Room metadata (JSON). Contains `auth_id` for tenant isolation. |
 | `active_recording` | boolean | Whether a recording is currently active. |
 | `participants` | array | List of participants currently in the room. |
 | `participants[].sid` | string | Unique session ID for the participant. |
@@ -238,31 +244,32 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 - **Failure**:
   - `400 Bad Request` when room name is empty.
-  - `404 Not Found` when the room does not exist.
+  - `404 Not Found` when the room does not exist or access is denied (masked as not found).
   - `500 Internal Server Error` if LiveKit credentials are not configured.
 
 #### `DELETE /livekit/participant`
-- **Purpose**: Remove a participant from a LiveKit room, forcibly disconnecting them. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Purpose**: Remove a participant from a LiveKit room, forcibly disconnecting them. Access is authorized via `room.metadata.auth_id` check.
+- **Tenant Isolation**: When `auth.id` is present, requires `room.metadata.auth_id == auth.id`. When `auth.id` is absent, access is allowed (backward-compatible mode).
 - **Note**: This does not invalidate the participant's token. To prevent rejoining, use short-lived tokens.
 - **Request Body**:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `room_name` | string | Yes | The LiveKit room name. |
 | `participant_identity` | string | Yes | The identity of the participant to remove. |
 
 - **Success** `200 OK`:
   ```json
   {
     "status": "removed",
-    "room_name": "project1_conversation-room-123",
+    "room_name": "conversation-room-123",
     "participant_identity": "user-alice-456"
   }
   ```
 
 - **Failure**:
   - `400 Bad Request` when room name or participant identity is empty.
-  - `404 Not Found` when the room or participant does not exist.
+  - `404 Not Found` when the room or participant does not exist or access is denied (masked as not found).
   - `500 Internal Server Error` if LiveKit credentials are not configured or removal fails.
 
 **Error response format**:
@@ -281,12 +288,13 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | `REMOVAL_FAILED` | Failed to remove participant. |
 
 #### `POST /livekit/participant/mute`
-- **Purpose**: Mute or unmute a participant's published track. The room name is normalized with the `auth.id` prefix for tenant isolation.
+- **Purpose**: Mute or unmute a participant's published track. Access is authorized via `room.metadata.auth_id` check.
+- **Tenant Isolation**: When `auth.id` is present, requires `room.metadata.auth_id == auth.id`. When `auth.id` is absent, access is allowed (backward-compatible mode).
 - **Request Body**:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `room_name` | string | Yes | The LiveKit room name. |
 | `participant_identity` | string | Yes | The identity of the participant whose track to mute. |
 | `track_sid` | string | Yes | The session ID of the track to mute/unmute. |
 | `muted` | boolean | Yes | `true` to mute, `false` to unmute. |
@@ -294,7 +302,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 - **Success** `200 OK`:
   ```json
   {
-    "room_name": "project1_conversation-room-123",
+    "room_name": "conversation-room-123",
     "participant_identity": "user-alice-456",
     "track_sid": "TR_abc123",
     "muted": true
@@ -303,7 +311,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 - **Failure**:
   - `400 Bad Request` when any required field is empty.
-  - `404 Not Found` when the room, participant, or track does not exist.
+  - `404 Not Found` when the room, participant, or track does not exist or access is denied (masked as not found).
   - `500 Internal Server Error` if LiveKit credentials are not configured or mute operation fails.
 
 **Error response format**: Same as `DELETE /livekit/participant`.
@@ -311,11 +319,12 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 #### `POST /sip/transfer`
 - **Purpose**: Initiate a SIP REFER transfer for a participant in a LiveKit room. The transfer moves an ongoing SIP call to a different phone number.
 - **Note**: Only SIP participants can be transferred. A successful response indicates the transfer has been **initiated**, not necessarily completed.
+- **Tenant Isolation**: When `auth.id` is present, access requires `room.metadata.auth_id == auth.id`. When `auth.id` is absent, access is allowed (backward-compatible mode).
 - **Request Body**:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `room_name` | string | Yes | The LiveKit room name (without tenant prefix). |
+| `room_name` | string | Yes | The LiveKit room name. |
 | `participant_identity` | string | Yes | The identity of the SIP participant to transfer. |
 | `transfer_to` | string | Yes | Phone number to transfer to. Supports international (+1234567890), national (07123456789), or extensions (1234). |
 
@@ -323,7 +332,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   ```json
   {
     "status": "initiated",
-    "room_name": "project1_call-room-123",
+    "room_name": "call-room-123",
     "participant_identity": "sip_participant_456",
     "transfer_to": "tel:+15551234567"
   }
@@ -332,13 +341,13 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | Field | Type | Description |
 | --- | --- | --- |
 | `status` | string | `initiated` or `completed`. |
-| `room_name` | string | The normalized room name. |
+| `room_name` | string | The room name. |
 | `participant_identity` | string | The identity of the transferred participant. |
 | `transfer_to` | string | The normalized phone number with `tel:` prefix. |
 
 - **Failure**:
   - `400 Bad Request` when phone number is invalid or fields are empty.
-  - `404 Not Found` when participant is not found or is not a SIP participant.
+  - `404 Not Found` when room is not accessible (masked), or participant is not found or is not a SIP participant.
   - `500 Internal Server Error` if LiveKit SIP service is not configured or transfer fails.
 
 **Error response format**:
@@ -355,15 +364,20 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | `PARTICIPANT_NOT_FOUND` | Participant not found or not a SIP participant. |
 | `LIVEKIT_NOT_CONFIGURED` | LiveKit SIP service not configured. |
 | `TRANSFER_FAILED` | Transfer operation failed. |
+| `ROOM_ACCESS_DENIED` | Room not accessible (belongs to different tenant). |
 
 #### `POST /sip/call`
 - **Purpose**: Initiate an outbound SIP call through LiveKit. The call connects to a specified LiveKit room as a SIP participant.
 - **Note**: This endpoint requires the `sip.outbound_address` configuration to be set. Outbound trunks are automatically created or reused based on the `from_phone_number`.
+- **Tenant Isolation**: When `auth.id` is present:
+  - If the room already exists, access requires `room.metadata.auth_id == auth.id`.
+  - If the room doesn't exist, it will be created and `metadata.auth_id` will be set to the caller's `auth.id`.
+  - When `auth.id` is absent, access is allowed (backward-compatible mode).
 - **Request Body**:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `room_name` | string | Yes | The LiveKit room name to connect the call to (without tenant prefix). |
+| `room_name` | string | Yes | The LiveKit room name to connect the call to. |
 | `participant_name` | string | Yes | Display name for the SIP participant in the room. |
 | `participant_identity` | string | Yes | Identity for the SIP participant in the room. |
 | `from_phone_number` | string | Yes | Phone number the call will originate from. Must be configured in your SIP provider. Supports international format (+1234567890). |
@@ -373,7 +387,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
   ```json
   {
     "status": "initiated",
-    "room_name": "project1_call-room-123",
+    "room_name": "call-room-123",
     "participant_identity": "caller-456",
     "participant_id": "PA_abc123",
     "sip_call_id": "SC_xyz789"
@@ -383,13 +397,14 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | Field | Type | Description |
 | --- | --- | --- |
 | `status` | string | Always `initiated` for successful requests. |
-| `room_name` | string | The normalized room name (includes tenant prefix). |
+| `room_name` | string | The room name. |
 | `participant_identity` | string | The identity of the SIP participant in the room. |
 | `participant_id` | string | The unique participant ID assigned by LiveKit. |
 | `sip_call_id` | string | The unique SIP call ID for tracking. |
 
 - **Failure**:
   - `400 Bad Request` when phone numbers are invalid or required fields are empty.
+  - `404 Not Found` when room exists with a different `auth_id` (masked as not found).
   - `500 Internal Server Error` if LiveKit is not configured, outbound address is missing, or call fails.
 
 **Error response format**:
@@ -406,6 +421,7 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | `OUTBOUND_ADDRESS_NOT_CONFIGURED` | The `sip.outbound_address` configuration is not set. |
 | `LIVEKIT_NOT_CONFIGURED` | LiveKit SIP service not configured. |
 | `CALL_FAILED` | Call initiation failed (includes error details). |
+| `ROOM_ACCESS_DENIED` | Room not accessible (belongs to different tenant). |
 
 **Trunk Reuse Behavior**: When making outbound calls, Sayna automatically manages SIP outbound trunks:
 1. Searches for an existing outbound trunk that contains the `from_phone_number`.
@@ -416,8 +432,6 @@ This enables efficient trunk management without manual provisioning.
 
 **Authentication Configuration**: Outbound trunk authentication is configured at the server level via SIP configuration, not per-request. If your SIP provider requires authentication, set `sip.outbound_auth_username` and `sip.outbound_auth_password` in your server configuration (YAML or environment variables). See [Outbound Trunk Authentication](livekit_integration.md#outbound-trunk-authentication) for details.
 
-**Room Name Normalization**: The `room_name` is automatically normalized with the authenticated tenant's prefix (from `auth.id`) for tenant isolation, similar to other LiveKit endpoints.
-
 #### `GET /sip/hooks`
 - **Purpose**: List all configured SIP webhook hooks from the runtime cache.
 - **Behavior**: Hosts defined in the application configuration always appear and override any cached host with the same name.
@@ -427,7 +441,8 @@ This enables efficient trunk management without manual provisioning.
     "hooks": [
       {
         "host": "example.com",
-        "url": "https://webhook.example.com/events"
+        "url": "https://webhook.example.com/events",
+        "auth_id": "tenant-123"
       }
     ]
   }
@@ -438,6 +453,7 @@ This enables efficient trunk management without manual provisioning.
 | `hooks` | array | List of configured SIP hooks. |
 | `hooks[].host` | string | SIP domain pattern (case-insensitive). |
 | `hooks[].url` | string | HTTPS URL to forward webhook events to. |
+| `hooks[].auth_id` | string | Tenant identifier for room metadata. Required when `AUTH_REQUIRED=true`; optional when `AUTH_REQUIRED=false`. |
 
 - **Failure**:
   - `500 Internal Server Error` if reading the cache fails.
@@ -452,6 +468,7 @@ This enables efficient trunk management without manual provisioning.
 | `hooks` | array | Yes | List of hooks to add or replace. |
 | `hooks[].host` | string | Yes | SIP domain pattern (case-insensitive). Existing hooks with matching hosts are replaced. |
 | `hooks[].url` | string | Yes | HTTPS URL to forward webhook events to. |
+| `hooks[].auth_id` | string | Conditional | Tenant identifier for room metadata. **Required** when `AUTH_REQUIRED=true`; may be empty when `AUTH_REQUIRED=false`. |
 
 - **Success** `200 OK`: Returns the merged list of all hooks (existing + new).
   ```json
@@ -459,18 +476,20 @@ This enables efficient trunk management without manual provisioning.
     "hooks": [
       {
         "host": "example.com",
-        "url": "https://webhook.example.com/events"
+        "url": "https://webhook.example.com/events",
+        "auth_id": "tenant-123"
       },
       {
         "host": "another.com",
-        "url": "https://webhook.another.com/events"
+        "url": "https://webhook.another.com/events",
+        "auth_id": "tenant-456"
       }
     ]
   }
   ```
 
 - **Failure**:
-  - `400 Bad Request` when duplicate hosts are detected in the request.
+  - `400 Bad Request` when duplicate hosts are detected in the request, or when `AUTH_REQUIRED=true` and a hook has an empty or whitespace-only `auth_id`.
   - `405 Method Not Allowed` when trying to add or update a host defined in the application configuration.
   - `500 Internal Server Error` if no cache path is configured or writing fails.
 

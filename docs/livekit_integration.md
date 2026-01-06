@@ -124,11 +124,19 @@ sip:
   hooks:
     - host: "customer-a.com"
       url: "https://webhook.customer-a.com/livekit-events"
+      # auth_id: Tenant identifier (written to LiveKit room metadata)
+      # - Required when AUTH_REQUIRED=true
+      # - Optional/empty when AUTH_REQUIRED=false (defaults to "")
+      auth_id: "tenant-a"
       # Optional: per-hook secret override
       secret: "customer-a-specific-secret"
 
     - host: "customer-b.com"
       url: "https://webhook.customer-b.com/livekit-events"
+      # auth_id: Tenant identifier (written to LiveKit room metadata)
+      # - Required when AUTH_REQUIRED=true
+      # - Optional/empty when AUTH_REQUIRED=false (defaults to "")
+      auth_id: "tenant-b"
       # Uses global hook_secret
 ```
 
@@ -142,8 +150,8 @@ SIP_HOOK_SECRET="your-secret-key"
 
 # Hooks (JSON array)
 SIP_HOOKS_JSON='[
-  {"host": "customer-a.com", "url": "https://webhook.customer-a.com/events"},
-  {"host": "customer-b.com", "url": "https://webhook.customer-b.com/events"}
+  {"host": "customer-a.com", "url": "https://webhook.customer-a.com/events", "auth_id": "tenant-a"},
+  {"host": "customer-b.com", "url": "https://webhook.customer-b.com/events", "auth_id": "tenant-b"}
 ]'
 ```
 
@@ -177,6 +185,9 @@ YAML Configuration > Environment Variables > Defaults
 - No duplicate hosts (case-insensitive)
 - HTTPS required (HTTP rejected for security)
 - Must have effective signing secret (per-hook or global)
+- `auth_id` requirement depends on authentication mode:
+  - When `AUTH_REQUIRED=true`: `auth_id` is **required** and cannot be empty or whitespace-only
+  - When `AUTH_REQUIRED=false`: `auth_id` may be empty (unauthenticated mode, no tenant enforcement)
 
 **Signing Secrets**:
 - Minimum 16 characters (32+ recommended)
@@ -517,7 +528,7 @@ curl -X POST https://api.example.com/sip/call \
 ```json
 {
   "status": "initiated",
-  "room_name": "tenant_my-call-room",
+  "room_name": "my-call-room",
   "participant_identity": "caller-1",
   "participant_id": "PA_abc123",
   "sip_call_id": "SC_xyz789"
@@ -595,8 +606,9 @@ Sayna automatically forwards LiveKit webhook events to downstream services based
 2. **Verify signature** using LiveKit's JWT mechanism
 3. **Parse SIP domain** from SIP header attributes (`sip.h.x-to-ip` takes priority, falls back to `sip.h.to`)
 4. **Look up hook configuration** for the extracted domain (case-insensitive)
-5. **Forward event** to the configured webhook URL asynchronously (non-blocking)
-6. **Return 200 OK** to LiveKit immediately (doesn't wait for downstream hook)
+5. **Set room metadata** with `auth_id` from hook configuration (tenant isolation)
+6. **Forward event** to the configured webhook URL asynchronously (non-blocking)
+7. **Return 200 OK** to LiveKit immediately (doesn't wait for downstream hook or metadata update)
 
 **Opt-in behavior**: If the `sip` configuration block is absent or contains zero hooks, forwarding is completely skipped. Non-SIP deployments incur zero overhead.
 
@@ -669,6 +681,64 @@ Sayna uses the `ReqManager` infrastructure for webhook forwarding:
 - Timeout: 5 seconds per request
 - Max concurrent: 3 requests per host
 - HTTP/2 multiplexing enabled
+
+### Room Metadata for Tenant Isolation
+
+When processing inbound SIP webhooks, Sayna automatically sets the `auth_id` field in the room's metadata using the matched hook's configuration. This enables proper tenant isolation for SIP-created rooms without modifying the room name.
+
+**Why Room Metadata?**
+
+LiveKit creates rooms for inbound SIP calls with names based on the phone number (e.g., `sip-+15551234567`). These room names cannot be changed, but the room metadata can be updated to associate the room with a specific tenant.
+
+**How It Works**:
+
+1. When a `participant_joined` event is received for a SIP participant
+2. Sayna looks up the hook configuration for the SIP domain
+3. If the hook has an `auth_id` configured, Sayna calls the LiveKit API to set `room.metadata.auth_id`
+4. Downstream services can read this metadata to enforce tenant-specific access control
+
+**Metadata Format**:
+
+```json
+{
+  "auth_id": "tenant-123",
+  // ... other metadata keys preserved
+}
+```
+
+**Conflict Detection**:
+
+To prevent cross-tenant hijacking, Sayna checks for existing `auth_id` values:
+
+- If the room already has the **same** `auth_id`: No update needed (idempotent)
+- If the room has a **different** `auth_id`: Security warning logged, existing value preserved
+- If the room has **no** `auth_id`: Value is set from hook configuration
+
+**Logging**:
+
+```
+# Success
+INFO Set room metadata auth_id for SIP call
+  event_id="EVT_abc123"
+  room_name="sip-+15551234567"
+  auth_id="tenant-123"
+  sip_domain="example.com"
+
+# Security conflict (different tenant)
+WARN SECURITY: Room metadata auth_id conflict - room belongs to different tenant
+  event_id="EVT_abc123"
+  room_name="sip-+15551234567"
+  existing_auth_id="tenant-A"
+  attempted_auth_id="tenant-B"
+  sip_domain="other-domain.com"
+```
+
+**Important Notes**:
+
+- Metadata updates are performed in the same background task as webhook forwarding
+- Metadata errors do **not** fail the webhook forwarding or block the 200 OK response
+- The `auth_id` field is required when `AUTH_REQUIRED=true`; when empty (unauthenticated mode), metadata updates are skipped
+- When `auth_id` is empty, a debug log is emitted and no room metadata is written
 
 ### Error Handling
 
@@ -751,6 +821,7 @@ sip:
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
+      auth_id: "tenant-1"  # Required when AUTH_REQUIRED=true; optional otherwise
 ```
 
 **Per-Hook Secret Override** (recommended for multi-tenant):
@@ -761,10 +832,12 @@ sip:
   hooks:
     - host: "customer-a.com"
       url: "https://webhook.customer-a.com/events"
+      auth_id: "tenant-a"  # Required when AUTH_REQUIRED=true; optional otherwise
       secret: "customer-a-specific-secret"
 
     - host: "customer-b.com"
       url: "https://webhook.customer-b.com/events"
+      auth_id: "tenant-b"  # Required when AUTH_REQUIRED=true; optional otherwise
       secret: "customer-b-specific-secret"
 ```
 
@@ -1143,6 +1216,7 @@ sip:
   hooks:
     - host: "example.com"
       url: "https://webhook.example.com/events"
+      auth_id: "tenant-1"  # Required when AUTH_REQUIRED=true; optional otherwise
 ```
 
 **Step 3: Implement Signature Verification**

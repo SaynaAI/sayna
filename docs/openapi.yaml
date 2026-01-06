@@ -37,8 +37,7 @@ paths:
       summary: Handler for DELETE /livekit/participant endpoint
       description: |-
         Removes a participant from a LiveKit room, forcibly disconnecting them.
-        The room name is normalized with the auth.id prefix for tenant isolation,
-        ensuring users can only remove participants from their own rooms.
+        Access is authorized via `metadata.auth_id` check.
 
         Note: This does not invalidate the participant's token. To prevent rejoining,
         use short-lived tokens and avoid issuing new tokens to removed participants.
@@ -51,14 +50,18 @@ paths:
         # Returns
         * `Response` - JSON response with removal status or error
 
+        # Authorization
+        - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+        - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+
         # Errors
         * 400 Bad Request - Empty room name or participant identity
-        * 404 Not Found - Participant not found in the room
+        * 404 Not Found - Room/participant not found or access denied (masked)
         * 500 Internal Server Error - LiveKit not configured or removal failed
 
         # Flow
         1. Validate request fields are not empty
-        2. Normalize room name with auth.id prefix
+        2. Check room access via metadata.auth_id
         3. Verify participant exists in the room
         4. Remove the participant
         5. Return success or appropriate error
@@ -102,8 +105,8 @@ paths:
       - livekit
       summary: Handler for POST /livekit/participant/mute endpoint
       description: |-
-        Mutes or unmutes a participant's published track. The room name is
-        normalized with the auth.id prefix for tenant isolation.
+        Mutes or unmutes a participant's published track.
+        Access is authorized via `metadata.auth_id` check.
 
         # Arguments
         * `state` - Shared application state containing LiveKit configuration
@@ -113,9 +116,13 @@ paths:
         # Returns
         * `Response` - JSON response with mute status or error
 
+        # Authorization
+        - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+        - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+
         # Errors
         * 400 Bad Request - Empty fields in request
-        * 404 Not Found - Room or participant not found
+        * 404 Not Found - Room/participant not found or access denied (masked)
         * 500 Internal Server Error - LiveKit not configured or mute operation failed
       operationId: mute_participant
       requestBody:
@@ -158,7 +165,7 @@ paths:
       summary: Handler for GET /livekit/rooms endpoint
       description: |-
         Lists all LiveKit rooms belonging to the authenticated client.
-        Rooms are filtered by the auth.id prefix for tenant isolation.
+        Rooms are filtered by `metadata.auth_id` for tenant isolation.
 
         # Arguments
         * `state` - Shared application state containing LiveKit configuration
@@ -166,6 +173,10 @@ paths:
 
         # Returns
         * `Response` - JSON response with rooms list or error status
+
+        # Filtering
+        - When `auth.id` is present: Returns only rooms where `metadata.auth_id == auth.id`
+        - When `auth.id` is absent: Returns all rooms (backward-compatible mode)
 
         # Errors
         * 500 Internal Server Error - LiveKit service not configured or API call failed
@@ -188,8 +199,7 @@ paths:
       summary: Handler for GET /livekit/rooms/{room_name} endpoint
       description: |-
         Returns detailed information about a specific LiveKit room including
-        all current participants. The room name is normalized with the auth.id
-        prefix for tenant isolation.
+        all current participants. Access is authorized via `metadata.auth_id` check.
 
         # Arguments
         * `state` - Shared application state containing LiveKit configuration
@@ -199,8 +209,12 @@ paths:
         # Returns
         * `Response` - JSON response with room details or error status
 
+        # Authorization
+        - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+        - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+
         # Errors
-        * 404 Not Found - Room not found or not accessible
+        * 404 Not Found - Room not found or access denied (masked as not found)
         * 500 Internal Server Error - LiveKit service not configured or API call failed
       operationId: get_room_details
       parameters:
@@ -231,6 +245,11 @@ paths:
       description: |-
         Generates a LiveKit JWT token for a participant to join a specific room.
 
+        When authentication is enabled (`auth.id` is present), this handler:
+        1. Creates the room if it doesn't exist
+        2. Sets `room.metadata.auth_id` to the authenticated tenant's ID
+        3. Issues the token only after metadata is verified/set
+
         # Arguments
         * `state` - Shared application state containing LiveKit configuration
         * `request` - Token request with room name and participant details
@@ -240,7 +259,8 @@ paths:
 
         # Errors
         * 400 Bad Request - Invalid request data (empty fields)
-        * 500 Internal Server Error - LiveKit service not configured or token generation failed
+        * 403 Forbidden - Room exists with a different tenant's `auth_id`
+        * 500 Internal Server Error - LiveKit service not configured, room creation failed, or token generation failed
       operationId: generate_token
       requestBody:
         content:
@@ -250,15 +270,17 @@ paths:
         required: true
       responses:
         '200':
-          description: Token generated successfully
+          description: Token generated successfully. Room is created if it doesn't exist and metadata.auth_id is set.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TokenResponse'
         '400':
           description: Invalid request (missing or empty fields)
+        '403':
+          description: 'Access denied: room exists with a different tenant''s auth_id'
         '500':
-          description: LiveKit service not configured or token generation failed
+          description: LiveKit service not configured, room creation failed, or token generation failed
       security:
       - bearer_auth: []
   /recording/{stream_id}:
@@ -310,7 +332,7 @@ paths:
 
         # Arguments
         * `state` - Shared application state containing LiveKit handlers and config
-        * `auth` - Authentication context for room name normalization
+        * `auth` - Authentication context for room metadata authorization
         * `request` - Call request with phone numbers and room details
 
         # Returns
@@ -318,16 +340,19 @@ paths:
 
         # Errors
         * 400 Bad Request - Invalid phone number format or empty fields
+        * 403 Forbidden - Room exists with different auth_id (cross-tenant)
+        * 404 Not Found - Room exists with different auth_id (masked as 404)
         * 500 Internal Server Error - LiveKit not configured, outbound address missing, or call failed
 
         # Flow
-        1. Normalize room name with auth prefix for tenant isolation
-        2. Validate non-empty room name and participant identifiers
-        3. Validate phone number formats
-        4. Check SIP config exists and contains outbound_address
-        5. Check LiveKit SIP handler is available
+        1. Validate non-empty room name and participant identifiers
+        2. Validate phone number formats
+        3. Check SIP config exists and contains outbound_address
+        4. Check LiveKit SIP handler is available
+        5. Check room access via metadata auth_id (if room exists)
         6. Create outbound call (trunk is created/reused automatically)
-        7. Return success response with call identifiers
+        7. Ensure room metadata contains auth_id for tenant isolation
+        8. Return success response with call identifiers
       operationId: sip_call
       requestBody:
         content:
@@ -344,6 +369,12 @@ paths:
                 $ref: '#/components/schemas/SIPCallResponse'
         '400':
           description: Invalid request (bad phone number or empty fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIPCallErrorResponse'
+        '404':
+          description: Room not found or not accessible
           content:
             application/json:
               schema:
@@ -496,6 +527,7 @@ paths:
 
         # Arguments
         * `state` - Shared application state containing LiveKit handlers
+        * `auth` - Authentication context for room metadata authorization
         * `request` - Transfer request with room name, participant identity, and destination
 
         # Returns
@@ -503,15 +535,16 @@ paths:
 
         # Errors
         * 400 Bad Request - Invalid phone number format or empty fields
-        * 404 Not Found - Specified participant not found or not a SIP participant
+        * 404 Not Found - Room not found, not accessible, or participant not found
         * 500 Internal Server Error - LiveKit not configured or transfer operation failed
 
         # Flow
         1. Validate the phone number format
         2. Check LiveKit handlers are configured
-        3. Verify the participant exists and is a SIP participant
-        4. Execute the SIP transfer
-        5. Return success or appropriate error
+        3. Check room access via metadata auth_id
+        4. Verify the participant exists and is a SIP participant
+        5. Execute the SIP transfer
+        6. Return success or appropriate error
       operationId: sip_transfer
       requestBody:
         content:
@@ -533,7 +566,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SIPTransferErrorResponse'
         '404':
-          description: Participant not found or not a SIP participant
+          description: Room not found, not accessible, or participant not found
           content:
             application/json:
               schema:
@@ -762,12 +795,12 @@ components:
         {
           "rooms": [
             {
-              "name": "project1_room-1",
+              "name": "room-1",
               "num_participants": 2,
               "creation_time": 1703123456
             },
             {
-              "name": "project1_room-2",
+              "name": "room-2",
               "num_participants": 0,
               "creation_time": 1703123789
             }
@@ -781,7 +814,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RoomInfo'
-          description: List of rooms belonging to the authenticated client
+          description: List of rooms belonging to the authenticated client (filtered by metadata.auth_id)
     LiveKitWebSocketConfig:
       type: object
       description: LiveKit configuration for WebSocket messages
@@ -862,7 +895,7 @@ components:
         # Example
         ```json
         {
-          "room_name": "project1_conversation-room-123",
+          "room_name": "conversation-room-123",
           "participant_identity": "user-alice-456",
           "track_sid": "TR_abc123",
           "muted": true
@@ -884,8 +917,8 @@ components:
           example: user-alice-456
         room_name:
           type: string
-          description: The normalized room name (with tenant prefix)
-          example: project1_conversation-room-123
+          description: The room name
+          example: conversation-room-123
         track_sid:
           type: string
           description: The session ID of the track
@@ -1188,7 +1221,7 @@ components:
         ```json
         {
           "status": "removed",
-          "room_name": "project1_conversation-room-123",
+          "room_name": "conversation-room-123",
           "participant_identity": "user-alice-456"
         }
         ```
@@ -1203,8 +1236,8 @@ components:
           example: user-alice-456
         room_name:
           type: string
-          description: The normalized room name (with tenant prefix)
-          example: project1_conversation-room-123
+          description: The room name
+          example: conversation-room-123
         status:
           type: string
           description: Status of the removal operation
@@ -1218,11 +1251,11 @@ components:
         ```json
         {
           "sid": "RM_xyz789",
-          "name": "project1_conversation-room-123",
+          "name": "conversation-room-123",
           "num_participants": 2,
           "max_participants": 10,
           "creation_time": 1703123456,
-          "metadata": "",
+          "metadata": "{\"auth_id\": \"tenant-123\"}",
           "active_recording": false,
           "participants": [...]
         }
@@ -1258,8 +1291,8 @@ components:
           example: ''
         name:
           type: string
-          description: The full room name (includes tenant prefix)
-          example: project1_conversation-room-123
+          description: The room name
+          example: conversation-room-123
         num_participants:
           type: integer
           format: int32
@@ -1283,7 +1316,7 @@ components:
         # Example
         ```json
         {
-          "name": "project1_conversation-room-123",
+          "name": "conversation-room-123",
           "num_participants": 2,
           "creation_time": 1703123456
         }
@@ -1300,8 +1333,8 @@ components:
           example: 1703123456
         name:
           type: string
-          description: The full room name (includes tenant prefix)
-          example: project1_conversation-room-123
+          description: The room name
+          example: conversation-room-123
         num_participants:
           type: integer
           format: int32
@@ -1566,11 +1599,24 @@ components:
           minimum: 0
     SipHookEntry:
       type: object
-      description: A single SIP hook entry.
+      description: |-
+        A single SIP hook entry.
+
+        Note: The `auth_id` field is conditionally required based on `AUTH_REQUIRED`:
+        - When `AUTH_REQUIRED=true`: `auth_id` must be provided and cannot be empty
+        - When `AUTH_REQUIRED=false`: `auth_id` may be empty (unauthenticated mode)
       required:
       - host
       - url
+      - auth_id
       properties:
+        auth_id:
+          type: string
+          description: |-
+            Tenant identifier for this hook (written to LiveKit room metadata).
+            Required when AUTH_REQUIRED=true; may be empty when AUTH_REQUIRED=false.
+            When empty, room metadata updates are skipped.
+          example: tenant-123
         host:
           type: string
           description: Host pattern for matching SIP domains (case-insensitive)

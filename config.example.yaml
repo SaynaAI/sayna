@@ -130,11 +130,13 @@ sip:
   # POST /sip/hooks REST endpoint. Runtime changes are persisted to
   # <cache_path>/sip_hooks.json and merged with this config on startup.
   # Note: Runtime hooks use the global hook_secret (per-hook secrets not supported via API)
-  hooks:                                      # ENV: SIP_HOOKS_JSON (JSON array with optional "secret" field)
+  hooks:                                      # ENV: SIP_HOOKS_JSON (JSON array with "auth_id" and optional "secret" field)
     - host: "example.com"                     # SIP domain to match (case-insensitive)
       url: "https://webhook.example.com/events"  # HTTPS strongly recommended
+      auth_id: "tenant-123"                   # Tenant identifier for room metadata (required when AUTH_REQUIRED=true; optional/empty when AUTH_REQUIRED=false)
       # Optional: per-hook secret override (omit to use global hook_secret)
       # Use for multi-tenant deployments or zero-trust architectures
 
     - host: "another.com"
       url: "https://webhook2.example.com/events"
+      auth_id: "tenant-456"                   # Tenant identifier for room metadata (required when AUTH_REQUIRED=true; optional/empty when AUTH_REQUIRED=false)
