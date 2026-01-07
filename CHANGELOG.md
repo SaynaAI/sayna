@@ -2,6 +2,12 @@
 
 All notable changes to Sayna will be documented in this file.
 
+## [0.1.3] - 2026-01-05
+
+### Miscellaneous
+
+- Release v0.1.3 by @github-actions[bot]
+
 ## [0.1.2] - 2025-12-30
 
 ### Miscellaneous
