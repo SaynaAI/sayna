@@ -10,19 +10,21 @@ use std::sync::Arc;
 /// # WebSocket Authentication Design
 ///
 /// The WebSocket endpoint uses the same auth middleware as REST endpoints for tenant isolation.
-/// The auth middleware provides `Auth` context that is used to prefix LiveKit room names with
-/// the authenticated client's ID, ensuring different tenants cannot access each other's rooms.
+/// The auth middleware provides `Auth` context that is used to enforce room ownership via
+/// `room.metadata.auth_id`, ensuring different tenants cannot access each other's rooms.
 ///
 /// ## Behavior
 ///
 /// - **When `AUTH_REQUIRED=true`**: Requires valid authentication token in the Authorization header
-/// - **When `AUTH_REQUIRED=false`**: Inserts an empty `Auth` context (no room name prefixing)
+/// - **When `AUTH_REQUIRED=false`**: Inserts an empty `Auth` context (no metadata enforcement)
 ///
-/// ## Room Name Isolation
+/// ## Room Metadata Isolation
 ///
 /// When a client connects with an authenticated context (e.g., `auth.id = "project1"`),
-/// any LiveKit room names are automatically prefixed with the auth ID:
-/// - Client requests room `my-room` → Actual room becomes `project1_my-room`
+/// room ownership is enforced via metadata rather than room name prefixing:
+/// - Room names are kept clean (exactly as provided by client)
+/// - Room metadata contains `{"auth_id": "project1"}` to identify ownership
+/// - Attempting to access a room with a different `auth_id` returns an error
 /// - This prevents tenant A from accessing tenant B's rooms
 ///
 /// See `docs/authentication.md` for detailed authentication architecture.

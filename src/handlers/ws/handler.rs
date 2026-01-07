@@ -72,7 +72,7 @@ pub async fn ws_voice_handler(
 /// # Arguments
 /// * `socket` - The established WebSocket connection
 /// * `app_state` - Application state containing shared resources
-/// * `auth` - Auth context for tenant isolation (room name prefixing)
+/// * `auth` - Auth context for tenant isolation (via room metadata)
 ///
 /// # Lifecycle
 /// 1. Split socket into sender/receiver for bidirectional communication
@@ -95,7 +95,7 @@ async fn handle_voice_socket(socket: WebSocket, app_state: Arc<AppState>, auth: 
     debug!("Socket split completed");
 
     // Connection state with RwLock for rare writes, frequent reads
-    // Initialize with auth context for room name normalization
+    // Initialize with auth context for tenant isolation via room metadata
     let state = Arc::new(RwLock::new(ConnectionState::with_auth(auth)));
 
     let (message_tx, mut message_rx) = mpsc::channel::<MessageRoute>(CHANNEL_BUFFER_SIZE);

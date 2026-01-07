@@ -45,45 +45,43 @@ impl Auth {
         Self::default()
     }
 
-    /// Normalizes a room name by prefixing it with the authenticated client's ID.
+    /// Returns the effective auth id, treating empty/whitespace-only as None.
     ///
-    /// This ensures room isolation between different authenticated clients.
-    /// If the room name already contains the auth prefix, it is returned unchanged
-    /// to prevent duplicate prefixes.
+    /// Use this method when you need to guard auth-aware operations:
+    /// - Room access checks should only run when this returns `Some`
+    /// - Metadata updates should only write auth_id when this returns `Some`
     ///
-    /// # Arguments
-    /// * `room_name` - The room name to normalize
+    /// This ensures consistent behavior across all endpoints: empty `auth.id`
+    /// is treated the same as unauthenticated mode (no auth.id).
     ///
     /// # Returns
-    /// The normalized room name with auth prefix, or the original if:
-    /// - No auth.id is present (unauthenticated request)
-    /// - Room name already has the correct prefix
+    /// * `Some(&str)` - The trimmed auth id when present and non-empty
+    /// * `None` - When auth.id is None, empty, or whitespace-only
     ///
     /// # Examples
     /// ```
     /// use sayna::auth::Auth;
     ///
     /// let auth = Auth::new("project1");
-    /// assert_eq!(auth.normalize_room_name("my-room"), "project1_my-room");
-    /// assert_eq!(auth.normalize_room_name("project1_my-room"), "project1_my-room"); // No duplicate
+    /// assert_eq!(auth.effective_id(), Some("project1"));
     ///
-    /// let empty_auth = Auth::empty();
-    /// assert_eq!(empty_auth.normalize_room_name("my-room"), "my-room"); // Unchanged
+    /// let empty = Auth::empty();
+    /// assert_eq!(empty.effective_id(), None);
+    ///
+    /// let whitespace = Auth { id: Some("  ".to_string()) };
+    /// assert_eq!(whitespace.effective_id(), None);
     /// ```
-    pub fn normalize_room_name(&self, room_name: &str) -> String {
+    pub fn effective_id(&self) -> Option<&str> {
         match &self.id {
-            Some(auth_id) if !auth_id.is_empty() => {
-                let prefix = format!("{}_", auth_id);
-                if room_name.starts_with(&prefix) {
-                    // Already prefixed, return unchanged
-                    room_name.to_string()
+            Some(id) => {
+                let trimmed = id.trim();
+                if trimmed.is_empty() {
+                    None
                 } else {
-                    // Add prefix
-                    format!("{}_{}", auth_id, room_name)
+                    Some(trimmed)
                 }
             }
-            // No auth.id present or empty, return unchanged
-            _ => room_name.to_string(),
+            None => None,
         }
     }
 }
@@ -92,83 +90,57 @@ impl Auth {
 mod tests {
     use super::*;
 
+    // ============ effective_id() tests ============
+
     #[test]
-    fn test_normalize_room_name_basic_prefix() {
+    fn test_effective_id_with_valid_id() {
         let auth = Auth::new("project1");
-        assert_eq!(auth.normalize_room_name("my-room"), "project1_my-room");
+        assert_eq!(auth.effective_id(), Some("project1"));
     }
 
     #[test]
-    fn test_normalize_room_name_no_duplicate_prefix() {
-        let auth = Auth::new("project1");
-        assert_eq!(
-            auth.normalize_room_name("project1_my-room"),
-            "project1_my-room"
-        );
-    }
-
-    #[test]
-    fn test_normalize_room_name_empty_auth() {
+    fn test_effective_id_with_empty_auth() {
         let auth = Auth::empty();
-        assert_eq!(auth.normalize_room_name("my-room"), "my-room");
+        assert_eq!(auth.effective_id(), None);
     }
 
     #[test]
-    fn test_normalize_room_name_empty_auth_id() {
+    fn test_effective_id_with_empty_string() {
         let auth = Auth {
             id: Some("".to_string()),
         };
-        assert_eq!(auth.normalize_room_name("my-room"), "my-room");
+        assert_eq!(auth.effective_id(), None);
     }
 
     #[test]
-    fn test_normalize_room_name_empty_room() {
-        let auth = Auth::new("project1");
-        assert_eq!(auth.normalize_room_name(""), "project1_");
+    fn test_effective_id_with_whitespace_only() {
+        let auth = Auth {
+            id: Some("   ".to_string()),
+        };
+        assert_eq!(auth.effective_id(), None);
     }
 
     #[test]
-    fn test_normalize_room_name_with_underscore_in_room() {
-        let auth = Auth::new("auth1");
-        // Room name happens to contain underscore but doesn't start with auth prefix
-        assert_eq!(auth.normalize_room_name("my_room"), "auth1_my_room");
+    fn test_effective_id_with_tabs_and_newlines() {
+        let auth = Auth {
+            id: Some("\t\n ".to_string()),
+        };
+        assert_eq!(auth.effective_id(), None);
     }
 
     #[test]
-    fn test_normalize_room_name_partial_prefix_match() {
-        let auth = Auth::new("project1");
-        // Room starts with auth_id but without underscore separator
-        assert_eq!(
-            auth.normalize_room_name("project1room"),
-            "project1_project1room"
-        );
+    fn test_effective_id_trims_whitespace() {
+        let auth = Auth {
+            id: Some("  tenant-a  ".to_string()),
+        };
+        assert_eq!(auth.effective_id(), Some("tenant-a"));
     }
 
     #[test]
-    fn test_normalize_room_name_case_sensitive() {
-        let auth = Auth::new("Project1");
-        // Prefix match is case-sensitive
-        assert_eq!(
-            auth.normalize_room_name("project1_my-room"),
-            "Project1_project1_my-room"
-        );
-        assert_eq!(
-            auth.normalize_room_name("Project1_my-room"),
-            "Project1_my-room"
-        );
-    }
-
-    #[test]
-    fn test_normalize_room_name_special_chars_in_auth_id() {
-        let auth = Auth::new("proj-123");
-        assert_eq!(auth.normalize_room_name("room"), "proj-123_room");
-        assert_eq!(auth.normalize_room_name("proj-123_room"), "proj-123_room");
-    }
-
-    #[test]
-    fn test_normalize_room_name_unicode() {
-        let auth = Auth::new("测试");
-        assert_eq!(auth.normalize_room_name("room"), "测试_room");
-        assert_eq!(auth.normalize_room_name("测试_room"), "测试_room");
+    fn test_effective_id_preserves_internal_whitespace() {
+        let auth = Auth {
+            id: Some("tenant a".to_string()),
+        };
+        assert_eq!(auth.effective_id(), Some("tenant a"));
     }
 }

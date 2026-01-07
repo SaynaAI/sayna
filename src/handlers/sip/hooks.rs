@@ -26,6 +26,10 @@ pub struct SipHooksRequest {
 }
 
 /// A single SIP hook entry.
+///
+/// Note: The `auth_id` field is conditionally required based on `AUTH_REQUIRED`:
+/// - When `AUTH_REQUIRED=true`: `auth_id` must be provided and cannot be empty
+/// - When `AUTH_REQUIRED=false`: `auth_id` may be empty (unauthenticated mode)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SipHookEntry {
@@ -39,6 +43,12 @@ pub struct SipHookEntry {
         schema(example = "https://webhook.example.com/events")
     )]
     pub url: String,
+
+    /// Tenant identifier for this hook (written to LiveKit room metadata).
+    /// Required when AUTH_REQUIRED=true; may be empty when AUTH_REQUIRED=false.
+    /// When empty, room metadata updates are skipped.
+    #[cfg_attr(feature = "openapi", schema(example = "tenant-123"))]
+    pub auth_id: String,
 }
 
 /// Response body for SIP hooks operations.
@@ -74,6 +84,27 @@ fn configured_sip_hosts(state: &AppState) -> HashSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Validates that all hooks have non-empty auth_id values.
+/// Only called when auth_required=true.
+fn validate_hooks_auth_id(
+    hooks: &[SipHookEntry],
+) -> Option<(StatusCode, Json<SipHooksErrorResponse>)> {
+    for hook in hooks {
+        if hook.auth_id.trim().is_empty() {
+            return Some((
+                StatusCode::BAD_REQUEST,
+                Json(SipHooksErrorResponse {
+                    error: format!(
+                        "Hook for host '{}' has empty auth_id. When AUTH_REQUIRED=true, auth_id must be provided.",
+                        hook.host
+                    ),
+                }),
+            ));
+        }
+    }
+    None
 }
 
 /// Reject updates that attempt to touch hosts hardcoded in application config.
@@ -142,6 +173,7 @@ pub async fn list_sip_hooks(
             .map(|h| SipHookEntry {
                 host: h.host.clone(),
                 url: h.url.clone(),
+                auth_id: h.auth_id.clone(),
             })
             .collect();
 
@@ -200,13 +232,20 @@ pub async fn update_sip_hooks(
         }
     };
 
+    // Validate auth_id when auth_required=true
+    if state.config.auth_required
+        && let Some(error) = validate_hooks_auth_id(&request.hooks)
+    {
+        return Err(error);
+    }
+
     let protected_hosts = configured_sip_hosts(&state);
 
     // Convert request entries to CachedSipHook
     let new_hooks: Vec<CachedSipHook> = request
         .hooks
         .into_iter()
-        .map(|h| CachedSipHook::new(h.host, h.url))
+        .map(|h| CachedSipHook::new(h.host, h.url, h.auth_id))
         .collect();
 
     if let Some(error) = reject_protected_hosts(
@@ -276,6 +315,7 @@ pub async fn update_sip_hooks(
                 .map(|h| SipHookEntry {
                     host: h.host,
                     url: h.url,
+                    auth_id: h.auth_id,
                 })
                 .collect()
         } else {
@@ -291,6 +331,7 @@ pub async fn update_sip_hooks(
                 .map(|h| SipHookEntry {
                     host: h.host,
                     url: h.url,
+                    auth_id: h.auth_id,
                 })
                 .collect()
         };
@@ -432,6 +473,7 @@ pub async fn delete_sip_hooks(
                 .map(|h| SipHookEntry {
                     host: h.host,
                     url: h.url,
+                    auth_id: h.auth_id,
                 })
                 .collect()
         } else {
@@ -447,6 +489,7 @@ pub async fn delete_sip_hooks(
                 .map(|h| SipHookEntry {
                     host: h.host,
                     url: h.url,
+                    auth_id: h.auth_id,
                 })
                 .collect()
         };
@@ -465,21 +508,23 @@ mod tests {
         let entry = SipHookEntry {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
+            auth_id: "tenant-123".to_string(),
         };
 
         let json = serde_json::to_string(&entry).expect("Failed to serialize");
         assert!(json.contains("example.com"));
         assert!(json.contains("https://webhook.example.com/events"));
+        assert!(json.contains("tenant-123"));
     }
 
     #[test]
     fn test_sip_hooks_request_deserialization() {
-        let json =
-            r#"{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events"}]}"#;
+        let json = r#"{"hooks": [{"host": "example.com", "url": "https://webhook.example.com/events", "auth_id": "tenant-123"}]}"#;
         let request: SipHooksRequest = serde_json::from_str(json).expect("Failed to deserialize");
 
         assert_eq!(request.hooks.len(), 1);
         assert_eq!(request.hooks[0].host, "example.com");
+        assert_eq!(request.hooks[0].auth_id, "tenant-123");
     }
 
     #[test]
@@ -502,12 +547,14 @@ mod tests {
             hooks: vec![SipHookEntry {
                 host: "example.com".to_string(),
                 url: "https://webhook.example.com/events".to_string(),
+                auth_id: "tenant-123".to_string(),
             }],
         };
 
         let json = serde_json::to_string(&response).expect("Failed to serialize");
         assert!(json.contains("hooks"));
         assert!(json.contains("example.com"));
+        assert!(json.contains("tenant-123"));
     }
 
     #[test]

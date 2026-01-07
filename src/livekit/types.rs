@@ -81,4 +81,10 @@ pub enum LiveKitError {
 
     #[error("SIP transfer request timeout (transfer likely succeeded)")]
     SIPTransferRequestTimeout,
+
+    #[error("Room metadata conflict: existing auth_id={existing}, attempted={attempted}")]
+    MetadataConflict { existing: String, attempted: String },
+
+    #[error("Room not found: {0}")]
+    RoomNotFound(String),
 }

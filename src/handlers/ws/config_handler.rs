@@ -136,19 +136,20 @@ pub async fn handle_config_message(
     }
 
     // Initialize LiveKit client if configured
+    // Room names are kept clean (as provided by client); tenant isolation is enforced
+    // via room.metadata.auth_id set during room creation.
     let (livekit_client, livekit_room_name, sayna_identity, sayna_name) =
-        if let Some(mut livekit_ws_config) = livekit_ws_config {
-            // Normalize room name with auth prefix for tenant isolation
-            {
+        if let Some(livekit_ws_config) = livekit_ws_config {
+            // Get auth_id from connection state for metadata enforcement
+            let auth_id = {
                 let state_guard = state.read().await;
-                livekit_ws_config.room_name = state_guard
-                    .auth
-                    .normalize_room_name(&livekit_ws_config.room_name);
-                info!(
-                    "Normalized LiveKit room name to: {}",
-                    livekit_ws_config.room_name
-                );
-            }
+                state_guard.auth.id.clone()
+            };
+
+            info!(
+                "Using clean LiveKit room name: {} (auth via metadata)",
+                livekit_ws_config.room_name
+            );
 
             match initialize_livekit_client(
                 livekit_ws_config,
@@ -158,6 +159,7 @@ pub async fn handle_config_message(
                 message_tx,
                 app_state.livekit_room_handler.as_ref(),
                 &stream_id,
+                auth_id.as_deref(),
             )
             .await
             {
@@ -652,6 +654,11 @@ async fn register_final_tts_callback(
 }
 
 /// Initialize LiveKit client and set up callbacks
+///
+/// # Arguments
+/// * `auth_id` - Optional tenant identifier. If provided, enforced via room metadata
+///   to prevent cross-tenant room access.
+#[allow(clippy::too_many_arguments)]
 async fn initialize_livekit_client(
     livekit_ws_config: LiveKitWebSocketConfig,
     tts_config: Option<&TTSWebSocketConfig>,
@@ -660,6 +667,7 @@ async fn initialize_livekit_client(
     message_tx: &mpsc::Sender<MessageRoute>,
     room_handler: Option<&Arc<crate::livekit::room_handler::LiveKitRoomHandler>>,
     stream_id: &str,
+    auth_id: Option<&str>,
 ) -> Option<(
     Arc<RwLock<LiveKitClient>>,
     Option<crate::livekit::OperationQueue>,
@@ -688,21 +696,97 @@ async fn initialize_livekit_client(
         }
     };
 
-    // Create the room
-    if let Err(e) = room_handler.create_room(&livekit_ws_config.room_name).await {
-        error!("Failed to create LiveKit room: {:?}", e);
-        let _ = message_tx
-            .send(MessageRoute::Outgoing(OutgoingMessage::Error {
-                message: format!("Failed to create LiveKit room: {e:?}"),
-            }))
-            .await;
-        return None;
+    // Ensure room exists with proper tenant isolation
+    // Uses the same create-if-missing pattern as /livekit/token endpoint.
+    // If auth_id is provided, the room is associated with the tenant via metadata.
+    // If auth_id is empty/absent, the room is created without metadata enforcement.
+    if let Some(tenant_id) = auth_id
+        && !tenant_id.trim().is_empty()
+    {
+        // Authenticated mode: ensure room exists with correct auth_id
+        match room_handler
+            .ensure_room_with_auth_id(&livekit_ws_config.room_name, tenant_id)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "Room '{}' ready with auth_id '{}'",
+                    livekit_ws_config.room_name, tenant_id
+                );
+            }
+            Err(crate::livekit::LiveKitError::MetadataConflict {
+                existing,
+                attempted,
+            }) => {
+                error!(
+                    "Cross-tenant room access denied: room '{}' belongs to '{}', but '{}' attempted access",
+                    livekit_ws_config.room_name, existing, attempted
+                );
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!(
+                            "Access denied: room '{}' belongs to a different tenant",
+                            livekit_ws_config.room_name
+                        ),
+                    }))
+                    .await;
+                return None;
+            }
+            Err(crate::livekit::LiveKitError::RoomNotFound(_)) => {
+                // This should not happen after create attempt - indicates a serious issue
+                error!(
+                    "Room '{}' could not be created or found after creation attempt",
+                    livekit_ws_config.room_name
+                );
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!(
+                            "Failed to create room '{}': room not found after creation attempt",
+                            livekit_ws_config.room_name
+                        ),
+                    }))
+                    .await;
+                return None;
+            }
+            Err(e) => {
+                error!(
+                    "Failed to prepare room '{}': {:?}",
+                    livekit_ws_config.room_name, e
+                );
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to prepare room: {e:?}"),
+                    }))
+                    .await;
+                return None;
+            }
+        }
+    } else {
+        // Unauthenticated mode: ensure room exists without metadata enforcement
+        match room_handler
+            .ensure_room_exists(&livekit_ws_config.room_name)
+            .await
+        {
+            Ok(()) => {
+                debug!(
+                    "Room '{}' ready (unauthenticated context, no metadata)",
+                    livekit_ws_config.room_name
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to create room '{}': {:?}",
+                    livekit_ws_config.room_name, e
+                );
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message: format!("Failed to create room: {e:?}"),
+                    }))
+                    .await;
+                return None;
+            }
+        }
     }
-
-    info!(
-        "LiveKit room '{}' created successfully",
-        livekit_ws_config.room_name
-    );
 
     // Get participant identity and name with defaults
     let sayna_identity = livekit_ws_config

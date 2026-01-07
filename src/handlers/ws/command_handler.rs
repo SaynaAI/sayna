@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use crate::handlers::livekit::room_guard::{RoomAccessError, check_room_access};
 use crate::livekit::{LiveKitError, LiveKitOperation};
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
@@ -150,9 +151,10 @@ pub async fn handle_send_message(
 ///
 /// # Flow
 /// 1. Validate the phone number format
-/// 2. Retrieve room_name from connection state
-/// 3. Fetch participants from room via LiveKit API and use the first one
-/// 4. Call SIP handler directly to perform the transfer
+/// 2. Retrieve room_name and auth from connection state
+/// 3. Check room access via metadata auth_id
+/// 4. Fetch participants from room via LiveKit API and use the first one
+/// 5. Call SIP handler directly to perform the transfer
 pub async fn handle_sip_transfer(
     transfer_to: String,
     state: &Arc<RwLock<ConnectionState>>,
@@ -175,10 +177,13 @@ pub async fn handle_sip_transfer(
         }
     };
 
-    // Step 2: Get room_name from state
-    let room_name = {
+    // Step 2: Get room_name and auth from state
+    let (room_name, auth) = {
         let state_guard = state.read().await;
-        state_guard.livekit_room_name.clone()
+        (
+            state_guard.livekit_room_name.clone(),
+            state_guard.auth.clone(),
+        )
     };
 
     // Check room_name exists
@@ -214,7 +219,39 @@ pub async fn handle_sip_transfer(
         }
     };
 
-    // Step 5: Fetch participants from the room and use the first non-local one
+    // Step 5: Check room access via metadata auth_id
+    if let Err(e) = check_room_access(&auth, &room_name, &room_handler).await {
+        let error_msg = match e {
+            RoomAccessError::NotFound(r) => {
+                warn!(
+                    room_name = %r,
+                    "SIP transfer failed: room not found"
+                );
+                "Room not found".to_string()
+            }
+            RoomAccessError::AccessDenied { room_name: r, .. } => {
+                warn!(
+                    room_name = %r,
+                    auth_id = ?auth.id,
+                    "SIP transfer denied: room belongs to different tenant"
+                );
+                "Room not accessible".to_string()
+            }
+            RoomAccessError::LiveKitError(msg) => {
+                error!(
+                    room_name = %room_name,
+                    error = %msg,
+                    "SIP transfer failed: LiveKit error during room access check"
+                );
+                format!("Failed to verify room access: {}", msg)
+            }
+        };
+        let error = WebSocketError::SIPTransferFailed(error_msg);
+        send_sip_transfer_error(&error, message_tx).await;
+        return true;
+    }
+
+    // Step 6: Fetch participants from the room and use the first non-local one
     let local_identity = {
         let state_guard = state.read().await;
         state_guard.livekit_local_identity.clone()
@@ -257,7 +294,7 @@ pub async fn handle_sip_transfer(
     let participant_identity = participant.identity;
     let participant_name = participant.name;
 
-    // Step 6: Execute the SIP transfer in a background task
+    // Step 7: Execute the SIP transfer in a background task
     // The transfer operation can take up to 30 seconds waiting for the destination to answer.
     // If the call is dropped during transfer, it will timeout. We spawn this as a background
     // task to avoid blocking the WebSocket handler.

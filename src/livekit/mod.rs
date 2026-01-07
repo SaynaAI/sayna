@@ -68,6 +68,7 @@
 
 mod client;
 mod manager;
+pub mod metadata;
 pub mod operations;
 pub mod room_handler;
 pub mod sip_handler;

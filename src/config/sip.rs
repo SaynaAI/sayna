@@ -17,6 +17,8 @@ pub struct SipHookConfig {
     pub url: String,
     /// Optional per-hook signing secret (overrides global hook_secret)
     pub secret: Option<String>,
+    /// Tenant identifier for this hook (written to LiveKit room metadata)
+    pub auth_id: String,
 }
 
 impl SipHookInfo for SipHookConfig {
@@ -26,6 +28,10 @@ impl SipHookInfo for SipHookConfig {
 
     fn url(&self) -> &str {
         &self.url
+    }
+
+    fn auth_id(&self) -> &str {
+        &self.auth_id
     }
 }
 
@@ -84,13 +90,14 @@ impl SipConfig {
             .map(|addr| addr.trim().to_string())
             .collect();
 
-        // Normalize hook hostnames to lowercase and trim secrets
+        // Normalize hook hostnames to lowercase, trim secrets and auth_id
         let hooks = hooks
             .into_iter()
             .map(|hook| SipHookConfig {
                 host: hook.host.trim().to_lowercase(),
                 url: hook.url,
                 secret: hook.secret.map(|s| s.trim().to_string()),
+                auth_id: hook.auth_id.trim().to_string(),
             })
             .collect();
 
@@ -126,11 +133,13 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
             secret: Some("test-secret".to_string()),
+            auth_id: "tenant-123".to_string(),
         };
 
         assert_eq!(hook.host, "example.com");
         assert_eq!(hook.url, "https://webhook.example.com/events");
         assert_eq!(hook.secret, Some("test-secret".to_string()));
+        assert_eq!(hook.auth_id, "tenant-123");
     }
 
     #[test]
@@ -139,6 +148,7 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
             secret: None,
+            auth_id: "tenant-123".to_string(),
         }];
 
         let config = SipConfig::new(
@@ -157,6 +167,7 @@ mod tests {
         assert_eq!(config.allowed_addresses[1], "10.0.0.1"); // trimmed
         assert_eq!(config.hooks.len(), 1);
         assert_eq!(config.hooks[0].host, "example.com");
+        assert_eq!(config.hooks[0].auth_id, "tenant-123");
         assert_eq!(config.hook_secret, Some("global-secret".to_string()));
         assert_eq!(config.outbound_address, Some("sip.example.com".to_string()));
         assert_eq!(config.outbound_auth_username, Some("auth-user".to_string()));
@@ -170,11 +181,13 @@ mod tests {
                 host: "Example.COM".to_string(),
                 url: "https://webhook1.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-1".to_string(),
             },
             SipHookConfig {
                 host: "Another.HOST".to_string(),
                 url: "https://webhook2.example.com/events".to_string(),
                 secret: None,
+                auth_id: "tenant-2".to_string(),
             },
         ];
 
@@ -206,6 +219,7 @@ mod tests {
             host: "example.com".to_string(),
             url: "https://webhook.example.com/events".to_string(),
             secret: Some("  hook-secret  ".to_string()),
+            auth_id: "tenant-123".to_string(),
         }];
 
         let config = SipConfig::new(
@@ -220,6 +234,20 @@ mod tests {
 
         assert_eq!(config.hook_secret, Some("global-secret".to_string())); // trimmed
         assert_eq!(config.hooks[0].secret, Some("hook-secret".to_string())); // trimmed
+    }
+
+    #[test]
+    fn test_sip_config_trims_auth_id() {
+        let hooks = vec![SipHookConfig {
+            host: "example.com".to_string(),
+            url: "https://webhook.example.com/events".to_string(),
+            secret: None,
+            auth_id: "  tenant-123  ".to_string(),
+        }];
+
+        let config = SipConfig::new("sip-".to_string(), vec![], hooks, None, None, None, None);
+
+        assert_eq!(config.hooks[0].auth_id, "tenant-123"); // trimmed
     }
 
     #[test]

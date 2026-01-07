@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::auth::Auth;
+use crate::handlers::livekit::room_guard::{RoomAccessError, check_room_access};
 use crate::livekit::LiveKitError;
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
@@ -114,6 +115,7 @@ enum SIPTransferErrorCode {
     ParticipantNotFound,
     LiveKitNotConfigured,
     TransferFailed,
+    RoomAccessDenied,
 }
 
 impl SIPTransferErrorCode {
@@ -123,6 +125,7 @@ impl SIPTransferErrorCode {
             SIPTransferErrorCode::ParticipantNotFound => "PARTICIPANT_NOT_FOUND",
             SIPTransferErrorCode::LiveKitNotConfigured => "LIVEKIT_NOT_CONFIGURED",
             SIPTransferErrorCode::TransferFailed => "TRANSFER_FAILED",
+            SIPTransferErrorCode::RoomAccessDenied => "ROOM_ACCESS_DENIED",
         }
     }
 }
@@ -145,6 +148,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPTransferErrorCode)
 ///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit handlers
+/// * `auth` - Authentication context for room metadata authorization
 /// * `request` - Transfer request with room name, participant identity, and destination
 ///
 /// # Returns
@@ -152,15 +156,16 @@ fn error_response(status: StatusCode, message: &str, code: SIPTransferErrorCode)
 ///
 /// # Errors
 /// * 400 Bad Request - Invalid phone number format or empty fields
-/// * 404 Not Found - Specified participant not found or not a SIP participant
+/// * 404 Not Found - Room not found, not accessible, or participant not found
 /// * 500 Internal Server Error - LiveKit not configured or transfer operation failed
 ///
 /// # Flow
 /// 1. Validate the phone number format
 /// 2. Check LiveKit handlers are configured
-/// 3. Verify the participant exists and is a SIP participant
-/// 4. Execute the SIP transfer
-/// 5. Return success or appropriate error
+/// 3. Check room access via metadata auth_id
+/// 4. Verify the participant exists and is a SIP participant
+/// 5. Execute the SIP transfer
+/// 6. Return success or appropriate error
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -170,7 +175,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPTransferErrorCode)
         responses(
             (status = 200, description = "Transfer initiated successfully", body = SIPTransferResponse),
             (status = 400, description = "Invalid request (bad phone number or empty fields)", body = SIPTransferErrorResponse),
-            (status = 404, description = "Participant not found or not a SIP participant", body = SIPTransferErrorResponse),
+            (status = 404, description = "Room not found, not accessible, or participant not found", body = SIPTransferErrorResponse),
             (status = 500, description = "LiveKit not configured or transfer failed", body = SIPTransferErrorResponse)
         ),
         security(
@@ -184,12 +189,15 @@ pub async fn sip_transfer(
     Extension(auth): Extension<Auth>,
     Json(request): Json<SIPTransferRequest>,
 ) -> Response {
-    // Normalize room name with auth prefix for tenant isolation
-    let room_name = auth.normalize_room_name(&request.room_name);
+    // Use clean room name directly (no prefix)
+    let room_name = &request.room_name;
 
     info!(
-        "SIP transfer request - room: {} (normalized: {}), participant: {:?}, transfer_to: {}",
-        request.room_name, room_name, request.participant_identity, request.transfer_to
+        room_name = %room_name,
+        auth_id = ?auth.id,
+        participant_identity = %request.participant_identity,
+        transfer_to = %request.transfer_to,
+        "SIP transfer request received"
     );
 
     // Step 1: Validate phone number format
@@ -240,7 +248,50 @@ pub async fn sip_transfer(
         }
     };
 
-    // Step 5: Validate participant identity
+    // Step 5: Check room access via metadata auth_id
+    // For transfers, the room must exist (participant is already in it)
+    if let Err(e) = check_room_access(&auth, room_name, &room_handler).await {
+        match e {
+            RoomAccessError::NotFound(r) => {
+                warn!(
+                    room_name = %r,
+                    "SIP transfer failed: room not found"
+                );
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "Room not found or not accessible",
+                    SIPTransferErrorCode::RoomAccessDenied,
+                );
+            }
+            RoomAccessError::AccessDenied { room_name: r, .. } => {
+                warn!(
+                    room_name = %r,
+                    auth_id = ?auth.id,
+                    "SIP transfer denied: room belongs to different tenant"
+                );
+                // Return 404 to avoid leaking room existence
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "Room not found or not accessible",
+                    SIPTransferErrorCode::RoomAccessDenied,
+                );
+            }
+            RoomAccessError::LiveKitError(msg) => {
+                error!(
+                    room_name = %room_name,
+                    error = %msg,
+                    "SIP transfer failed: LiveKit error during room access check"
+                );
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to verify room access: {}", msg),
+                    SIPTransferErrorCode::TransferFailed,
+                );
+            }
+        }
+    }
+
+    // Step 6: Validate participant identity
     if request.participant_identity.trim().is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -250,7 +301,7 @@ pub async fn sip_transfer(
     }
 
     // Verify the participant exists and is a SIP participant
-    let participant_identity = match room_handler.list_participants(&room_name).await {
+    let participant_identity = match room_handler.list_participants(room_name).await {
         Ok(participants) => {
             let found = participants.iter().any(|p| {
                 p.identity == request.participant_identity
@@ -284,26 +335,30 @@ pub async fn sip_transfer(
         }
     };
 
-    // Step 6: Execute the SIP transfer
+    // Step 7: Execute the SIP transfer
     info!(
-        "Initiating SIP transfer: room={}, participant={}, transfer_to={}",
-        room_name, participant_identity, validated_phone
+        room_name = %room_name,
+        participant_identity = %participant_identity,
+        transfer_to = %validated_phone,
+        "Initiating SIP transfer"
     );
 
     match sip_handler
-        .transfer_call(&participant_identity, &room_name, &validated_phone)
+        .transfer_call(&participant_identity, room_name, &validated_phone)
         .await
     {
         Ok(()) => {
             info!(
-                "SIP transfer completed: room={}, participant={}, transfer_to={}",
-                room_name, participant_identity, validated_phone
+                room_name = %room_name,
+                participant_identity = %participant_identity,
+                transfer_to = %validated_phone,
+                "SIP transfer completed"
             );
             (
                 StatusCode::OK,
                 Json(SIPTransferResponse {
                     status: "completed".to_string(),
-                    room_name: room_name.clone(),
+                    room_name: room_name.to_string(),
                     participant_identity,
                     transfer_to: validated_phone,
                 }),
@@ -315,14 +370,16 @@ pub async fn sip_transfer(
             // Real errors (permission denied, not found, etc.) respond quickly.
             // Timeout likely means the transfer was initiated and the room was cleaned up.
             info!(
-                "SIP transfer initiated (timeout, transfer likely succeeded): room={}, participant={}, transfer_to={}",
-                room_name, participant_identity, validated_phone
+                room_name = %room_name,
+                participant_identity = %participant_identity,
+                transfer_to = %validated_phone,
+                "SIP transfer initiated (timeout, transfer likely succeeded)"
             );
             (
                 StatusCode::OK,
                 Json(SIPTransferResponse {
                     status: "initiated".to_string(),
-                    room_name,
+                    room_name: room_name.to_string(),
                     participant_identity,
                     transfer_to: validated_phone,
                 }),
@@ -331,8 +388,11 @@ pub async fn sip_transfer(
         }
         Err(e) => {
             error!(
-                "SIP transfer failed: room={}, participant={}, transfer_to={}, error={}",
-                room_name, participant_identity, validated_phone, e
+                room_name = %room_name,
+                participant_identity = %participant_identity,
+                transfer_to = %validated_phone,
+                error = %e,
+                "SIP transfer failed"
             );
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,

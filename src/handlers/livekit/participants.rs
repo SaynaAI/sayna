@@ -1,7 +1,12 @@
 //! LiveKit participant management handler
 //!
-//! This module provides REST API endpoints for managing participants in LiveKit rooms,
-//! with tenant isolation through auth.id room name prefixing.
+//! This module provides REST API endpoints for managing participants in LiveKit rooms.
+//!
+//! ## Authentication
+//!
+//! Tenant isolation is enforced via `room.metadata.auth_id`:
+//! - Access to room participants requires matching `auth_id` in room metadata
+//! - When authentication is disabled (`auth.id` is None), all rooms are accessible
 
 use axum::{
     Extension, Json,
@@ -13,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+use super::room_guard::check_room_access;
 use crate::auth::Auth;
 use crate::state::AppState;
 
@@ -43,7 +49,7 @@ pub struct RemoveParticipantRequest {
 /// ```json
 /// {
 ///   "status": "removed",
-///   "room_name": "project1_conversation-room-123",
+///   "room_name": "conversation-room-123",
 ///   "participant_identity": "user-alice-456"
 /// }
 /// ```
@@ -54,11 +60,8 @@ pub struct RemoveParticipantResponse {
     #[cfg_attr(feature = "openapi", schema(example = "removed"))]
     pub status: String,
 
-    /// The normalized room name (with tenant prefix)
-    #[cfg_attr(
-        feature = "openapi",
-        schema(example = "project1_conversation-room-123")
-    )]
+    /// The room name
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
     pub room_name: String,
 
     /// The identity of the removed participant
@@ -121,8 +124,7 @@ fn error_response(status: StatusCode, message: &str, code: RemoveParticipantErro
 /// Handler for DELETE /livekit/participant endpoint
 ///
 /// Removes a participant from a LiveKit room, forcibly disconnecting them.
-/// The room name is normalized with the auth.id prefix for tenant isolation,
-/// ensuring users can only remove participants from their own rooms.
+/// Access is authorized via `metadata.auth_id` check.
 ///
 /// Note: This does not invalidate the participant's token. To prevent rejoining,
 /// use short-lived tokens and avoid issuing new tokens to removed participants.
@@ -135,14 +137,18 @@ fn error_response(status: StatusCode, message: &str, code: RemoveParticipantErro
 /// # Returns
 /// * `Response` - JSON response with removal status or error
 ///
+/// # Authorization
+/// - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+/// - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+///
 /// # Errors
 /// * 400 Bad Request - Empty room name or participant identity
-/// * 404 Not Found - Participant not found in the room
+/// * 404 Not Found - Room/participant not found or access denied (masked)
 /// * 500 Internal Server Error - LiveKit not configured or removal failed
 ///
 /// # Flow
 /// 1. Validate request fields are not empty
-/// 2. Normalize room name with auth.id prefix
+/// 2. Check room access via metadata.auth_id
 /// 3. Verify participant exists in the room
 /// 4. Remove the participant
 /// 5. Return success or appropriate error
@@ -186,18 +192,17 @@ pub async fn remove_participant(
         );
     }
 
-    // Step 2: Normalize room name with auth prefix for tenant isolation
-    let room_name = auth.normalize_room_name(&request.room_name);
+    // Use room name as-is (no prefixing) - tenant isolation is via metadata
+    let room_name = &request.room_name;
 
     info!(
         auth_id = ?auth.id,
-        room = %request.room_name,
-        normalized_room = %room_name,
+        room = %room_name,
         participant = %request.participant_identity,
         "Remove participant request"
     );
 
-    // Step 3: Check LiveKit room handler is configured
+    // Step 2: Check LiveKit room handler is configured
     let room_handler = match &state.livekit_room_handler {
         Some(handler) => handler,
         None => {
@@ -210,8 +215,24 @@ pub async fn remove_participant(
         }
     };
 
+    // Step 3: Check room access via metadata.auth_id
+    if let Err(e) = check_room_access(&auth, room_name, room_handler).await {
+        // Mask as "not found" to avoid leaking room existence
+        warn!(
+            room = %room_name,
+            auth_id = ?auth.id,
+            error = ?e,
+            "Room access check failed"
+        );
+        return error_response(
+            StatusCode::NOT_FOUND,
+            &format!("Room '{}' not found or not accessible", room_name),
+            RemoveParticipantErrorCode::ParticipantNotFound,
+        );
+    }
+
     // Step 4: Verify participant exists in the room
-    let participants = match room_handler.list_participants(&room_name).await {
+    let participants = match room_handler.list_participants(room_name).await {
         Ok(p) => p,
         Err(e) => {
             // If we can't list participants, the room likely doesn't exist
@@ -222,7 +243,7 @@ pub async fn remove_participant(
             );
             return error_response(
                 StatusCode::NOT_FOUND,
-                &format!("Room '{}' not found or not accessible", request.room_name),
+                &format!("Room '{}' not found or not accessible", room_name),
                 RemoveParticipantErrorCode::ParticipantNotFound,
             );
         }
@@ -242,7 +263,7 @@ pub async fn remove_participant(
             StatusCode::NOT_FOUND,
             &format!(
                 "Participant '{}' not found in room '{}'",
-                request.participant_identity, request.room_name
+                request.participant_identity, room_name
             ),
             RemoveParticipantErrorCode::ParticipantNotFound,
         );
@@ -250,7 +271,7 @@ pub async fn remove_participant(
 
     // Step 5: Remove the participant
     match room_handler
-        .remove_participant(&room_name, &request.participant_identity)
+        .remove_participant(room_name, &request.participant_identity)
         .await
     {
         Ok(()) => {
@@ -263,7 +284,7 @@ pub async fn remove_participant(
                 StatusCode::OK,
                 Json(RemoveParticipantResponse {
                     status: "removed".to_string(),
-                    room_name,
+                    room_name: room_name.clone(),
                     participant_identity: request.participant_identity,
                 }),
             )
@@ -321,7 +342,7 @@ pub struct MuteParticipantRequest {
 /// # Example
 /// ```json
 /// {
-///   "room_name": "project1_conversation-room-123",
+///   "room_name": "conversation-room-123",
 ///   "participant_identity": "user-alice-456",
 ///   "track_sid": "TR_abc123",
 ///   "muted": true
@@ -330,11 +351,8 @@ pub struct MuteParticipantRequest {
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MuteParticipantResponse {
-    /// The normalized room name (with tenant prefix)
-    #[cfg_attr(
-        feature = "openapi",
-        schema(example = "project1_conversation-room-123")
-    )]
+    /// The room name
+    #[cfg_attr(feature = "openapi", schema(example = "conversation-room-123"))]
     pub room_name: String,
 
     /// The identity of the participant
@@ -352,8 +370,8 @@ pub struct MuteParticipantResponse {
 
 /// Handler for POST /livekit/participant/mute endpoint
 ///
-/// Mutes or unmutes a participant's published track. The room name is
-/// normalized with the auth.id prefix for tenant isolation.
+/// Mutes or unmutes a participant's published track.
+/// Access is authorized via `metadata.auth_id` check.
 ///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit configuration
@@ -363,9 +381,13 @@ pub struct MuteParticipantResponse {
 /// # Returns
 /// * `Response` - JSON response with mute status or error
 ///
+/// # Authorization
+/// - When `auth.id` is present: Requires `room.metadata.auth_id == auth.id`
+/// - When `auth.id` is absent: Access is allowed (backward-compatible mode)
+///
 /// # Errors
 /// * 400 Bad Request - Empty fields in request
-/// * 404 Not Found - Room or participant not found
+/// * 404 Not Found - Room/participant not found or access denied (masked)
 /// * 500 Internal Server Error - LiveKit not configured or mute operation failed
 #[cfg_attr(
     feature = "openapi",
@@ -415,13 +437,12 @@ pub async fn mute_participant(
         );
     }
 
-    // Normalize room name with auth prefix for tenant isolation
-    let room_name = auth.normalize_room_name(&request.room_name);
+    // Use room name as-is (no prefixing) - tenant isolation is via metadata
+    let room_name = &request.room_name;
 
     info!(
         auth_id = ?auth.id,
-        room = %request.room_name,
-        normalized_room = %room_name,
+        room = %room_name,
         participant = %request.participant_identity,
         track_sid = %request.track_sid,
         muted = %request.muted,
@@ -441,10 +462,26 @@ pub async fn mute_participant(
         }
     };
 
+    // Check room access via metadata.auth_id
+    if let Err(e) = check_room_access(&auth, room_name, room_handler).await {
+        // Mask as "not found" to avoid leaking room existence
+        warn!(
+            room = %room_name,
+            auth_id = ?auth.id,
+            error = ?e,
+            "Room access check failed"
+        );
+        return error_response(
+            StatusCode::NOT_FOUND,
+            &format!("Room '{}' not found or not accessible", room_name),
+            RemoveParticipantErrorCode::ParticipantNotFound,
+        );
+    }
+
     // Mute/unmute the track
     match room_handler
         .mute_participant_track(
-            &room_name,
+            room_name,
             &request.participant_identity,
             &request.track_sid,
             request.muted,
@@ -462,7 +499,7 @@ pub async fn mute_participant(
             (
                 StatusCode::OK,
                 Json(MuteParticipantResponse {
-                    room_name,
+                    room_name: room_name.clone(),
                     participant_identity: request.participant_identity,
                     track_sid: request.track_sid,
                     muted: track_info.muted,
@@ -483,7 +520,7 @@ pub async fn mute_participant(
                     StatusCode::NOT_FOUND,
                     &format!(
                         "Track '{}' or participant '{}' not found in room '{}'",
-                        request.track_sid, request.participant_identity, request.room_name
+                        request.track_sid, request.participant_identity, room_name
                     ),
                     RemoveParticipantErrorCode::ParticipantNotFound,
                 );
