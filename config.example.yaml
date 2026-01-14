@@ -68,6 +68,30 @@ providers:
 #     audio_format: linear16   # Options: linear16/pcm, wav, mp3
 #     sample_rate: 24000       # Options: 8000, 16000, 22050, 24000, 44100, 48000
 
+# Voice Activity Detection (VAD) Configuration
+# Requires: --features stt-vad
+# vad:
+#   # Enable VAD-based silence detection
+#   enabled: false
+#
+#   # Speech probability threshold (0.0 to 1.0)
+#   # Audio with probability above this is considered speech
+#   threshold: 0.5
+#
+#   # Silence duration in milliseconds to trigger turn end
+#   # This is the primary control for turn-taking responsiveness
+#   silence_duration_ms: 300
+#
+#   # Minimum speech duration (ms) before checking for silence
+#   # Prevents false triggers on brief pauses
+#   min_speech_duration_ms: 100
+#
+#   # Path to custom Silero-VAD model (optional)
+#   # model_path: /path/to/silero_vad.onnx
+#
+#   # Model download URL (if not using model_path)
+#   # model_url: https://huggingface.co/onnx-community/silero-vad/resolve/main/silero_vad.onnx
+
 # LiveKit recording configuration (S3)
 recording:
   s3_bucket: "my-recordings"              # ENV: RECORDING_S3_BUCKET

@@ -10,6 +10,8 @@ A high-performance real-time voice processing server built in Rust that provides
 - **Unified Voice API**: Single interface for multiple STT/TTS providers
 - **Real-time Processing**: WebSocket-based bidirectional audio streaming
 - **LiveKit Integration**: WebRTC audio streaming with room-based communication
+- **Turn Detection**: ML-based end-of-turn detection (`turn-detect` feature)
+- **Voice Activity Detection**: Silero-VAD for audio-level silence detection (`stt-vad` feature)
 - **Advanced Noise Filtering**: Optional DeepFilterNet integration (`noise-filter` feature)
 - **Provider Flexibility**: Pluggable architecture supporting multiple providers
   - Deepgram (STT/TTS)
@@ -208,6 +210,7 @@ cargo run -- -c config.yaml
 Sayna exposes several Cargo features that gate heavyweight subsystems:
 
 - `turn-detect`: ONNX-based speech turn detection
+- `stt-vad`: Silero-VAD voice activity detection for silence-based turn detection
 - `noise-filter`: DeepFilterNet noise suppression pipeline
 - `openapi`: OpenAPI 3.1 specification generation
 
@@ -215,11 +218,14 @@ Sayna exposes several Cargo features that gate heavyweight subsystems:
 # Run with turn detection
 cargo run --features turn-detect
 
+# Run with turn detection and VAD
+cargo run --features turn-detect,stt-vad
+
 # Run with noise filter
 cargo run --features noise-filter
 
 # Run with multiple features
-cargo run --features turn-detect,noise-filter,openapi
+cargo run --features turn-detect,stt-vad,noise-filter,openapi
 ```
 
 The Docker image includes `turn-detect` and `noise-filter` by default.

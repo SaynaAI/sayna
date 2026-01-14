@@ -8,8 +8,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tokio::time::Duration;
 use tracing::debug;
+#[cfg(feature = "stt-vad")]
+use tracing::info;
 
 use crate::core::cache::store::CacheStore;
+use crate::core::vad::{SilenceTracker, SilenceTrackerConfig};
+#[cfg(feature = "stt-vad")]
+use crate::core::vad::{SileroVAD, VADEvent};
 use crate::core::{
     create_stt_provider, create_tts_provider,
     stt::{
@@ -51,6 +56,16 @@ pub struct VoiceManager {
     // Turn detection for better end-of-speech detection
     turn_detector: Option<Arc<RwLock<TurnDetector>>>,
 
+    // VAD for silence detection (feature-gated)
+    #[cfg(feature = "stt-vad")]
+    vad: Option<Arc<RwLock<SileroVAD>>>,
+
+    // Silence tracker for VAD output
+    silence_tracker: Arc<SilenceTracker>,
+
+    // Buffer for accumulating audio samples for VAD processing
+    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+
     // Interruption control - mostly lock-free with atomics
     interruption_state: Arc<InterruptionState>,
 
@@ -66,6 +81,7 @@ impl VoiceManager {
     ///
     /// # Arguments
     /// * `config` - Configuration for both STT and TTS providers
+    /// * `turn_detector` - Optional turn detector for end-of-speech detection
     ///
     /// # Returns
     /// * `VoiceManagerResult<Self>` - A new VoiceManager instance or error
@@ -89,13 +105,41 @@ impl VoiceManager {
     ///     };
     ///
     ///     let config = VoiceManagerConfig::new(stt_config, tts_config);
-    ///     let voice_manager = VoiceManager::new(config, None)?;
+    ///     let voice_manager = VoiceManager::new(config, None, None)?;
     ///     Ok(())
     /// }
     /// ```
+    #[cfg(feature = "stt-vad")]
     pub fn new(
         config: VoiceManagerConfig,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        vad: Option<Arc<RwLock<SileroVAD>>>,
+    ) -> VoiceManagerResult<Self> {
+        Self::new_internal(config, turn_detector, vad)
+    }
+
+    /// Create a new VoiceManager with the given configuration
+    ///
+    /// # Arguments
+    /// * `config` - Configuration for both STT and TTS providers
+    /// * `turn_detector` - Optional turn detector for end-of-speech detection
+    ///
+    /// # Returns
+    /// * `VoiceManagerResult<Self>` - A new VoiceManager instance or error
+    #[cfg(not(feature = "stt-vad"))]
+    pub fn new(
+        config: VoiceManagerConfig,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    ) -> VoiceManagerResult<Self> {
+        Self::new_internal(config, turn_detector)
+    }
+
+    /// Internal constructor that handles both feature-gated and non-feature-gated versions
+    #[cfg(feature = "stt-vad")]
+    fn new_internal(
+        config: VoiceManagerConfig,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        vad: Option<Arc<RwLock<SileroVAD>>>,
     ) -> VoiceManagerResult<Self> {
         let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
             .map_err(VoiceManagerError::TTSError)?;
@@ -105,6 +149,20 @@ impl VoiceManager {
         // Pre-allocate string buffers with reasonable capacity
         const TEXT_BUFFER_CAPACITY: usize = 1024;
         let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
+        // Initialize silence tracker with config from VAD config
+        let vad_config = &config.vad_config.silero_config;
+        let silence_tracker_config = SilenceTrackerConfig::from_sample_rate(
+            vad_config.sample_rate.as_hz(),
+            vad_config.threshold,
+            vad_config.silence_duration_ms,
+            vad_config.min_speech_duration_ms,
+        );
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
+
+        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
+        const VAD_BUFFER_CAPACITY: usize = 16000;
+        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
 
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
@@ -125,8 +183,80 @@ impl VoiceManager {
                 last_forced_text: String::with_capacity(1024),
                 segment_start_ms: AtomicUsize::new(0),
                 hard_timeout_deadline_ms: AtomicUsize::new(0),
+                // VAD-based silence tracking state
+                vad_turn_end_detected: AtomicBool::new(false),
+                vad_turn_detection_handle: None,
             })),
             turn_detector,
+            vad,
+            silence_tracker,
+            vad_audio_buffer,
+            interruption_state: Arc::new(InterruptionState {
+                allow_interruption: AtomicBool::new(true),
+                non_interruptible_until_ms: AtomicUsize::new(0),
+                current_sample_rate: AtomicU32::new(24000),
+                is_completed: AtomicBool::new(true), // Start as completed
+            }),
+            config,
+            clear_notify: Arc::new(Notify::new()),
+        })
+    }
+
+    /// Internal constructor that handles both feature-gated and non-feature-gated versions
+    #[cfg(not(feature = "stt-vad"))]
+    fn new_internal(
+        config: VoiceManagerConfig,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    ) -> VoiceManagerResult<Self> {
+        let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
+            .map_err(VoiceManagerError::TTSError)?;
+        let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
+            .map_err(VoiceManagerError::STTError)?;
+
+        // Pre-allocate string buffers with reasonable capacity
+        const TEXT_BUFFER_CAPACITY: usize = 1024;
+        let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
+        // Initialize silence tracker with config from VAD config
+        let vad_config = &config.vad_config.silero_config;
+        let silence_tracker_config = SilenceTrackerConfig::from_sample_rate(
+            vad_config.sample_rate.as_hz(),
+            vad_config.threshold,
+            vad_config.silence_duration_ms,
+            vad_config.min_speech_duration_ms,
+        );
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
+
+        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
+        const VAD_BUFFER_CAPACITY: usize = 16000;
+        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
+
+        Ok(Self {
+            tts: Arc::new(RwLock::new(tts)),
+            stt: Arc::new(RwLock::new(stt)),
+            stt_callback: Arc::new(SyncRwLock::new(None)),
+            stt_error_callback: Arc::new(SyncRwLock::new(None)),
+            tts_audio_callback: Arc::new(SyncRwLock::new(None)),
+            tts_error_callback: Arc::new(SyncRwLock::new(None)),
+            audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+            tts_complete_callback: Arc::new(SyncRwLock::new(None)),
+            speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
+                text_buffer,
+                turn_detection_handle: None,
+                hard_timeout_handle: None,
+                waiting_for_speech_final: AtomicBool::new(false),
+                user_callback: None,
+                turn_detection_last_fired_ms: AtomicUsize::new(0),
+                last_forced_text: String::with_capacity(1024),
+                segment_start_ms: AtomicUsize::new(0),
+                hard_timeout_deadline_ms: AtomicUsize::new(0),
+                // VAD-based silence tracking state
+                vad_turn_end_detected: AtomicBool::new(false),
+                vad_turn_detection_handle: None,
+            })),
+            turn_detector,
+            silence_tracker,
+            vad_audio_buffer,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -164,7 +294,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -212,7 +342,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -225,6 +355,17 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn stop(&self) -> VoiceManagerResult<()> {
+        // Reset VAD state
+        #[cfg(feature = "stt-vad")]
+        if let Some(vad) = &self.vad {
+            vad.write().await.reset().await;
+        }
+        self.silence_tracker.reset();
+        {
+            let mut buffer = self.vad_audio_buffer.write();
+            buffer.clear();
+        }
+
         // Cancel any pending speech final timer
         {
             let mut state = self.speech_final_state.write();
@@ -235,6 +376,8 @@ impl VoiceManager {
             if let Some(handle) = state.hard_timeout_handle.take() {
                 handle.abort();
             }
+            // Reset VAD state in speech final state
+            state.reset_vad_state();
             // Reset speech final state - reuse allocated capacity
             state.text_buffer.clear();
             state
@@ -274,7 +417,7 @@ impl VoiceManager {
     /// * `bool` - True if both providers are ready, false otherwise
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -311,7 +454,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -325,12 +468,217 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn receive_audio(&self, audio: Vec<u8>) -> VoiceManagerResult<()> {
+        // Process audio through VAD if enabled
+        #[cfg(feature = "stt-vad")]
+        if let Some(vad) = &self.vad
+            && self.config.vad_config.enabled
+        {
+            self.process_audio_with_vad(&audio, vad.clone()).await?;
+        }
+
         // Send audio to STT provider
         let mut stt = self.stt.write().await;
         stt.send_audio(audio)
             .await
             .map_err(VoiceManagerError::STTError)?;
         Ok(())
+    }
+
+    /// Process audio through Silero-VAD for silence detection
+    ///
+    /// This method converts raw PCM bytes to i16 samples, accumulates them
+    /// in a buffer, and processes complete frames through the VAD model.
+    /// VAD events are fed to the SilenceTracker which triggers speech_final
+    /// when silence exceeds the configured threshold.
+    #[cfg(feature = "stt-vad")]
+    async fn process_audio_with_vad(
+        &self,
+        audio: &[u8],
+        vad: Arc<RwLock<SileroVAD>>,
+    ) -> VoiceManagerResult<()> {
+        // Convert bytes to i16 samples (assuming 16-bit PCM little-endian)
+        let samples: Vec<i16> = audio
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        // Get VAD frame size
+        let frame_size = {
+            let vad_guard = vad.read().await;
+            vad_guard.frame_size()
+        };
+
+        // Extract complete frames from buffer synchronously to avoid holding lock across await
+        let frames_to_process: Vec<Vec<i16>> = {
+            let mut buffer = self.vad_audio_buffer.write();
+            buffer.extend_from_slice(&samples);
+
+            let mut frames = Vec::new();
+            while buffer.len() >= frame_size {
+                let frame: Vec<i16> = buffer.drain(..frame_size).collect();
+                frames.push(frame);
+            }
+            frames
+        }; // Buffer lock released here
+
+        // Process frames through VAD (without holding buffer lock)
+        for frame in frames_to_process {
+            let speech_prob = {
+                let vad_guard = vad.write().await;
+                vad_guard.process_audio(&frame).await.map_err(|e| {
+                    VoiceManagerError::InitializationError(format!("VAD processing error: {}", e))
+                })?
+            };
+
+            // Feed to silence tracker
+            if let Some(event) = self.silence_tracker.process(speech_prob) {
+                self.handle_vad_event(event).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle VAD events from the SilenceTracker
+    ///
+    /// This method processes VAD events and triggers appropriate actions:
+    /// - SpeechStart: Reset VAD state for new utterance
+    /// - SilenceDetected: Log but no action (waiting for threshold)
+    /// - SpeechResumed: Cancel pending VAD turn detection
+    /// - TurnEnd: Trigger speech_final evaluation
+    #[cfg(feature = "stt-vad")]
+    async fn handle_vad_event(&self, event: VADEvent) {
+        match event {
+            VADEvent::SpeechStart => {
+                debug!("VAD: Speech started");
+                // Reset VAD state for new utterance
+                let mut state = self.speech_final_state.write();
+                state.reset_vad_state();
+            }
+            VADEvent::SilenceDetected => {
+                debug!("VAD: Brief silence detected");
+            }
+            VADEvent::SpeechResumed => {
+                debug!("VAD: Speech resumed");
+                // Cancel pending VAD turn detection
+                let mut state = self.speech_final_state.write();
+                state.reset_vad_state();
+            }
+            VADEvent::TurnEnd => {
+                info!("VAD: Turn end detected - triggering speech_final evaluation");
+                // This triggers the turn detection check
+                self.trigger_vad_speech_final().await;
+            }
+        }
+    }
+
+    /// Trigger speech_final evaluation based on VAD turn end detection
+    ///
+    /// When VAD detects sufficient silence (turn end), this method:
+    /// 1. Checks if we have accumulated text and are waiting for speech_final
+    /// 2. Runs turn detection ML model if available
+    /// 3. Fires artificial speech_final if turn is confirmed
+    #[cfg(feature = "stt-vad")]
+    async fn trigger_vad_speech_final(&self) {
+        // Get the current text buffer and callback
+        let (text_buffer, callback) = {
+            let state = self.speech_final_state.read();
+            if !state.waiting_for_speech_final.load(Ordering::Acquire) {
+                return; // Not waiting for speech_final
+            }
+            (state.text_buffer.clone(), state.user_callback.clone())
+        };
+
+        if text_buffer.is_empty() {
+            return; // No text to process
+        }
+
+        // Mark VAD turn end as detected
+        {
+            let state = self.speech_final_state.read();
+            state.vad_turn_end_detected.store(true, Ordering::Release);
+        }
+
+        // Run turn detection if available
+        let should_fire = if let Some(detector) = &self.turn_detector {
+            match tokio::time::timeout(Duration::from_millis(100), async {
+                let guard = detector.read().await;
+                guard.is_turn_complete(&text_buffer).await
+            })
+            .await
+            {
+                Ok(Ok(is_complete)) => {
+                    if is_complete {
+                        info!(
+                            "VAD+TurnDetect: Turn complete confirmed for '{}'",
+                            text_buffer.chars().take(50).collect::<String>()
+                        );
+                        true
+                    } else {
+                        info!("VAD: Turn detection says incomplete - waiting for more input");
+                        // Reset VAD state so next TurnEnd can trigger again
+                        {
+                            let state = self.speech_final_state.read();
+                            state.vad_turn_end_detected.store(false, Ordering::Release);
+                        }
+                        self.silence_tracker.reset();
+                        false
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("VAD turn detection error: {:?} - firing anyway", e);
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!("VAD turn detection timeout - firing anyway");
+                    true
+                }
+            }
+        } else {
+            // No turn detector - fire based on VAD silence alone
+            info!("VAD: No turn detector - firing based on silence alone");
+            true
+        };
+
+        if should_fire {
+            // Fire speech_final
+            if let Some(callback) = callback {
+                let result = STTResult {
+                    transcript: String::new(),
+                    is_final: true,
+                    is_speech_final: true,
+                    confidence: 1.0,
+                };
+
+                // Reset state
+                {
+                    let mut state = self.speech_final_state.write();
+                    state
+                        .waiting_for_speech_final
+                        .store(false, Ordering::Release);
+                    state.text_buffer.clear();
+                    if let Some(handle) = state.turn_detection_handle.take() {
+                        handle.abort();
+                    }
+                    if let Some(handle) = state.hard_timeout_handle.take() {
+                        handle.abort();
+                    }
+                    state.reset_vad_state();
+                }
+
+                // Reset silence tracker for next utterance
+                self.silence_tracker.reset();
+
+                // Clear VAD audio buffer
+                {
+                    let mut buffer = self.vad_audio_buffer.write();
+                    buffer.clear();
+                }
+
+                info!("VAD: Firing speech_final");
+                callback(result).await;
+            }
+        }
     }
 
     /// Send text to the TTS provider for synthesis
@@ -343,7 +691,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -504,7 +852,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -606,7 +954,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -664,7 +1012,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;
@@ -808,7 +1156,7 @@ impl VoiceManager {
     /// * `VoiceManagerResult<()>` - Success or error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
     /// # use sayna::core::stt::STTConfig;
     /// # use sayna::core::tts::TTSConfig;

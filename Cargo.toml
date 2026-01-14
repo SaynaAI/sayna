@@ -13,6 +13,7 @@ publish = false  # Binary-only distribution via GitHub releases
 [features]
 default = []
 turn-detect = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+stt-vad = ["dep:ort", "dep:ndarray"]
 noise-filter = [
     "dep:deep_filter",
     "dep:tract-core",

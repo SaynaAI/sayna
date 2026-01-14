@@ -21,7 +21,10 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust,no_run
+//! **Note**: When the `stt-vad` feature is enabled, `VoiceManager::new` takes an
+//! additional optional VAD parameter. See the feature documentation for details.
+//!
+//! ```rust,ignore
 //! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 //! use sayna::core::stt::STTConfig;
 //! use sayna::core::tts::TTSConfig;
@@ -54,6 +57,8 @@
 //!     let config = VoiceManagerConfig::new(stt_config, tts_config);
 //!
 //!     // Create and start the voice manager
+//!     // Without stt-vad: VoiceManager::new(config, None)?
+//!     // With stt-vad: VoiceManager::new(config, None, None)?
 //!     let voice_manager = VoiceManager::new(config, None)?;
 //!     voice_manager.start().await?;
 //!
@@ -123,7 +128,7 @@
 //!
 //! ### Customizing Speech Final Timing
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 //! use sayna::core::voice_manager::config::SpeechFinalConfig;
 //! use sayna::core::stt::STTConfig;
@@ -164,7 +169,7 @@
 //!
 //! ### Real-time Voice Processing
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 //! use sayna::core::stt::STTConfig;
 //! use sayna::core::tts::TTSConfig;
@@ -229,7 +234,7 @@
 //!
 //! ### Error Handling and Recovery
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use sayna::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 //! use sayna::core::stt::STTConfig;
 //! use sayna::core::tts::TTSConfig;

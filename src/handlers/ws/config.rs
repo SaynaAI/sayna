@@ -10,6 +10,7 @@ use crate::{
     core::{
         stt::STTConfig,
         tts::{Pronunciation, TTSConfig},
+        vad::{SileroVADConfig, VADSilenceConfig},
     },
     livekit::LiveKitConfig,
 };
@@ -22,6 +23,99 @@ pub fn default_audio_enabled() -> Option<bool> {
 /// Default value for allow_interruption flag (true)
 pub fn default_allow_interruption() -> Option<bool> {
     Some(true)
+}
+
+/// Default VAD threshold (0.5)
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+
+/// Default silence duration in milliseconds (300)
+fn default_silence_duration_ms() -> u64 {
+    300
+}
+
+/// Default minimum speech duration in milliseconds (100)
+fn default_min_speech_duration_ms() -> u64 {
+    100
+}
+
+/// VAD configuration for WebSocket messages
+///
+/// Voice Activity Detection (VAD) can be used to detect when a speaker has
+/// finished talking, based on silence duration thresholds. This provides
+/// an alternative or supplement to STT provider-based speech final detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct VADWebSocketConfig {
+    /// Whether to enable VAD-based silence detection.
+    ///
+    /// When enabled, VAD results are used to determine when a speaker
+    /// has finished talking, based on silence duration thresholds.
+    /// Default: false (for backward compatibility).
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(example = true))]
+    pub enabled: bool,
+
+    /// Speech probability threshold (0.0 to 1.0).
+    ///
+    /// Audio frames with probability above this threshold are considered speech.
+    /// The default value of 0.5 is the recommendation from Silero-VAD.
+    ///
+    /// Lower values increase sensitivity (detect more speech, more false positives).
+    /// Higher values decrease sensitivity (miss quiet speech, fewer false positives).
+    #[serde(default = "default_vad_threshold")]
+    #[cfg_attr(feature = "openapi", schema(example = 0.5))]
+    pub threshold: f32,
+
+    /// Silence duration in milliseconds to trigger turn end.
+    ///
+    /// After detecting speech, this is how long continuous silence must be
+    /// observed before considering the speech segment complete. Default: 300ms.
+    #[serde(default = "default_silence_duration_ms")]
+    #[cfg_attr(feature = "openapi", schema(example = 300))]
+    pub silence_duration_ms: u64,
+
+    /// Minimum speech duration in milliseconds before considering silence.
+    ///
+    /// Prevents false triggers on brief pauses within speech. The system won't
+    /// start tracking silence until at least this much speech has been detected.
+    /// Default: 100ms.
+    #[serde(default = "default_min_speech_duration_ms")]
+    #[cfg_attr(feature = "openapi", schema(example = 100))]
+    pub min_speech_duration_ms: u64,
+}
+
+impl Default for VADWebSocketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_vad_threshold(),
+            silence_duration_ms: default_silence_duration_ms(),
+            min_speech_duration_ms: default_min_speech_duration_ms(),
+        }
+    }
+}
+
+impl VADWebSocketConfig {
+    /// Convert WebSocket VAD config to VADSilenceConfig for VoiceManager
+    ///
+    /// This creates a VADSilenceConfig with the WebSocket-provided settings,
+    /// using default values for Silero-VAD model configuration (model path, etc.)
+    /// which are handled by the server configuration.
+    pub fn to_vad_silence_config(&self) -> VADSilenceConfig {
+        let silero_config = SileroVADConfig {
+            threshold: self.threshold,
+            silence_duration_ms: self.silence_duration_ms,
+            min_speech_duration_ms: self.min_speech_duration_ms,
+            ..SileroVADConfig::default()
+        };
+
+        VADSilenceConfig {
+            enabled: self.enabled,
+            silero_config,
+        }
+    }
 }
 
 /// STT configuration for WebSocket messages (without API key)
@@ -216,4 +310,97 @@ pub fn compute_tts_config_hash(tts_config: &TTSConfig) -> String {
         s.push_str(&format!("{rate:.3}"));
     }
     format!("{:032x}", xxh3_128(s.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vad_websocket_config_defaults() {
+        let config = VADWebSocketConfig::default();
+
+        assert!(!config.enabled);
+        assert_eq!(config.threshold, 0.5);
+        assert_eq!(config.silence_duration_ms, 300);
+        assert_eq!(config.min_speech_duration_ms, 100);
+    }
+
+    #[test]
+    fn test_vad_websocket_config_serialization() {
+        let config = VADWebSocketConfig {
+            enabled: true,
+            threshold: 0.6,
+            silence_duration_ms: 500,
+            min_speech_duration_ms: 150,
+        };
+
+        let json = serde_json::to_string(&config).expect("Should serialize");
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"threshold\":0.6"));
+        assert!(json.contains("\"silence_duration_ms\":500"));
+        assert!(json.contains("\"min_speech_duration_ms\":150"));
+    }
+
+    #[test]
+    fn test_vad_websocket_config_deserialization() {
+        let json = r#"{"enabled": true, "threshold": 0.7, "silence_duration_ms": 400}"#;
+        let config: VADWebSocketConfig = serde_json::from_str(json).expect("Should deserialize");
+
+        assert!(config.enabled);
+        assert_eq!(config.threshold, 0.7);
+        assert_eq!(config.silence_duration_ms, 400);
+        // min_speech_duration_ms should have default value
+        assert_eq!(config.min_speech_duration_ms, 100);
+    }
+
+    #[test]
+    fn test_vad_websocket_config_deserialization_minimal() {
+        // Test with only enabled field - all others should get defaults
+        let json = r#"{"enabled": true}"#;
+        let config: VADWebSocketConfig = serde_json::from_str(json).expect("Should deserialize");
+
+        assert!(config.enabled);
+        assert_eq!(config.threshold, 0.5);
+        assert_eq!(config.silence_duration_ms, 300);
+        assert_eq!(config.min_speech_duration_ms, 100);
+    }
+
+    #[test]
+    fn test_vad_websocket_config_deserialization_empty() {
+        // Test with empty object - should get all defaults including enabled=false
+        let json = r#"{}"#;
+        let config: VADWebSocketConfig = serde_json::from_str(json).expect("Should deserialize");
+
+        assert!(!config.enabled);
+        assert_eq!(config.threshold, 0.5);
+        assert_eq!(config.silence_duration_ms, 300);
+        assert_eq!(config.min_speech_duration_ms, 100);
+    }
+
+    #[test]
+    fn test_vad_websocket_config_to_vad_silence_config() {
+        let ws_config = VADWebSocketConfig {
+            enabled: true,
+            threshold: 0.65,
+            silence_duration_ms: 450,
+            min_speech_duration_ms: 200,
+        };
+
+        let vad_config = ws_config.to_vad_silence_config();
+
+        assert!(vad_config.enabled);
+        assert_eq!(vad_config.silero_config.threshold, 0.65);
+        assert_eq!(vad_config.silero_config.silence_duration_ms, 450);
+        assert_eq!(vad_config.silero_config.min_speech_duration_ms, 200);
+    }
+
+    #[test]
+    fn test_vad_websocket_config_disabled_conversion() {
+        let ws_config = VADWebSocketConfig::default();
+
+        let vad_config = ws_config.to_vad_silence_config();
+
+        assert!(!vad_config.enabled);
+    }
 }

@@ -48,9 +48,11 @@ pub async fn handle_incoming_message(
             stt_config,
             tts_config,
             livekit,
+            vad,
         } => {
             handle_config_message(
-                stream_id, audio, stt_config, tts_config, livekit, state, message_tx, app_state,
+                stream_id, audio, stt_config, tts_config, livekit, vad, state, message_tx,
+                app_state,
             )
             .await
         }

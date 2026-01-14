@@ -10,6 +10,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
+/// Helper macro to create VoiceManager with feature-gated VAD parameter
+#[cfg(feature = "stt-vad")]
+macro_rules! create_voice_manager {
+    ($config:expr, $turn_detector:expr) => {
+        VoiceManager::new($config, $turn_detector, None)
+    };
+}
+
+#[cfg(not(feature = "stt-vad"))]
+macro_rules! create_voice_manager {
+    ($config:expr, $turn_detector:expr) => {
+        VoiceManager::new($config, $turn_detector)
+    };
+}
+
 #[tokio::test]
 async fn test_voice_manager_creation() {
     let stt_config = STTConfig {
@@ -24,7 +39,7 @@ async fn test_voice_manager_creation() {
     };
     let config = VoiceManagerConfig::new(stt_config, tts_config);
 
-    let result = VoiceManager::new(config, None);
+    let result = create_voice_manager!(config, None);
     assert!(result.is_ok());
 }
 
@@ -42,7 +57,7 @@ async fn test_voice_manager_config_access() {
     };
     let config = VoiceManagerConfig::new(stt_config, tts_config);
 
-    let voice_manager = VoiceManager::new(config, None).unwrap();
+    let voice_manager = create_voice_manager!(config, None).unwrap();
     let retrieved_config = voice_manager.get_config();
 
     assert_eq!(retrieved_config.stt_config.provider, "deepgram");
@@ -63,7 +78,7 @@ async fn test_voice_manager_callback_registration() {
     };
     let config = VoiceManagerConfig::new(stt_config, tts_config);
 
-    let voice_manager = VoiceManager::new(config, None).unwrap();
+    let voice_manager = create_voice_manager!(config, None).unwrap();
 
     // Test STT callback registration
     let stt_result = voice_manager
@@ -102,7 +117,7 @@ async fn test_speech_final_timing_control() {
     };
     let config = VoiceManagerConfig::new(stt_config, tts_config);
 
-    let voice_manager = VoiceManager::new(config, None).unwrap();
+    let voice_manager = create_voice_manager!(config, None).unwrap();
 
     // Channel to collect results
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -124,32 +139,12 @@ async fn test_speech_final_timing_control() {
 
     // Test Case 1: is_final result should return immediately and start timer
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // Reset state first
         {
             let mut state = speech_final_state.write();
-            *state = SpeechFinalState {
-                text_buffer: String::with_capacity(1024),
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-            };
+            *state = SpeechFinalState::new();
         }
 
         // Send is_final=true without is_speech_final=true
@@ -175,32 +170,12 @@ async fn test_speech_final_timing_control() {
 
     // Test Case 2: Timer should be started for final results and state should be set correctly
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // Reset state first
         {
             let mut state = speech_final_state.write();
-            *state = SpeechFinalState {
-                text_buffer: String::with_capacity(1024),
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-            };
+            *state = SpeechFinalState::new();
         }
 
         // Send is_final=true without is_speech_final=true
@@ -226,32 +201,12 @@ async fn test_speech_final_timing_control() {
 
     // Test Case 3: Real speech_final should cancel timer and reset state
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // Reset state first
         {
             let mut state = speech_final_state.write();
-            *state = SpeechFinalState {
-                text_buffer: String::with_capacity(1024),
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-            };
+            *state = SpeechFinalState::new();
         }
 
         // Send is_final=true result to start timer
@@ -293,32 +248,12 @@ async fn test_speech_final_timing_control() {
 
     // Test Case 4: Direct speech_final with no prior timer should return original result
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // Reset state first
         {
             let mut state = speech_final_state.write();
-            *state = SpeechFinalState {
-                text_buffer: String::with_capacity(1024),
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-            };
+            *state = SpeechFinalState::new();
         }
 
         // Send is_speech_final=true with no prior timer (direct speech final)
@@ -347,17 +282,7 @@ async fn test_speech_final_timing_control() {
 async fn test_duplicate_speech_final_prevention() {
     // Test Case 1: Timer fires, then real speech_final arrives - should prevent duplicate
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // Simulate the scenario:
         // 1. is_final=true arrives
@@ -406,17 +331,7 @@ async fn test_duplicate_speech_final_prevention() {
 
     // Test Case 2: Multiple is_final results after timer fired should not restart timer
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // 1. First is_final=true
         let result1 = STTResult::new("First".to_string(), true, false, 0.9);
@@ -465,17 +380,7 @@ async fn test_duplicate_speech_final_prevention() {
 
     // Test Case 3: New speech segment after proper reset should work normally
     {
-        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::with_capacity(1024),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: None,
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::new()));
 
         // First sequence: is_final=true starts timer
         let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
@@ -546,12 +451,12 @@ async fn test_hard_timeout_fallback_without_turn_detector() {
 
     use crate::core::voice_manager::stt_result::STTProcessingConfig;
 
-    let config = STTProcessingConfig {
-        stt_speech_final_wait_ms: 50,
-        turn_detection_inference_timeout_ms: 50,
-        speech_final_hard_timeout_ms: 200, // 200ms hard timeout for faster testing
-        duplicate_window_ms: 100,
-    };
+    let config = STTProcessingConfig::new(
+        50,  // stt_speech_final_wait_ms
+        50,  // turn_detection_inference_timeout_ms
+        200, // speech_final_hard_timeout_ms - 200ms hard timeout for faster testing
+        100, // duplicate_window_ms
+    );
 
     let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
 
@@ -572,17 +477,7 @@ async fn test_hard_timeout_fallback_without_turn_detector() {
         }) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-        text_buffer: String::new(),
-        turn_detection_handle: None,
-        hard_timeout_handle: None,
-        waiting_for_speech_final: AtomicBool::new(false),
-        user_callback: Some(callback),
-        turn_detection_last_fired_ms: AtomicUsize::new(0),
-        last_forced_text: String::new(),
-        segment_start_ms: AtomicUsize::new(0),
-        hard_timeout_deadline_ms: AtomicUsize::new(0),
-    }));
+    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
     // Send is_final result without speech_final (simulating Deepgram behavior)
     let result = STTResult::new("Hello world".to_string(), true, false, 0.95);
@@ -630,12 +525,12 @@ async fn test_hard_timeout_with_turn_detector_failure() {
     use crate::core::voice_manager::stt_result::STTProcessingConfig;
     use tokio::sync::RwLock;
 
-    let config = STTProcessingConfig {
-        stt_speech_final_wait_ms: 50,
-        turn_detection_inference_timeout_ms: 50,
-        speech_final_hard_timeout_ms: 200,
-        duplicate_window_ms: 100,
-    };
+    let config = STTProcessingConfig::new(
+        50,  // stt_speech_final_wait_ms
+        50,  // turn_detection_inference_timeout_ms
+        200, // speech_final_hard_timeout_ms
+        100, // duplicate_window_ms
+    );
 
     let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
 
@@ -669,17 +564,7 @@ async fn test_hard_timeout_with_turn_detector_failure() {
         }) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-        text_buffer: String::new(),
-        turn_detection_handle: None,
-        hard_timeout_handle: None,
-        waiting_for_speech_final: AtomicBool::new(false),
-        user_callback: Some(callback),
-        turn_detection_last_fired_ms: AtomicUsize::new(0),
-        last_forced_text: String::new(),
-        segment_start_ms: AtomicUsize::new(0),
-        hard_timeout_deadline_ms: AtomicUsize::new(0),
-    }));
+    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
     // Send is_final result
     let result = STTResult::new("Test utterance".to_string(), true, false, 0.95);
@@ -708,12 +593,12 @@ async fn test_cancellation_cleanup_on_real_speech_final() {
 
     use crate::core::voice_manager::stt_result::STTProcessingConfig;
 
-    let config = STTProcessingConfig {
-        stt_speech_final_wait_ms: 1000, // Long enough to not interfere
-        turn_detection_inference_timeout_ms: 100,
-        speech_final_hard_timeout_ms: 5000, // Long timeout
-        duplicate_window_ms: 500,
-    };
+    let config = STTProcessingConfig::new(
+        1000, // stt_speech_final_wait_ms - Long enough to not interfere
+        100,  // turn_detection_inference_timeout_ms
+        5000, // speech_final_hard_timeout_ms - Long timeout
+        500,  // duplicate_window_ms
+    );
 
     let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
 
@@ -725,17 +610,7 @@ async fn test_cancellation_cleanup_on_real_speech_final() {
         Box::pin(async move {}) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-        text_buffer: String::new(),
-        turn_detection_handle: None,
-        hard_timeout_handle: None,
-        waiting_for_speech_final: AtomicBool::new(false),
-        user_callback: Some(callback),
-        turn_detection_last_fired_ms: AtomicUsize::new(0),
-        last_forced_text: String::new(),
-        segment_start_ms: AtomicUsize::new(0),
-        hard_timeout_deadline_ms: AtomicUsize::new(0),
-    }));
+    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
     // Send is_final to start both timers
     let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
@@ -794,12 +669,12 @@ async fn test_continuous_speech_hard_timeout_not_restarted() {
 
     use crate::core::voice_manager::stt_result::STTProcessingConfig;
 
-    let config = STTProcessingConfig {
-        stt_speech_final_wait_ms: 300, // Longer than hard timeout
-        turn_detection_inference_timeout_ms: 50,
-        speech_final_hard_timeout_ms: 200, // Hard timeout fires first
-        duplicate_window_ms: 100,
-    };
+    let config = STTProcessingConfig::new(
+        300, // stt_speech_final_wait_ms - Longer than hard timeout
+        50,  // turn_detection_inference_timeout_ms
+        200, // speech_final_hard_timeout_ms - Hard timeout fires first
+        100, // duplicate_window_ms
+    );
 
     let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
 
@@ -819,17 +694,7 @@ async fn test_continuous_speech_hard_timeout_not_restarted() {
         }) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-        text_buffer: String::new(),
-        turn_detection_handle: None,
-        hard_timeout_handle: None,
-        waiting_for_speech_final: AtomicBool::new(false),
-        user_callback: Some(callback),
-        turn_detection_last_fired_ms: AtomicUsize::new(0),
-        last_forced_text: String::new(),
-        segment_start_ms: AtomicUsize::new(0),
-        hard_timeout_deadline_ms: AtomicUsize::new(0),
-    }));
+    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
     // Send first is_final at t=0
     let result1 = STTResult::new("Hello".to_string(), true, false, 0.95);
@@ -888,12 +753,12 @@ async fn test_hard_timeout_observability() {
 
     use crate::core::voice_manager::stt_result::STTProcessingConfig;
 
-    let config = STTProcessingConfig {
-        stt_speech_final_wait_ms: 50,
-        turn_detection_inference_timeout_ms: 50,
-        speech_final_hard_timeout_ms: 200,
-        duplicate_window_ms: 100,
-    };
+    let config = STTProcessingConfig::new(
+        50,  // stt_speech_final_wait_ms
+        50,  // turn_detection_inference_timeout_ms
+        200, // speech_final_hard_timeout_ms
+        100, // duplicate_window_ms
+    );
 
     let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
 
@@ -913,17 +778,7 @@ async fn test_hard_timeout_observability() {
         }) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
-        text_buffer: String::new(),
-        turn_detection_handle: None,
-        hard_timeout_handle: None,
-        waiting_for_speech_final: AtomicBool::new(false),
-        user_callback: Some(callback),
-        turn_detection_last_fired_ms: AtomicUsize::new(0),
-        last_forced_text: String::new(),
-        segment_start_ms: AtomicUsize::new(0),
-        hard_timeout_deadline_ms: AtomicUsize::new(0),
-    }));
+    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
     // Send is_final result
     let result = STTResult::new("Test message".to_string(), true, false, 0.95);

@@ -26,6 +26,93 @@ pub struct SpeechFinalState {
     pub segment_start_ms: AtomicUsize,
     /// Hard timeout deadline (ms since epoch) - when the hard timeout will fire
     pub hard_timeout_deadline_ms: AtomicUsize,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // VAD-based silence tracking state
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Whether VAD has detected the TurnEnd event for the current segment.
+    ///
+    /// This is set to true when the SilenceTracker emits VADEvent::TurnEnd,
+    /// indicating that silence has exceeded the configured threshold after speech.
+    /// Used to trigger turn detection and prevent duplicate firings.
+    pub vad_turn_end_detected: AtomicBool,
+
+    /// Task handle for VAD-triggered turn detection.
+    ///
+    /// When VAD detects sufficient silence (TurnEnd event), we spawn a task
+    /// to run turn detection on the accumulated text. This handle allows
+    /// cancellation if new speech arrives.
+    pub vad_turn_detection_handle: Option<JoinHandle<()>>,
+}
+
+impl SpeechFinalState {
+    /// Create a new SpeechFinalState with default values.
+    pub fn new() -> Self {
+        Self {
+            text_buffer: String::new(),
+            turn_detection_handle: None,
+            hard_timeout_handle: None,
+            waiting_for_speech_final: AtomicBool::new(false),
+            user_callback: None,
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
+            last_forced_text: String::new(),
+            segment_start_ms: AtomicUsize::new(0),
+            hard_timeout_deadline_ms: AtomicUsize::new(0),
+            vad_turn_end_detected: AtomicBool::new(false),
+            vad_turn_detection_handle: None,
+        }
+    }
+
+    /// Create a new SpeechFinalState with a user callback.
+    pub fn with_callback(callback: STTCallback) -> Self {
+        Self {
+            user_callback: Some(callback),
+            ..Self::new()
+        }
+    }
+
+    /// Reset VAD-specific state for a new speech segment.
+    ///
+    /// Call this when speech resumes (VADEvent::SpeechStart or SpeechResumed)
+    /// to clear the VAD turn detection state.
+    pub fn reset_vad_state(&mut self) {
+        self.vad_turn_end_detected.store(false, Ordering::Release);
+        if let Some(handle) = self.vad_turn_detection_handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Reset all state for a new conversation segment.
+    ///
+    /// Call this after a speech_final has been delivered to prepare for the
+    /// next utterance.
+    pub fn reset_for_next_segment(&mut self) {
+        self.text_buffer.clear();
+        self.last_forced_text.clear();
+        self.waiting_for_speech_final
+            .store(false, Ordering::Release);
+        self.turn_detection_last_fired_ms
+            .store(0, Ordering::Release);
+        self.segment_start_ms.store(0, Ordering::Release);
+        self.hard_timeout_deadline_ms.store(0, Ordering::Release);
+
+        // Cancel and clear handles
+        if let Some(handle) = self.turn_detection_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.hard_timeout_handle.take() {
+            handle.abort();
+        }
+
+        // Reset VAD state
+        self.reset_vad_state();
+    }
+}
+
+impl Default for SpeechFinalState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// State for managing interruption control

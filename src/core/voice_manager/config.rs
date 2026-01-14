@@ -1,5 +1,6 @@
 //! Configuration types for the VoiceManager
 
+use crate::core::vad::VADSilenceConfig;
 use crate::core::{stt::STTConfig, tts::TTSConfig};
 
 /// Configuration for speech final timing control
@@ -38,6 +39,11 @@ pub struct VoiceManagerConfig {
     pub tts_config: TTSConfig,
     /// Configuration for speech final timing control
     pub speech_final_config: SpeechFinalConfig,
+    /// Configuration for VAD-based silence detection (optional)
+    ///
+    /// When enabled, VAD is used to detect silence and trigger turn detection
+    /// more accurately than timeout-based approaches.
+    pub vad_config: VADSilenceConfig,
 }
 
 impl VoiceManagerConfig {
@@ -47,6 +53,7 @@ impl VoiceManagerConfig {
             stt_config,
             tts_config,
             speech_final_config: SpeechFinalConfig::default(),
+            vad_config: VADSilenceConfig::default(),
         }
     }
 
@@ -60,6 +67,53 @@ impl VoiceManagerConfig {
             stt_config,
             tts_config,
             speech_final_config,
+            vad_config: VADSilenceConfig::default(),
         }
+    }
+
+    /// Create a new VoiceManagerConfig with VAD-based silence detection enabled
+    ///
+    /// # Arguments
+    /// * `stt_config` - STT provider configuration
+    /// * `tts_config` - TTS provider configuration
+    /// * `vad_config` - VAD silence detection configuration
+    pub fn with_vad_config(
+        stt_config: STTConfig,
+        tts_config: TTSConfig,
+        vad_config: VADSilenceConfig,
+    ) -> Self {
+        Self {
+            stt_config,
+            tts_config,
+            speech_final_config: SpeechFinalConfig::default(),
+            vad_config,
+        }
+    }
+
+    /// Create a new VoiceManagerConfig with all custom configurations
+    ///
+    /// # Arguments
+    /// * `stt_config` - STT provider configuration
+    /// * `tts_config` - TTS provider configuration
+    /// * `speech_final_config` - Speech final timing configuration
+    /// * `vad_config` - VAD silence detection configuration
+    pub fn with_full_config(
+        stt_config: STTConfig,
+        tts_config: TTSConfig,
+        speech_final_config: SpeechFinalConfig,
+        vad_config: VADSilenceConfig,
+    ) -> Self {
+        Self {
+            stt_config,
+            tts_config,
+            speech_final_config,
+            vad_config,
+        }
+    }
+
+    /// Set VAD configuration on an existing config
+    pub fn set_vad_config(mut self, vad_config: VADSilenceConfig) -> Self {
+        self.vad_config = vad_config;
+        self
     }
 }

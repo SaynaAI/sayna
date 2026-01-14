@@ -24,13 +24,15 @@ docker build -t saynaai/sayna .      # Build Docker image
 By default, no optional features are enabled.
 
 - `turn-detect` (disabled by default): ONNX-based turn detection. Required for `sayna init`.
+- `stt-vad` (disabled by default): Silero-VAD voice activity detection for silence-based turn detection.
 - `noise-filter` (disabled by default): DeepFilterNet noise suppression. Disable to reduce dependencies.
 - `openapi` (disabled by default): OpenAPI 3.1 specification generation using utoipa crate.
 
 ```bash
-cargo check                                   # Default build, no optional features
-cargo check --no-default-features             # Explicitly disable optional features
-cargo build --features turn-detect,openapi     # Enable specific features
+cargo check                                        # Default build, no optional features
+cargo check --no-default-features                  # Explicitly disable optional features
+cargo build --features turn-detect,stt-vad         # Enable turn detection and VAD
+cargo build --features turn-detect,openapi         # Enable specific features
 cargo run --features openapi -- openapi -o docs/openapi.yaml  # Generate OpenAPI spec
 ```
 
@@ -72,6 +74,42 @@ Always consult these rule files when implementing new features.
 
 6. **Authentication** (`src/auth/` and `src/middleware/auth.rs`):
    - Optional JWT-based auth with external validation service
+
+7. **VAD Integration** (`src/core/vad/`) - Feature-gated: `stt-vad`:
+   - **SileroVAD**: ONNX-based voice activity detection model
+   - **SilenceTracker**: Tracks continuous silence duration from VAD
+   - Integrates with VoiceManager for audio processing
+   - Works alongside STT providers for improved end-of-turn detection
+
+### Voice Activity Detection (VAD)
+
+When `stt-vad` feature is enabled, Sayna supports Silero-VAD for audio-level silence detection to determine when a user has stopped speaking.
+
+**How it works:**
+1. Audio frames are processed through Silero-VAD ONNX model
+2. When 300ms (configurable) of continuous silence is detected, turn detection is triggered
+3. The text-based turn detection model confirms if the turn is complete
+4. If confirmed, an artificial `speech_final` event is emitted
+
+**Configuration:**
+```yaml
+vad:
+  enabled: true
+  threshold: 0.5              # Speech probability threshold (0.0-1.0)
+  silence_duration_ms: 300    # Silence duration to trigger turn end
+  min_speech_duration_ms: 100 # Minimum speech before checking silence
+```
+
+**WebSocket API:**
+```json
+{
+  "type": "config",
+  "vad": {
+    "enabled": true,
+    "silence_duration_ms": 300
+  }
+}
+```
 
 ### Request Flow
 
@@ -146,11 +184,14 @@ See [docs/](docs/) for detailed API documentation.
 ## Critical Files
 
 - `src/core/voice_manager/manager.rs`: Central voice processing orchestration
+- `src/core/voice_manager/stt_result.rs`: STT result processing with VAD integration
+- `src/core/vad/detector.rs`: Silero-VAD detector (feature-gated: `stt-vad`)
+- `src/core/vad/silence_tracker.rs`: Silence duration tracking for turn detection
 - `src/handlers/ws/handler.rs`: WebSocket message handling
 - `src/livekit/manager.rs`: LiveKit room management
 - `src/config/mod.rs`: Configuration loading and merging
 - `src/errors/mod.rs`: Centralized error types (thiserror)
-- `src/docs/openapi.rs`: OpenAPI spec generation (feature-gated)
+- `src/docs/openapi.rs`: OpenAPI spec generation (feature-gated: `openapi`)
 
 ## Testing
 
@@ -158,6 +199,7 @@ See [docs/](docs/) for detailed API documentation.
 cargo test                          # All tests
 cargo test test_name                # Specific test
 cargo test -- --nocapture           # With output
+cargo test --features stt-vad       # Tests including VAD feature tests
 ```
 
 - Unit tests: Embedded in modules using `#[cfg(test)]`
