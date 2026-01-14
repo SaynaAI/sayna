@@ -70,7 +70,6 @@ fn test_incoming_message_serialization() {
             pronunciations: Vec::new(),
         }),
         livekit: None,
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -648,7 +647,6 @@ fn test_incoming_message_config_with_livekit() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -683,7 +681,6 @@ fn test_incoming_message_config_without_livekit() {
             pronunciations: Vec::new(),
         }),
         livekit: None,
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -982,7 +979,6 @@ fn test_config_message_without_livekit_routing() {
             pronunciations: Vec::new(),
         }),
         livekit: None, // No LiveKit configuration
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1034,7 +1030,6 @@ fn test_config_message_with_livekit_routing() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1222,7 +1217,6 @@ fn test_config_message_audio_disabled() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1281,7 +1275,6 @@ fn test_config_message_audio_default() {
             pronunciations: Vec::new(),
         }),
         livekit: None,
-        vad: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();

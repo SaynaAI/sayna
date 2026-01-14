@@ -68,17 +68,18 @@ providers:
 #     audio_format: linear16   # Options: linear16/pcm, wav, mp3
 #     sample_rate: 24000       # Options: 8000, 16000, 22050, 24000, 44100, 48000
 
-# Voice Activity Detection (VAD) Configuration
+# Voice Activity Detection (VAD) + Turn Detection Configuration
 # Requires: --features stt-vad
+# When the stt-vad feature is enabled, VAD and turn detection are always bundled together.
+# VAD monitors audio for silence and triggers the turn detection model to confirm
+# if the speaker's turn is complete.
 # vad:
-#   # Enable VAD-based silence detection
-#   enabled: false
-#
 #   # Speech probability threshold (0.0 to 1.0)
 #   # Audio with probability above this is considered speech
 #   threshold: 0.5
 #
-#   # Silence duration in milliseconds to trigger turn end
+#   # Silence duration in milliseconds to trigger turn detection
+#   # When this duration of silence is detected, the turn detection model is invoked
 #   # This is the primary control for turn-taking responsiveness
 #   silence_duration_ms: 300
 #

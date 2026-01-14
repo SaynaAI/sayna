@@ -3,14 +3,23 @@
 //! This module provides STT result processing with configurable timing control,
 //! supporting both timeout-based and VAD-based silence detection modes.
 //!
-//! ## Timeout-based Mode (Default)
+//! ## Feature Behavior
+//!
+//! - **When `stt-vad` is compiled**: VAD-based silence detection is **always active**.
+//!   The `use_vad_silence_detection` field is ignored, and there is no runtime toggle
+//!   to disable VAD. This ensures consistent behavior when turn detection is built.
+//!
+//! - **When `stt-vad` is NOT compiled**: VAD-based detection is unavailable, and
+//!   timeout-based mode is used.
+//!
+//! ## Timeout-based Mode
 //!
 //! The traditional approach waits for STT provider to send `speech_final`:
 //! 1. Wait for STT provider to send real `speech_final` (default: 2000ms)
 //! 2. If silent, run turn detection ML model on accumulated text
 //! 3. Fire artificial `speech_final` if turn detection confirms
 //!
-//! ## VAD-based Mode
+//! ## VAD-based Mode (always active under `stt-vad`)
 //!
 //! Uses Silero-VAD for more accurate silence detection:
 //! 1. Monitor audio with VAD for configurable silence threshold (default: 300ms)
@@ -28,7 +37,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::{debug, info};
 
-use crate::core::vad::VADEvent;
+use crate::core::vad::{SilenceTracker, VADEvent};
 use crate::core::{stt::STTResult, turn_detect::TurnDetector};
 
 use super::state::SpeechFinalState;
@@ -38,30 +47,39 @@ use super::state::SpeechFinalState;
 pub struct STTProcessingConfig {
     /// Use VAD-based silence detection instead of timeout.
     ///
-    /// When enabled, silence is detected by processing audio through Silero-VAD
-    /// and tracking when speech probability drops below threshold for the
-    /// configured `vad_silence_duration_ms`.
+    /// # Feature-dependent behavior
     ///
-    /// When disabled, falls back to timeout-based approach using
-    /// `stt_speech_final_wait_ms`.
+    /// - **When `stt-vad` is compiled**: This field is **ignored**. VAD-based
+    ///   silence detection is always active and cannot be disabled at runtime.
+    ///   The bundled turn detection model requires VAD to function correctly.
     ///
-    /// Default: false (for backward compatibility)
+    /// - **When `stt-vad` is NOT compiled**: This field is also ignored since
+    ///   VAD functionality is unavailable; timeout-based mode is always used.
+    ///
+    /// # Behavior when active (under `stt-vad`)
+    ///
+    /// Silence is detected by processing audio through Silero-VAD and tracking
+    /// when speech probability drops below threshold for the configured
+    /// `vad_silence_duration_ms`.
+    ///
+    /// Default: false (for backward compatibility, but ignored under `stt-vad`)
     pub use_vad_silence_detection: bool,
 
     /// Time to wait for STT provider to send real speech_final (ms).
     ///
-    /// This is the primary window when VAD is disabled - we trust STT provider
-    /// during this time. Only used when `use_vad_silence_detection` is false.
+    /// This is the primary window in timeout-based mode - we trust STT provider
+    /// during this time. Only used when `stt-vad` feature is NOT compiled.
     ///
     /// Default: 2000ms
     pub stt_speech_final_wait_ms: u64,
 
     /// VAD silence duration threshold (ms).
     ///
-    /// When VAD is enabled, this is how long continuous silence (speech probability
-    /// below threshold) must be observed before triggering turn detection.
+    /// When `stt-vad` is compiled, this is how long continuous silence (speech
+    /// probability below threshold) must be observed before triggering turn
+    /// detection. VAD is always active under `stt-vad`.
     ///
-    /// Default: 300ms (per PLAN requirement)
+    /// Default: 300ms
     pub vad_silence_duration_ms: u64,
 
     /// Maximum time to wait for turn detection inference to complete (ms).
@@ -93,12 +111,13 @@ pub struct STTProcessingConfig {
 impl Default for STTProcessingConfig {
     fn default() -> Self {
         Self {
-            use_vad_silence_detection: false, // Disabled by default for backward compat
-            stt_speech_final_wait_ms: 2000,   // Wait 2s for real speech_final from STT
-            vad_silence_duration_ms: 300,     // PLAN requirement: 300ms configurable
+            // Field value ignored under stt-vad (VAD always active when compiled)
+            use_vad_silence_detection: false,
+            stt_speech_final_wait_ms: 2000, // Wait 2s for real speech_final from STT
+            vad_silence_duration_ms: 300,   // 300ms silence threshold for VAD
             turn_detection_inference_timeout_ms: 100, // 100ms max for model inference
             speech_final_hard_timeout_ms: 5000, // 5s hard upper bound for any utterance
-            duplicate_window_ms: 500,         // 500ms duplicate prevention window
+            duplicate_window_ms: 500,       // 500ms duplicate prevention window
         }
     }
 }
@@ -124,7 +143,12 @@ impl STTProcessingConfig {
         }
     }
 
-    /// Create a new config with VAD-based silence detection enabled.
+    /// Create a new config with VAD-based silence detection settings.
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// When `stt-vad` is compiled, VAD is always active regardless of this call.
+    /// This method is primarily useful for setting the `vad_silence_duration_ms`.
     ///
     /// # Arguments
     /// * `vad_silence_duration_ms` - Silence duration threshold in milliseconds (default: 300)
@@ -136,9 +160,26 @@ impl STTProcessingConfig {
         }
     }
 
-    /// Enable or disable VAD-based silence detection.
+    /// Set the VAD enable flag (no-op under `stt-vad` feature).
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// - **When `stt-vad` is compiled**: This method is a **no-op**. VAD is always
+    ///   active and cannot be disabled at runtime. The field value is ignored.
+    ///
+    /// - **When `stt-vad` is NOT compiled**: This method sets the field, but VAD
+    ///   functionality is unavailable anyway.
+    ///
+    /// This method is retained for API compatibility but has no effect on runtime
+    /// behavior when the `stt-vad` feature is enabled.
+    #[cfg_attr(feature = "stt-vad", allow(unused_variables, unused_mut))]
     pub fn set_use_vad(mut self, use_vad: bool) -> Self {
-        self.use_vad_silence_detection = use_vad;
+        // Under stt-vad, this field is ignored - VAD is always active.
+        // We still set it for API compatibility when the feature is not compiled.
+        #[cfg(not(feature = "stt-vad"))]
+        {
+            self.use_vad_silence_detection = use_vad;
+        }
         self
     }
 
@@ -220,6 +261,8 @@ impl STTResultProcessor {
     /// * `event` - VAD event from SilenceTracker
     /// * `speech_final_state` - Shared state for speech final tracking
     /// * `turn_detector` - Optional turn detector for text-level confirmation
+    /// * `silence_tracker` - SilenceTracker to reset after firing speech_final
+    /// * `vad_audio_buffer` - VAD audio buffer to clear after firing speech_final
     ///
     /// # VAD Events Handled
     ///
@@ -232,9 +275,14 @@ impl STTResultProcessor {
         event: VADEvent,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
     ) {
+        // When stt-vad is not compiled, VAD processing can be disabled via config.
+        // When stt-vad IS compiled, VAD is always active (no runtime disable toggle).
+        #[cfg(not(feature = "stt-vad"))]
         if !self.config.use_vad_silence_detection {
-            return; // VAD disabled, use timeout-based approach
+            return;
         }
 
         match event {
@@ -259,7 +307,12 @@ impl STTResultProcessor {
 
             VADEvent::TurnEnd => {
                 // Silence exceeded threshold - trigger turn detection
-                self.handle_vad_turn_end(speech_final_state, turn_detector);
+                self.handle_vad_turn_end(
+                    speech_final_state,
+                    turn_detector,
+                    silence_tracker,
+                    vad_audio_buffer,
+                );
             }
         }
     }
@@ -273,6 +326,8 @@ impl STTResultProcessor {
         &self,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
     ) {
         let (buffered_text, should_trigger) = {
             let mut state = speech_final_state.write();
@@ -317,8 +372,13 @@ impl STTResultProcessor {
         );
 
         // Spawn VAD-triggered turn detection task
-        let handle =
-            self.spawn_vad_turn_detection(buffered_text, speech_final_state.clone(), turn_detector);
+        let handle = self.spawn_vad_turn_detection(
+            buffered_text,
+            speech_final_state.clone(),
+            turn_detector,
+            silence_tracker,
+            vad_audio_buffer,
+        );
 
         // Store the handle
         let mut state = speech_final_state.write();
@@ -334,6 +394,8 @@ impl STTResultProcessor {
         buffered_text: String,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
     ) -> JoinHandle<()> {
         let inference_timeout_ms = self.config.turn_detection_inference_timeout_ms;
 
@@ -374,6 +436,8 @@ impl STTResultProcessor {
                             let state = speech_final_state.write();
                             state.vad_turn_end_detected.store(false, Ordering::Release);
                         }
+                        // Reset silence tracker for next detection attempt
+                        silence_tracker.reset();
                         return; // Don't fire
                     }
                     Ok(Err(e)) => {
@@ -404,12 +468,35 @@ impl STTResultProcessor {
 
             Self::fire_speech_final(result, buffered_text, speech_final_state, detection_method)
                 .await;
+
+            // Reset silence tracker and clear VAD audio buffer for next utterance
+            silence_tracker.reset();
+            {
+                let mut buffer = vad_audio_buffer.write();
+                buffer.clear();
+            }
+            info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
         })
     }
 
     /// Check if VAD-based silence detection is enabled.
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// - **When `stt-vad` is compiled**: Always returns `true`. VAD is always
+    ///   active and cannot be disabled at runtime.
+    ///
+    /// - **When `stt-vad` is NOT compiled**: Always returns `false` since VAD
+    ///   functionality is unavailable.
     pub fn is_vad_enabled(&self) -> bool {
-        self.config.use_vad_silence_detection
+        #[cfg(feature = "stt-vad")]
+        {
+            true // VAD is always active when stt-vad feature is compiled
+        }
+        #[cfg(not(feature = "stt-vad"))]
+        {
+            false // VAD unavailable without stt-vad feature
+        }
     }
 
     /// Get the configured VAD silence duration threshold in milliseconds.

@@ -268,15 +268,25 @@ impl GraphOptimizationLevel {
 
 /// Configuration for VAD-based silence detection.
 ///
-/// This configuration can be used with `VoiceManagerConfig` to enable
+/// This configuration can be used with `VoiceManagerConfig` to configure
 /// VAD-based turn detection as an alternative or supplement to
 /// STT provider-based speech final detection.
+///
+/// # Note on runtime behavior
+///
+/// When the `stt-vad` feature is compiled, VAD is **always active** at runtime.
+/// The `enabled` field is retained for configuration structure compatibility
+/// but does not control whether VAD runs - VAD processing occurs automatically
+/// whenever the feature is compiled and the VAD model is successfully initialized.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VADSilenceConfig {
-    /// Whether to use VAD for silence detection.
+    /// Whether VAD silence detection is requested.
     ///
-    /// When enabled, VAD results are used to determine when a speaker
-    /// has finished talking, based on silence duration thresholds.
+    /// **Note:** When the `stt-vad` feature is compiled, VAD is always active
+    /// regardless of this field. This field is retained for configuration
+    /// structure compatibility and may be used by external systems to track
+    /// intent, but it does not gate VAD processing at runtime.
+    ///
     /// Default: false (for backward compatibility).
     pub enabled: bool,
 
@@ -371,8 +381,10 @@ mod tests {
         let config_16k = SileroVADConfig::default();
         assert_eq!(config_16k.frame_size(), 512);
 
-        let mut config_8k = SileroVADConfig::default();
-        config_8k.sample_rate = VADSampleRate::Rate8kHz;
+        let config_8k = SileroVADConfig {
+            sample_rate: VADSampleRate::Rate8kHz,
+            ..Default::default()
+        };
         assert_eq!(config_8k.frame_size(), 256);
     }
 

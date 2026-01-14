@@ -1541,13 +1541,16 @@ If compiled with `noise-filter` feature (disabled by default), Sayna applies Dee
 - Conservative blending to avoid over-processing
 - Automatically applied to all audio (WebSocket + LiveKit)
 
-**Turn Detection:**
+**VAD + Turn Detection:**
 
-If compiled with `turn-detect` feature (disabled by default), Sayna uses an ONNX model to detect when speech ends:
+If compiled with `stt-vad` feature (disabled by default), Sayna uses Silero-VAD for voice activity detection combined with an ONNX turn detection model:
+- Silero-VAD monitors audio for continuous silence
+- When silence exceeds threshold (default 300ms), the turn detection model is triggered
+- Turn detection model confirms if the speaker has completed their turn
 - Sets `is_speech_final=true` when speaker stops talking
-- More accurate than silence-only detection
+- More accurate than silence-only or text-only detection
 - Helps conversational AI know when to respond
-- Minimal latency impact
+- VAD and turn detection are always bundled together under the `stt-vad` feature
 
 ### TTS Audio Flow
 

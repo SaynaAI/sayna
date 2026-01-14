@@ -23,8 +23,7 @@ use crate::{
 
 use super::{
     config::{
-        LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, VADWebSocketConfig,
-        compute_tts_config_hash,
+        LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, compute_tts_config_hash,
     },
     messages::{MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
     state::ConnectionState,
@@ -57,7 +56,7 @@ fn resolve_stream_id(stream_id: Option<String>) -> String {
 /// - STT (Speech-to-Text) provider initialization
 /// - TTS (Text-to-Speech) provider initialization
 /// - LiveKit client connection (optional)
-/// - VAD (Voice Activity Detection) for silence-based turn detection (optional)
+/// - VAD (Voice Activity Detection) is automatically enabled when `stt-vad` feature is compiled
 /// - Callback registration for audio routing
 ///
 /// # Arguments
@@ -66,7 +65,6 @@ fn resolve_stream_id(stream_id: Option<String>) -> String {
 /// * `stt_ws_config` - STT provider configuration
 /// * `tts_ws_config` - TTS provider configuration
 /// * `livekit_ws_config` - Optional LiveKit configuration
-/// * `vad_ws_config` - Optional VAD configuration for silence-based turn detection
 /// * `state` - Connection state to update
 /// * `message_tx` - Channel for sending response messages
 /// * `app_state` - Application state containing API keys
@@ -80,7 +78,6 @@ pub async fn handle_config_message(
     stt_ws_config: Option<STTWebSocketConfig>,
     tts_ws_config: Option<TTSWebSocketConfig>,
     livekit_ws_config: Option<LiveKitWebSocketConfig>,
-    vad_ws_config: Option<VADWebSocketConfig>,
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
@@ -116,7 +113,6 @@ pub async fn handle_config_message(
         match initialize_voice_manager(
             stt_ws_config.as_ref().unwrap(),
             tts_ws_config.as_ref().unwrap(),
-            vad_ws_config.as_ref(),
             app_state,
             message_tx,
         )
@@ -247,11 +243,13 @@ async fn validate_audio_configs(
     true
 }
 
-/// Initialize voice manager with STT, TTS, and optional VAD configuration
+/// Initialize voice manager with STT and TTS configuration
+///
+/// VAD (Voice Activity Detection) is automatically enabled when the `stt-vad` feature
+/// is compiled. No explicit configuration is needed from WebSocket clients.
 async fn initialize_voice_manager(
     stt_ws_config: &STTWebSocketConfig,
     tts_ws_config: &TTSWebSocketConfig,
-    vad_ws_config: Option<&VADWebSocketConfig>,
     app_state: &Arc<AppState>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) -> Option<Arc<VoiceManager>> {
@@ -291,24 +289,13 @@ async fn initialize_voice_manager(
     let stt_config = stt_ws_config.to_stt_config(stt_api_key);
     let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
-    // Create VAD config if provided by WebSocket client
-    let vad_config = vad_ws_config
-        .map(|ws_vad| ws_vad.to_vad_silence_config())
-        .unwrap_or_default();
+    // Create voice manager configuration
+    // VAD is automatically enabled when the stt-vad feature is compiled
+    let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
 
-    // Log VAD configuration if enabled
-    if vad_config.enabled {
-        info!(
-            "VAD enabled with threshold={}, silence_duration_ms={}, min_speech_duration_ms={}",
-            vad_config.silero_config.threshold,
-            vad_config.silero_config.silence_duration_ms,
-            vad_config.silero_config.min_speech_duration_ms
-        );
-    }
-
-    // Create voice manager configuration with VAD settings
-    let voice_config =
-        VoiceManagerConfig::new(stt_config.clone(), tts_config.clone()).set_vad_config(vad_config);
+    // Log that VAD is auto-enabled when feature is compiled
+    #[cfg(feature = "stt-vad")]
+    info!("VAD automatically enabled (stt-vad feature compiled)");
 
     let turn_detector = app_state.core_state.get_turn_detector();
 

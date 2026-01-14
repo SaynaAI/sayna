@@ -7,9 +7,9 @@ pub mod turn_detect;
 pub mod vad;
 pub mod voice_manager;
 
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 pub use turn_detect::{TurnDetector, TurnDetectorBuilder, TurnDetectorConfig};
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(feature = "stt-vad"))]
 pub use turn_detect::{TurnDetector, TurnDetectorBuilder, TurnDetectorConfig};
 
 // Re-export VAD types

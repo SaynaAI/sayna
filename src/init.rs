@@ -4,8 +4,8 @@
 //! This module hosts the logic that powers the `sayna init` CLI command. The
 //! command downloads and caches models required by optional features:
 //!
-//! - **turn-detect**: Turn detection model and tokenizer
-//! - **stt-vad**: Silero-VAD model for voice activity detection
+//! - **stt-vad**: Turn detection model, tokenizer, and Silero-VAD model for
+//!   voice activity detection with integrated turn detection
 //!
 //! Typical usage from the CLI:
 //!
@@ -28,21 +28,21 @@
 use anyhow::Result;
 use anyhow::anyhow;
 
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 use crate::config::ServerConfig;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use crate::core::turn_detect::{TurnDetectorConfig, assets as turn_assets};
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SileroVADConfig, assets as vad_assets};
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 use anyhow::Context;
 
 /// Download and prepare all assets required for runtime execution.
 ///
 /// Downloads models for enabled features:
-/// - Turn detection model (if `turn-detect` feature is enabled)
+/// - Turn detection model (if `stt-vad` feature is enabled)
 /// - Silero-VAD model (if `stt-vad` feature is enabled)
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 pub async fn run() -> Result<()> {
     let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
     let cache_path = config
@@ -55,7 +55,7 @@ pub async fn run() -> Result<()> {
     tracing::info!("Cache path: {:?}", cache_path);
 
     // Download turn detection assets
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     {
         tracing::info!("Downloading turn detection model...");
         let turn_config = TurnDetectorConfig {
@@ -107,11 +107,11 @@ pub async fn run() -> Result<()> {
 }
 
 /// Verify that all required assets are present.
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
     tracing::info!("Verifying downloaded assets...");
 
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     {
         let model_path = cache_path.join("turn_detect/model_quantized.onnx");
         let tokenizer_path = cache_path.join("turn_detect/tokenizer.json");
@@ -145,13 +145,12 @@ async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(feature = "turn-detect", feature = "stt-vad")))]
+#[cfg(not(feature = "stt-vad"))]
 pub async fn run() -> Result<()> {
     Err(anyhow!(
-        "`sayna init` requires at least one of the following features:\n\
-         - `turn-detect`: Download turn detection model\n\
-         - `stt-vad`: Download Silero-VAD model\n\n\
-         Rebuild with the desired features, for example:\n\
-         cargo build --features turn-detect,stt-vad"
+        "`sayna init` requires the `stt-vad` feature:\n\
+         - `stt-vad`: Download turn detection and Silero-VAD models\n\n\
+         Rebuild with the feature enabled, for example:\n\
+         cargo build --features stt-vad"
     ))
 }

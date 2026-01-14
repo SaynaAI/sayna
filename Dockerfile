@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG RUST_VERSION=1.88.0
-ARG CARGO_BUILD_FEATURES="--no-default-features --features turn-detect,noise-filter"
+ARG CARGO_BUILD_FEATURES="--no-default-features --features stt-vad,noise-filter"
 ARG ONNX_VERSION=1.23.2
 
 # ==================== Chef Base ====================

@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use super::config::TurnDetectorConfig;
 
-/// No-op placeholder used when the `turn-detect` feature is disabled.
+/// No-op placeholder used when the `stt-vad` feature is disabled.
 pub struct TurnDetector {
     config: TurnDetectorConfig,
 }

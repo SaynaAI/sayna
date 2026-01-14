@@ -17,6 +17,10 @@ use sayna::core::vad::{SilenceTracker, SilenceTrackerConfig, VADEvent, VADSilenc
 use sayna::core::voice_manager::{SpeechFinalConfig, VoiceManagerConfig};
 
 /// Test that VoiceManagerConfig correctly applies VAD settings
+///
+/// Note: When the `stt-vad` feature is compiled, VAD is always active at runtime.
+/// The `enabled` field is retained for configuration compatibility but does not
+/// gate VAD processing. This test verifies configuration is correctly applied.
 #[test]
 fn test_voice_manager_config_with_vad() {
     let stt_config = STTConfig {
@@ -393,7 +397,8 @@ mod e2e_model_tests {
         let voice_manager =
             VoiceManager::new(config, None, Some(vad)).expect("Failed to create VoiceManager");
 
-        // Verify VoiceManager was created with VAD
+        // Verify VoiceManager configuration was correctly applied
+        // Note: Under stt-vad, VAD is always active - this checks config was set correctly
         assert!(voice_manager.get_config().vad_config.enabled);
         assert_eq!(
             voice_manager

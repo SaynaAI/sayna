@@ -136,7 +136,7 @@ volumes:
 ## Persistent Cache
 
 Mount a volume to `/data/cache` (or your configured `CACHE_PATH`) to persist:
-- Turn detection model assets
+- VAD and turn detection model assets
 - Cached TTS audio outputs
 
 ```bash
@@ -188,7 +188,7 @@ Then send a WebSocket config with `audio_disabled: true`:
 ## Image Variants
 
 The default image includes:
-- **Turn Detection** - ONNX-based speech turn detection
+- **VAD + Turn Detection** - Silero-VAD voice activity detection with ONNX-based turn detection
 - **Noise Filter** - DeepFilterNet noise suppression
 
 Pre-downloaded model assets are included in the image.

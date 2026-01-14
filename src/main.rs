@@ -31,9 +31,8 @@ enum Commands {
     ///
     /// Downloads models for enabled features:
     ///
-    /// - turn-detect: Turn detection model and tokenizer
-    ///
-    /// - stt-vad: Silero-VAD model for voice activity detection
+    /// - stt-vad: Turn detection model, tokenizer, and Silero-VAD model for
+    ///   voice activity detection with integrated turn detection
     ///
     /// Requires CACHE_PATH environment variable to be set.
     Init,

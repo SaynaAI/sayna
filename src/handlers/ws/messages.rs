@@ -8,8 +8,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, VADWebSocketConfig,
-    default_allow_interruption, default_audio_enabled,
+    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, default_allow_interruption,
+    default_audio_enabled,
 };
 
 /// WebSocket message types for incoming messages
@@ -44,9 +44,6 @@ pub enum IncomingMessage {
         /// Optional LiveKit configuration for real-time audio streaming
         #[serde(skip_serializing_if = "Option::is_none")]
         livekit: Option<LiveKitWebSocketConfig>,
-        /// Optional VAD configuration for voice activity detection and silence-based turn detection
-        #[serde(skip_serializing_if = "Option::is_none")]
-        vad: Option<VADWebSocketConfig>,
     },
     #[serde(rename = "speak")]
     Speak {
@@ -438,49 +435,5 @@ mod tests {
         assert!(json.contains(r#""timestamp_ms":1704067200000"#));
         // silence_duration_ms should be omitted
         assert!(!json.contains("silence_duration_ms"));
-    }
-
-    #[test]
-    fn test_config_with_vad_deserialization() {
-        let json = r#"{
-            "type": "config",
-            "audio": true,
-            "vad": {
-                "enabled": true,
-                "threshold": 0.6,
-                "silence_duration_ms": 500
-            }
-        }"#;
-
-        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
-
-        match msg {
-            IncomingMessage::Config { audio, vad, .. } => {
-                assert_eq!(audio, Some(true));
-                assert!(vad.is_some());
-                let vad_config = vad.unwrap();
-                assert!(vad_config.enabled);
-                assert_eq!(vad_config.threshold, 0.6);
-                assert_eq!(vad_config.silence_duration_ms, 500);
-            }
-            _ => panic!("Expected Config variant"),
-        }
-    }
-
-    #[test]
-    fn test_config_without_vad_deserialization() {
-        let json = r#"{
-            "type": "config",
-            "audio": true
-        }"#;
-
-        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
-
-        match msg {
-            IncomingMessage::Config { vad, .. } => {
-                assert!(vad.is_none());
-            }
-            _ => panic!("Expected Config variant"),
-        }
     }
 }

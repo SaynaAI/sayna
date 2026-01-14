@@ -1,21 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
-#[cfg(not(any(feature = "turn-detect", feature = "stt-vad")))]
+#[cfg(not(feature = "stt-vad"))]
 use tracing::info;
-#[cfg(any(feature = "turn-detect", feature = "stt-vad"))]
+#[cfg(feature = "stt-vad")]
 use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(feature = "stt-vad"))]
 use crate::core::turn_detect::TurnDetector;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use crate::core::turn_detect::{TurnDetector, TurnDetectorConfig};
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SileroVAD, SileroVADConfig};
@@ -113,7 +113,7 @@ impl CoreState {
         self.tts_req_managers.read().await.get(provider).cloned()
     }
 
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     /// Initialize and warmup the Turn Detector model
     async fn initialize_turn_detector(
         cache_path: Option<&PathBuf>,
@@ -179,7 +179,7 @@ impl CoreState {
         }
     }
 
-    #[cfg(not(feature = "turn-detect"))]
+    #[cfg(not(feature = "stt-vad"))]
     async fn initialize_turn_detector(
         cache_path: Option<&PathBuf>,
     ) -> Option<Arc<RwLock<TurnDetector>>> {
@@ -188,7 +188,7 @@ impl CoreState {
         None
     }
 
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     /// Warmup the Turn Detector model with sample inputs
     async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
         debug!("Starting Turn Detector warmup with sample inputs");

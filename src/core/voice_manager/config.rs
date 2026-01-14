@@ -41,8 +41,10 @@ pub struct VoiceManagerConfig {
     pub speech_final_config: SpeechFinalConfig,
     /// Configuration for VAD-based silence detection (optional)
     ///
-    /// When enabled, VAD is used to detect silence and trigger turn detection
-    /// more accurately than timeout-based approaches.
+    /// When the `stt-vad` feature is compiled, VAD is always active and uses
+    /// these settings for silence detection and turn detection. The `enabled`
+    /// field in `VADSilenceConfig` is retained for compatibility but does not
+    /// control runtime behavior - VAD runs automatically under `stt-vad`.
     pub vad_config: VADSilenceConfig,
 }
 

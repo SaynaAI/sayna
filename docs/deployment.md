@@ -11,7 +11,7 @@ Sayna ships as a single Axum binary that can be deployed anywhere you can run co
   - `ELEVENLABS_API_KEY` for ElevenLabs TTS.
 - Optional: S3-compatible bucket for LiveKit recording egress (`RECORDING_S3_*` variables).
 - Optional: Authentication settings documented in `docs/authentication.md`.
-- Persistent volume (or host path) for `CACHE_PATH` when you want voice outputs and turn-detector assets to survive container restarts.
+- Persistent volume (or host path) for `CACHE_PATH` when you want voice outputs and VAD/turn-detection assets to survive container restarts.
 
 ## 2. Building the Container Image
 
@@ -36,16 +36,16 @@ docker build -t sayna:latest .
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `RUST_VERSION` | `1.88.0` | Rust toolchain version (must support Rust 2024 edition) |
-| `CARGO_BUILD_FEATURES` | `--all-features` | Feature flags. Use `--features turn-detect` or `""` for smaller builds |
-| `ONNX_VERSION` | `1.23.2` | ONNX Runtime version for turn detection |
-| `RUN_SAYNA_INIT` | `true` | Pre-download turn-detection assets. Set `false` to skip |
+| `CARGO_BUILD_FEATURES` | `--all-features` | Feature flags. Use `--features stt-vad` or `""` for smaller builds |
+| `ONNX_VERSION` | `1.23.2` | ONNX Runtime version for VAD and turn detection |
+| `RUN_SAYNA_INIT` | `true` | Pre-download VAD and turn detection model assets. Set `false` to skip |
 
 Example with custom args:
 
 ```bash
 docker build -t sayna:latest \
   --build-arg RUST_VERSION=1.88.0 \
-  --build-arg CARGO_BUILD_FEATURES="--features turn-detect" \
+  --build-arg CARGO_BUILD_FEATURES="--features stt-vad" \
   --build-arg RUN_SAYNA_INIT=false \
   .
 ```
@@ -76,7 +76,7 @@ Add the relevant variables before starting the container. The most common ones a
 | --- | --- | --- |
 | `HOST` | Bind address inside the container. Usually leave as `0.0.0.0`. | `0.0.0.0` |
 | `PORT` | Axum listener port. | `3001` |
-| `CACHE_PATH` | Directory that stores cached audio and turn-detect assets. Mount a volume for persistence. | `/data/cache` |
+| `CACHE_PATH` | Directory that stores cached audio and VAD/turn-detection assets. Mount a volume for persistence. | `/data/cache` |
 | `DEEPGRAM_API_KEY` | Enables Deepgram STT/TTS. | `dg-secret` |
 | `ELEVENLABS_API_KEY` | Enables ElevenLabs TTS. | `el-secret` |
 | `LIVEKIT_URL` | Server-to-server WebSocket URL (internal). | `ws://livekit:7880` |
@@ -265,16 +265,16 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 - Lets you keep LiveKit messaging/data-plane behavior (including `/livekit/token`) while skipping STT/TTS provider initialization, ideal for environments without audio API keys.
 
 ### D. Custom Cache Strategies
-- **Filesystem cache** (recommended for production): set `CACHE_PATH` to a mounted volume so `sayna init` persists turn-detect assets and TTS audio across restarts.
+- **Filesystem cache** (recommended for production): set `CACHE_PATH` to a mounted volume so `sayna init` persists VAD/turn-detection assets and TTS audio across restarts.
 - **In-memory cache**: omit `CACHE_PATH` to keep assets in RAM; faster to bootstrap but cleared on restarts.
 
 ### E. Feature Flag Tuning
 - Default builds enable no optional features. Add only what you need:
   - `cargo run` (no optional features)
-  - `cargo run --features turn-detect` (turn detection enabled)
+  - `cargo run --features stt-vad` (VAD and turn detection enabled)
   - `cargo run --features openapi` (OpenAPI enabled)
-- Override feature flags at build time: `--build-arg CARGO_BUILD_FEATURES="--features turn-detect"`.
-- The published Dockerfile defaults to `--no-default-features --features turn-detect,noise-filter` (OpenAPI off). For smaller images, override the build args:
+- Override feature flags at build time: `--build-arg CARGO_BUILD_FEATURES="--features stt-vad"`.
+- The published Dockerfile defaults to `--no-default-features --features stt-vad,noise-filter` (OpenAPI off). For smaller images, override the build args:
   ```bash
   docker build -t sayna:minimal --build-arg CARGO_BUILD_FEATURES="--no-default-features" .
   ```
