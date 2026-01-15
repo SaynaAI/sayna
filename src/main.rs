@@ -27,7 +27,14 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Initialize turn detection models
+    /// Initialize Sayna by downloading required models.
+    ///
+    /// Downloads models for enabled features:
+    ///
+    /// - stt-vad: Turn detection model, tokenizer, and Silero-VAD model for
+    ///   voice activity detection with integrated turn detection
+    ///
+    /// Requires CACHE_PATH environment variable to be set.
     Init,
 
     /// Generate OpenAPI specification

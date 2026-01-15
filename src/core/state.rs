@@ -1,22 +1,24 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(feature = "stt-vad"))]
 use tracing::info;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
 use crate::core::cache::store::{CacheConfig, CacheStore};
 use crate::core::tts::get_tts_provider_urls;
-#[cfg(not(feature = "turn-detect"))]
+#[cfg(not(feature = "stt-vad"))]
 use crate::core::turn_detect::TurnDetector;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use crate::core::turn_detect::{TurnDetector, TurnDetectorConfig};
+#[cfg(feature = "stt-vad")]
+use crate::core::vad::{SileroVAD, SileroVADConfig};
 use crate::state::SipHooksState;
 use crate::utils::req_manager::ReqManager;
 
@@ -32,6 +34,9 @@ pub struct CoreState {
     pub cache: Arc<CacheStore>,
     /// Turn detector for determining end of user speech turns
     pub turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    /// Silero-VAD model for voice activity detection
+    #[cfg(feature = "stt-vad")]
+    pub silero_vad: Option<Arc<RwLock<SileroVAD>>>,
     /// SIP hooks runtime state with preserved secrets
     pub sip_hooks_state: Option<Arc<RwLock<SipHooksState>>>,
 }
@@ -81,6 +86,10 @@ impl CoreState {
         // Initialize and warmup Turn Detector
         let turn_detector = Self::initialize_turn_detector(config.cache_path.as_ref()).await;
 
+        // Initialize Silero-VAD for voice activity detection
+        #[cfg(feature = "stt-vad")]
+        let silero_vad = Self::initialize_silero_vad(config.cache_path.as_ref()).await;
+
         let sip_hooks_state = if let Some(sip_config) = &config.sip {
             Some(Arc::new(RwLock::new(
                 SipHooksState::new(sip_config, config.cache_path.as_deref()).await,
@@ -93,6 +102,8 @@ impl CoreState {
             tts_req_managers: Arc::new(RwLock::new(tts_req_managers)),
             cache,
             turn_detector,
+            #[cfg(feature = "stt-vad")]
+            silero_vad,
             sip_hooks_state,
         })
     }
@@ -102,7 +113,7 @@ impl CoreState {
         self.tts_req_managers.read().await.get(provider).cloned()
     }
 
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     /// Initialize and warmup the Turn Detector model
     async fn initialize_turn_detector(
         cache_path: Option<&PathBuf>,
@@ -168,7 +179,7 @@ impl CoreState {
         }
     }
 
-    #[cfg(not(feature = "turn-detect"))]
+    #[cfg(not(feature = "stt-vad"))]
     async fn initialize_turn_detector(
         cache_path: Option<&PathBuf>,
     ) -> Option<Arc<RwLock<TurnDetector>>> {
@@ -177,7 +188,7 @@ impl CoreState {
         None
     }
 
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     /// Warmup the Turn Detector model with sample inputs
     async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
         debug!("Starting Turn Detector warmup with sample inputs");
@@ -222,6 +233,100 @@ impl CoreState {
     /// Get the Turn Detector if available
     pub fn get_turn_detector(&self) -> Option<Arc<RwLock<TurnDetector>>> {
         self.turn_detector.clone()
+    }
+
+    #[cfg(feature = "stt-vad")]
+    /// Initialize and warmup the Silero-VAD model for voice activity detection
+    async fn initialize_silero_vad(cache_path: Option<&PathBuf>) -> Option<Arc<RwLock<SileroVAD>>> {
+        info!("Initializing Silero-VAD for voice activity detection");
+
+        let start = Instant::now();
+
+        // Create config with cache path
+        let config = SileroVADConfig {
+            cache_path: cache_path.cloned(),
+            ..Default::default()
+        };
+
+        // Add a timeout to prevent hanging forever during initialization
+        let init_timeout = Duration::from_secs(30);
+
+        match tokio::time::timeout(init_timeout, SileroVAD::with_config(config)).await {
+            Ok(Ok(vad)) => {
+                let elapsed = start.elapsed();
+                info!("Silero-VAD initialized in {:?}", elapsed);
+
+                // Warmup the model with a sample frame to ensure it's fully loaded
+                let warmup_start = Instant::now();
+                let warmup_timeout = Duration::from_secs(5);
+
+                match tokio::time::timeout(warmup_timeout, Self::warmup_silero_vad(&vad)).await {
+                    Ok(Ok(())) => {
+                        let warmup_elapsed = warmup_start.elapsed();
+                        debug!("Silero-VAD warmup completed in {:?}", warmup_elapsed);
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Silero-VAD warmup failed: {:?}", e);
+                    }
+                    Err(_) => {
+                        warn!("Silero-VAD warmup timed out after {:?}", warmup_timeout);
+                    }
+                }
+
+                let total_elapsed = start.elapsed();
+                info!("Silero-VAD fully ready in {:?}", total_elapsed);
+
+                Some(Arc::new(RwLock::new(vad)))
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "Failed to initialize Silero-VAD: {:?}. \
+                    VAD-based silence detection disabled.",
+                    e
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "Silero-VAD initialization timed out after {:?}. \
+                    VAD-based silence detection disabled.",
+                    init_timeout
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "stt-vad")]
+    /// Warmup the Silero-VAD model with a sample frame
+    async fn warmup_silero_vad(vad: &SileroVAD) -> anyhow::Result<()> {
+        debug!("Starting Silero-VAD warmup with sample frame");
+
+        // Create a sample frame of silence (512 samples for 16kHz)
+        let sample_frame: Vec<i16> = vec![0i16; 512];
+
+        let start = Instant::now();
+        let probability = vad.process_audio(&sample_frame).await?;
+        let elapsed = start.elapsed();
+
+        debug!(
+            "Silero-VAD warmup: probability={:.3}, time={:?}",
+            probability, elapsed
+        );
+
+        Ok(())
+    }
+
+    /// Get the Silero-VAD if available
+    #[cfg(feature = "stt-vad")]
+    pub fn get_silero_vad(&self) -> Option<Arc<RwLock<SileroVAD>>> {
+        self.silero_vad.clone()
+    }
+
+    /// Get the Silero-VAD if available (stub when feature disabled)
+    #[cfg(not(feature = "stt-vad"))]
+    pub fn get_silero_vad(&self) -> Option<()> {
+        None
     }
 
     /// Get SIP hooks runtime state if SIP is configured.

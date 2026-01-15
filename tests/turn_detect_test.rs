@@ -1,12 +1,12 @@
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use anyhow::Result;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use sayna::core::turn_detect::TurnDetector;
 use sayna::core::turn_detect::TurnDetectorConfig;
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 use std::path::PathBuf;
 
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 #[tokio::test]
 async fn test_turn_detector_initialization() -> Result<()> {
     let config = TurnDetectorConfig {
@@ -42,7 +42,7 @@ async fn test_config_defaults() {
     assert_eq!(config.num_threads, Some(4));
 }
 
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 #[ignore = "Requires model files to be downloaded"]
 #[tokio::test]
 async fn test_end_to_end_turn_detection() -> Result<()> {
@@ -72,7 +72,7 @@ async fn test_end_to_end_turn_detection() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "turn-detect")]
+#[cfg(feature = "stt-vad")]
 #[ignore = "Requires model files to be downloaded"]
 #[tokio::test]
 async fn test_streaming_text_detection() -> Result<()> {

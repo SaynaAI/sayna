@@ -725,6 +725,7 @@ fn test_parse_config_message_with_livekit() {
         stt_config,
         tts_config,
         livekit,
+        ..
     } = parsed
     {
         assert_eq!(audio, Some(true));
@@ -823,6 +824,7 @@ fn test_parse_config_message_without_livekit() {
         stt_config,
         tts_config,
         livekit,
+        ..
     } = parsed
     {
         assert_eq!(audio, Some(true));
@@ -1234,6 +1236,7 @@ fn test_config_message_audio_disabled() {
         stt_config,
         tts_config,
         livekit,
+        ..
     } = parsed
     {
         assert_eq!(audio, Some(false));
@@ -1287,6 +1290,7 @@ fn test_config_message_audio_default() {
         stt_config,
         tts_config,
         livekit,
+        ..
     } = parsed
     {
         assert_eq!(audio, Some(true)); // Should default to true via serde default

@@ -1,4 +1,33 @@
 //! STT result processing with timing control
+//!
+//! This module provides STT result processing with configurable timing control,
+//! supporting both timeout-based and VAD-based silence detection modes.
+//!
+//! ## Feature Behavior
+//!
+//! - **When `stt-vad` is compiled**: VAD-based silence detection is **always active**.
+//!   The `use_vad_silence_detection` field is ignored, and there is no runtime toggle
+//!   to disable VAD. This ensures consistent behavior when turn detection is built.
+//!
+//! - **When `stt-vad` is NOT compiled**: VAD-based detection is unavailable, and
+//!   timeout-based mode is used.
+//!
+//! ## Timeout-based Mode
+//!
+//! The traditional approach waits for STT provider to send `speech_final`:
+//! 1. Wait for STT provider to send real `speech_final` (default: 2000ms)
+//! 2. If silent, run turn detection ML model on accumulated text
+//! 3. Fire artificial `speech_final` if turn detection confirms
+//!
+//! ## VAD-based Mode (always active under `stt-vad`)
+//!
+//! Uses Silero-VAD for more accurate silence detection:
+//! 1. Monitor audio with VAD for configurable silence threshold (default: 300ms)
+//! 2. When silence detected, run turn detection ML model on accumulated text
+//! 3. Fire artificial `speech_final` if turn detection confirms
+//!
+//! VAD mode provides faster and more accurate turn detection by analyzing
+//! actual audio-level silence rather than relying on timeouts.
 
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -8,6 +37,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::{debug, info};
 
+use crate::core::vad::{SilenceTracker, VADEvent};
 use crate::core::{stt::STTResult, turn_detect::TurnDetector};
 
 use super::state::SpeechFinalState;
@@ -15,23 +45,76 @@ use super::state::SpeechFinalState;
 /// Configuration for STT result processing
 #[derive(Clone, Copy)]
 pub struct STTProcessingConfig {
-    /// Time to wait for STT provider to send real speech_final (ms)
-    /// This is the primary window - we trust STT provider during this time
+    /// Use VAD-based silence detection instead of timeout.
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// - **When `stt-vad` is compiled**: This field is **ignored**. VAD-based
+    ///   silence detection is always active and cannot be disabled at runtime.
+    ///   The bundled turn detection model requires VAD to function correctly.
+    ///
+    /// - **When `stt-vad` is NOT compiled**: This field is also ignored since
+    ///   VAD functionality is unavailable; timeout-based mode is always used.
+    ///
+    /// # Behavior when active (under `stt-vad`)
+    ///
+    /// Silence is detected by processing audio through Silero-VAD and tracking
+    /// when speech probability drops below threshold for the configured
+    /// `vad_silence_duration_ms`.
+    ///
+    /// Default: false (for backward compatibility, but ignored under `stt-vad`)
+    pub use_vad_silence_detection: bool,
+
+    /// Time to wait for STT provider to send real speech_final (ms).
+    ///
+    /// This is the primary window in timeout-based mode - we trust STT provider
+    /// during this time. Only used when `stt-vad` feature is NOT compiled.
+    ///
+    /// Default: 2000ms
     pub stt_speech_final_wait_ms: u64,
-    /// Maximum time to wait for turn detection inference to complete (ms)
+
+    /// VAD silence duration threshold (ms).
+    ///
+    /// When `stt-vad` is compiled, this is how long continuous silence (speech
+    /// probability below threshold) must be observed before triggering turn
+    /// detection. VAD is always active under `stt-vad`.
+    ///
+    /// Default: 300ms
+    pub vad_silence_duration_ms: u64,
+
+    /// Maximum time to wait for turn detection inference to complete (ms).
+    ///
+    /// If the turn detection ML model takes longer than this, we fire
+    /// speech_final as a fallback.
+    ///
+    /// Default: 100ms
     pub turn_detection_inference_timeout_ms: u64,
-    /// Hard upper bound timeout for any user utterance (ms)
+
+    /// Hard upper bound timeout for any user utterance (ms).
+    ///
     /// This guarantees that no utterance will wait longer than this value
-    /// even if neither the STT provider nor turn detector fire
+    /// even if neither the STT provider, VAD, nor turn detector fire.
+    /// Acts as a safety net for both modes.
+    ///
+    /// Default: 5000ms
     pub speech_final_hard_timeout_ms: u64,
-    /// Window to prevent duplicate speech_final events (ms)
+
+    /// Window to prevent duplicate speech_final events (ms).
+    ///
+    /// If a real speech_final arrives within this window after we've already
+    /// fired an artificial one, we ignore the duplicate.
+    ///
+    /// Default: 500ms
     pub duplicate_window_ms: usize,
 }
 
 impl Default for STTProcessingConfig {
     fn default() -> Self {
         Self {
+            // Field value ignored under stt-vad (VAD always active when compiled)
+            use_vad_silence_detection: false,
             stt_speech_final_wait_ms: 2000, // Wait 2s for real speech_final from STT
+            vad_silence_duration_ms: 300,   // 300ms silence threshold for VAD
             turn_detection_inference_timeout_ms: 100, // 100ms max for model inference
             speech_final_hard_timeout_ms: 5000, // 5s hard upper bound for any utterance
             duplicate_window_ms: 500,       // 500ms duplicate prevention window
@@ -40,7 +123,10 @@ impl Default for STTProcessingConfig {
 }
 
 impl STTProcessingConfig {
-    /// Create a new STTProcessingConfig with explicit timeout values
+    /// Create a new STTProcessingConfig with explicit timeout values (legacy API).
+    ///
+    /// This constructor maintains backward compatibility. For VAD-enabled configs,
+    /// use the builder methods instead.
     pub fn new(
         stt_speech_final_wait_ms: u64,
         turn_detection_inference_timeout_ms: u64,
@@ -48,11 +134,71 @@ impl STTProcessingConfig {
         duplicate_window_ms: usize,
     ) -> Self {
         Self {
+            use_vad_silence_detection: false,
             stt_speech_final_wait_ms,
+            vad_silence_duration_ms: 300,
             turn_detection_inference_timeout_ms,
             speech_final_hard_timeout_ms,
             duplicate_window_ms,
         }
+    }
+
+    /// Create a new config with VAD-based silence detection settings.
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// When `stt-vad` is compiled, VAD is always active regardless of this call.
+    /// This method is primarily useful for setting the `vad_silence_duration_ms`.
+    ///
+    /// # Arguments
+    /// * `vad_silence_duration_ms` - Silence duration threshold in milliseconds (default: 300)
+    pub fn with_vad(vad_silence_duration_ms: u64) -> Self {
+        Self {
+            use_vad_silence_detection: true,
+            vad_silence_duration_ms,
+            ..Self::default()
+        }
+    }
+
+    /// Set the VAD enable flag (no-op under `stt-vad` feature).
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// - **When `stt-vad` is compiled**: This method is a **no-op**. VAD is always
+    ///   active and cannot be disabled at runtime. The field value is ignored.
+    ///
+    /// - **When `stt-vad` is NOT compiled**: This method sets the field, but VAD
+    ///   functionality is unavailable anyway.
+    ///
+    /// This method is retained for API compatibility but has no effect on runtime
+    /// behavior when the `stt-vad` feature is enabled.
+    #[cfg_attr(feature = "stt-vad", allow(unused_variables, unused_mut))]
+    pub fn set_use_vad(mut self, use_vad: bool) -> Self {
+        // Under stt-vad, this field is ignored - VAD is always active.
+        // We still set it for API compatibility when the feature is not compiled.
+        #[cfg(not(feature = "stt-vad"))]
+        {
+            self.use_vad_silence_detection = use_vad;
+        }
+        self
+    }
+
+    /// Set the VAD silence duration threshold.
+    pub fn set_vad_silence_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.vad_silence_duration_ms = duration_ms;
+        self
+    }
+
+    /// Set the STT speech final wait timeout (timeout mode only).
+    pub fn set_stt_speech_final_wait_ms(mut self, wait_ms: u64) -> Self {
+        self.stt_speech_final_wait_ms = wait_ms;
+        self
+    }
+
+    /// Set the hard timeout for any utterance.
+    pub fn set_hard_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.speech_final_hard_timeout_ms = timeout_ms;
+        self
     }
 }
 
@@ -100,6 +246,267 @@ impl STTResultProcessor {
         // Always return the original result immediately - no awaits in critical path
         Some(result)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // VAD-based silence detection methods
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Process a VAD event for silence detection.
+    ///
+    /// This method should be called for every VAD event from the SilenceTracker.
+    /// When VAD detects silence exceeding the threshold (TurnEnd event), it triggers
+    /// turn detection on the accumulated text.
+    ///
+    /// # Arguments
+    /// * `event` - VAD event from SilenceTracker
+    /// * `speech_final_state` - Shared state for speech final tracking
+    /// * `turn_detector` - Optional turn detector for text-level confirmation
+    /// * `silence_tracker` - SilenceTracker to reset after firing speech_final
+    /// * `vad_audio_buffer` - VAD audio buffer to clear after firing speech_final
+    ///
+    /// # VAD Events Handled
+    ///
+    /// - `SpeechStart`: Resets VAD state, starts tracking new utterance
+    /// - `SpeechResumed`: Cancels pending VAD turn detection (user still talking)
+    /// - `SilenceDetected`: Logged but no action (waiting for threshold)
+    /// - `TurnEnd`: Triggers turn detection on accumulated text
+    pub fn process_vad_event(
+        &self,
+        event: VADEvent,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    ) {
+        // When stt-vad is not compiled, VAD processing can be disabled via config.
+        // When stt-vad IS compiled, VAD is always active (no runtime disable toggle).
+        #[cfg(not(feature = "stt-vad"))]
+        if !self.config.use_vad_silence_detection {
+            return;
+        }
+
+        match event {
+            VADEvent::SpeechStart => {
+                debug!("VAD: Speech started - resetting VAD state");
+                let mut state = speech_final_state.write();
+                state.reset_vad_state();
+            }
+
+            VADEvent::SpeechResumed => {
+                // User resumed speaking before turn end threshold
+                // Cancel any pending VAD turn detection
+                debug!("VAD: Speech resumed - cancelling pending VAD turn detection");
+                let mut state = speech_final_state.write();
+                state.reset_vad_state();
+            }
+
+            VADEvent::SilenceDetected => {
+                // Short silence detected, not yet at threshold
+                debug!("VAD: Silence detected - waiting for turn end threshold");
+            }
+
+            VADEvent::TurnEnd => {
+                // Silence exceeded threshold - trigger turn detection
+                self.handle_vad_turn_end(
+                    speech_final_state,
+                    turn_detector,
+                    silence_tracker,
+                    vad_audio_buffer,
+                );
+            }
+        }
+    }
+
+    /// Handle VAD TurnEnd event by spawning turn detection.
+    ///
+    /// Called when SilenceTracker detects that silence has exceeded the configured
+    /// threshold after sufficient speech. Spawns a task to run turn detection
+    /// on the accumulated text buffer.
+    fn handle_vad_turn_end(
+        &self,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    ) {
+        let (buffered_text, should_trigger) = {
+            let mut state = speech_final_state.write();
+
+            // Check if already handled or not waiting
+            if state.vad_turn_end_detected.load(Ordering::Acquire) {
+                debug!("VAD: TurnEnd already detected for this segment - skipping");
+                return;
+            }
+
+            // Only trigger if we have text and are waiting for speech_final
+            if !state.waiting_for_speech_final.load(Ordering::Acquire) {
+                debug!("VAD: TurnEnd received but not waiting for speech_final - skipping");
+                return;
+            }
+
+            if state.text_buffer.is_empty() {
+                debug!("VAD: TurnEnd received but text buffer is empty - skipping");
+                return;
+            }
+
+            // Mark as detected to prevent duplicates
+            state.vad_turn_end_detected.store(true, Ordering::Release);
+
+            // Cancel any timeout-based detection task since VAD is handling it
+            if let Some(old_handle) = state.turn_detection_handle.take() {
+                debug!("VAD: Cancelling timeout-based turn detection task");
+                old_handle.abort();
+            }
+
+            (state.text_buffer.clone(), true)
+        };
+
+        if !should_trigger {
+            return;
+        }
+
+        info!(
+            "VAD: TurnEnd after {}ms silence - spawning turn detection for '{}...'",
+            self.config.vad_silence_duration_ms,
+            buffered_text.chars().take(50).collect::<String>()
+        );
+
+        // Spawn VAD-triggered turn detection task
+        let handle = self.spawn_vad_turn_detection(
+            buffered_text,
+            speech_final_state.clone(),
+            turn_detector,
+            silence_tracker,
+            vad_audio_buffer,
+        );
+
+        // Store the handle
+        let mut state = speech_final_state.write();
+        state.vad_turn_detection_handle = Some(handle);
+    }
+
+    /// Spawn turn detection task after VAD silence threshold.
+    ///
+    /// This task runs the turn detection ML model on the accumulated text
+    /// and fires speech_final if the turn is confirmed.
+    fn spawn_vad_turn_detection(
+        &self,
+        buffered_text: String,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    ) -> JoinHandle<()> {
+        let inference_timeout_ms = self.config.turn_detection_inference_timeout_ms;
+
+        tokio::spawn(async move {
+            // Check if we should still fire (not cancelled by new speech)
+            let should_continue = {
+                let state = speech_final_state.read();
+                state.waiting_for_speech_final.load(Ordering::Acquire)
+                    && state.vad_turn_end_detected.load(Ordering::Acquire)
+            };
+
+            if !should_continue {
+                debug!("VAD turn detection cancelled - speech resumed or already handled");
+                return;
+            }
+
+            // Run turn detection
+            let detection_method = if let Some(detector) = turn_detector {
+                let turn_result =
+                    tokio::time::timeout(Duration::from_millis(inference_timeout_ms), async {
+                        let detector_guard = detector.read().await;
+                        detector_guard.is_turn_complete(&buffered_text).await
+                    })
+                    .await;
+
+                match turn_result {
+                    Ok(Ok(true)) => {
+                        info!(
+                            "VAD+TurnDetect: Turn complete confirmed for '{}'",
+                            buffered_text.chars().take(50).collect::<String>()
+                        );
+                        "vad_turn_detection_confirmed"
+                    }
+                    Ok(Ok(false)) => {
+                        info!("VAD: Turn detection says incomplete - waiting for more input");
+                        // Reset VAD state so next TurnEnd can trigger again
+                        {
+                            let state = speech_final_state.write();
+                            state.vad_turn_end_detected.store(false, Ordering::Release);
+                        }
+                        // Reset silence tracker for next detection attempt
+                        silence_tracker.reset();
+                        return; // Don't fire
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("VAD turn detection error: {:?} - firing anyway", e);
+                        "vad_turn_detection_error_fallback"
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "VAD turn detection timeout after {}ms - firing anyway",
+                            inference_timeout_ms
+                        );
+                        "vad_inference_timeout_fallback"
+                    }
+                }
+            } else {
+                // No turn detector - fire based on VAD silence alone
+                info!("VAD: No turn detector - firing based on silence alone");
+                "vad_silence_only"
+            };
+
+            // Fire speech_final
+            let result = STTResult {
+                transcript: String::new(),
+                is_final: true,
+                is_speech_final: true,
+                confidence: 1.0,
+            };
+
+            Self::fire_speech_final(result, buffered_text, speech_final_state, detection_method)
+                .await;
+
+            // Reset silence tracker and clear VAD audio buffer for next utterance
+            silence_tracker.reset();
+            {
+                let mut buffer = vad_audio_buffer.write();
+                buffer.clear();
+            }
+            info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
+        })
+    }
+
+    /// Check if VAD-based silence detection is enabled.
+    ///
+    /// # Feature-dependent behavior
+    ///
+    /// - **When `stt-vad` is compiled**: Always returns `true`. VAD is always
+    ///   active and cannot be disabled at runtime.
+    ///
+    /// - **When `stt-vad` is NOT compiled**: Always returns `false` since VAD
+    ///   functionality is unavailable.
+    pub fn is_vad_enabled(&self) -> bool {
+        #[cfg(feature = "stt-vad")]
+        {
+            true // VAD is always active when stt-vad feature is compiled
+        }
+        #[cfg(not(feature = "stt-vad"))]
+        {
+            false // VAD unavailable without stt-vad feature
+        }
+    }
+
+    /// Get the configured VAD silence duration threshold in milliseconds.
+    pub fn vad_silence_duration_ms(&self) -> u64 {
+        self.config.vad_silence_duration_ms
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Core STT processing methods
+    // ─────────────────────────────────────────────────────────────────────────────
 
     /// Fast synchronous check if result should be delivered
     /// Returns true if result should be processed and delivered to callback
@@ -424,6 +831,9 @@ impl STTResultProcessor {
                 // Clear segment timing for next utterance
                 state.segment_start_ms.store(0, Ordering::Release);
                 state.hard_timeout_deadline_ms.store(0, Ordering::Release);
+
+                // Reset VAD state for next utterance
+                state.reset_vad_state();
             }
 
             let forced_result = STTResult {
@@ -467,6 +877,15 @@ impl STTResultProcessor {
             debug!("Cancelling pending hard timeout task");
             handle.abort();
         }
+
+        // Cancel VAD turn detection handle if present
+        if let Some(handle) = state.vad_turn_detection_handle.take() {
+            debug!("Cancelling pending VAD turn detection task");
+            handle.abort();
+        }
+
+        // Reset VAD state
+        state.vad_turn_end_detected.store(false, Ordering::Release);
     }
 
     /// Reset speech state for next segment
@@ -486,6 +905,9 @@ impl STTResultProcessor {
         if let Some(handle) = state.hard_timeout_handle.take() {
             handle.abort();
         }
+
+        // Reset VAD state
+        state.reset_vad_state();
     }
 
     /// Get current time in milliseconds
@@ -516,17 +938,17 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
 
     #[tokio::test]
     async fn test_hard_timeout_fires_when_no_speech_final() {
         // Test that hard timeout fires after configured duration when no speech_final arrives
-        let config = STTProcessingConfig {
-            stt_speech_final_wait_ms: 50,
-            turn_detection_inference_timeout_ms: 50,
-            speech_final_hard_timeout_ms: 200, // 200ms hard timeout
-            duplicate_window_ms: 100,
-        };
+        let config = STTProcessingConfig::new(
+            50,  // stt_speech_final_wait_ms
+            50,  // turn_detection_inference_timeout_ms
+            200, // speech_final_hard_timeout_ms - 200ms hard timeout
+            100, // duplicate_window_ms
+        );
 
         let processor = STTResultProcessor::new(config);
 
@@ -543,17 +965,7 @@ mod tests {
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
-        let state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::new(),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: Some(callback),
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::new(),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
         // Send an is_final result (no speech_final)
         let result = STTResult {
@@ -590,12 +1002,12 @@ mod tests {
     #[tokio::test]
     async fn test_hard_timeout_cancelled_by_real_speech_final() {
         // Test that hard timeout is cancelled when real speech_final arrives
-        let config = STTProcessingConfig {
-            stt_speech_final_wait_ms: 50,
-            turn_detection_inference_timeout_ms: 50,
-            speech_final_hard_timeout_ms: 500, // Long timeout
-            duplicate_window_ms: 100,
-        };
+        let config = STTProcessingConfig::new(
+            50,  // stt_speech_final_wait_ms
+            50,  // turn_detection_inference_timeout_ms
+            500, // speech_final_hard_timeout_ms - Long timeout
+            100, // duplicate_window_ms
+        );
 
         let processor = STTResultProcessor::new(config);
 
@@ -611,17 +1023,7 @@ mod tests {
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
-        let state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::new(),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: Some(callback),
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::new(),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
         // Send an is_final result
         let is_final_result = STTResult {
@@ -664,12 +1066,12 @@ mod tests {
     #[tokio::test]
     async fn test_hard_timeout_not_restarted_by_new_is_final() {
         // Test that hard timeout continues from first is_final when new is_final arrives
-        let config = STTProcessingConfig {
-            stt_speech_final_wait_ms: 300, // Long turn detection wait
-            turn_detection_inference_timeout_ms: 50,
-            speech_final_hard_timeout_ms: 200, // Hard timeout fires first
-            duplicate_window_ms: 100,
-        };
+        let config = STTProcessingConfig::new(
+            300, // stt_speech_final_wait_ms - Long turn detection wait
+            50,  // turn_detection_inference_timeout_ms
+            200, // speech_final_hard_timeout_ms - Hard timeout fires first
+            100, // duplicate_window_ms
+        );
 
         let processor = STTResultProcessor::new(config);
 
@@ -685,17 +1087,7 @@ mod tests {
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
-        let state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::new(),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: Some(callback),
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::new(),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
         // Send first is_final at t=0
         let result1 = STTResult {
@@ -749,17 +1141,7 @@ mod tests {
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
-        let state = Arc::new(SyncRwLock::new(SpeechFinalState {
-            text_buffer: String::new(),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
-            waiting_for_speech_final: AtomicBool::new(false),
-            user_callback: Some(callback),
-            turn_detection_last_fired_ms: AtomicUsize::new(0),
-            last_forced_text: String::new(),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
-        }));
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
         // Send is_final
         let result = STTResult {

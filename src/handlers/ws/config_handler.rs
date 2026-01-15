@@ -56,6 +56,7 @@ fn resolve_stream_id(stream_id: Option<String>) -> String {
 /// - STT (Speech-to-Text) provider initialization
 /// - TTS (Text-to-Speech) provider initialization
 /// - LiveKit client connection (optional)
+/// - VAD (Voice Activity Detection) is automatically enabled when `stt-vad` feature is compiled
 /// - Callback registration for audio routing
 ///
 /// # Arguments
@@ -242,7 +243,10 @@ async fn validate_audio_configs(
     true
 }
 
-/// Initialize voice manager with STT and TTS providers
+/// Initialize voice manager with STT and TTS configuration
+///
+/// VAD (Voice Activity Detection) is automatically enabled when the `stt-vad` feature
+/// is compiled. No explicit configuration is needed from WebSocket clients.
 async fn initialize_voice_manager(
     stt_ws_config: &STTWebSocketConfig,
     tts_ws_config: &TTSWebSocketConfig,
@@ -285,12 +289,35 @@ async fn initialize_voice_manager(
     let stt_config = stt_ws_config.to_stt_config(stt_api_key);
     let tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
-    // Create voice manager configuration with default speech final settings
+    // Create voice manager configuration
+    // VAD is automatically enabled when the stt-vad feature is compiled
     let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
+
+    // Log that VAD is auto-enabled when feature is compiled
+    #[cfg(feature = "stt-vad")]
+    info!("VAD automatically enabled (stt-vad feature compiled)");
 
     let turn_detector = app_state.core_state.get_turn_detector();
 
+    // Get Silero-VAD from app_state (feature-gated)
+    #[cfg(feature = "stt-vad")]
+    let silero_vad = app_state.core_state.get_silero_vad();
+
     // Create voice manager
+    #[cfg(feature = "stt-vad")]
+    let voice_manager = match VoiceManager::new(voice_config, turn_detector, silero_vad) {
+        Ok(vm) => Arc::new(vm),
+        Err(e) => {
+            error!("Failed to create voice manager: {}", e);
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!("Failed to create voice manager: {e}"),
+                }))
+                .await;
+            return None;
+        }
+    };
+    #[cfg(not(feature = "stt-vad"))]
     let voice_manager = match VoiceManager::new(voice_config, turn_detector) {
         Ok(vm) => Arc::new(vm),
         Err(e) => {
@@ -572,10 +599,7 @@ async fn register_final_tts_callback(
                 if let Some(queue) = operation_queue {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if queue
-                        .queue(crate::livekit::LiveKitOperation::SendAudio {
-                            audio_data: audio_data.data.clone(),
-                            response_tx: tx,
-                        })
+                        .queue_audio(audio_data.data.clone(), tx)
                         .await
                         .is_ok()
                     {
@@ -1071,6 +1095,12 @@ async fn register_audio_clear_callback(
             .on_audio_clear(move || {
                 let queue = queue_clone.clone();
                 Box::pin(async move {
+                    // FIRST: Cancel any pending audio operations synchronously
+                    // This sets an atomic flag that causes the operation worker
+                    // to skip any pending SendAudio operations immediately
+                    queue.cancel_audio();
+
+                    // THEN: Queue the clear operation
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if let Err(e) = queue
                         .queue(crate::livekit::LiveKitOperation::ClearAudio { response_tx: tx })
@@ -1078,7 +1108,7 @@ async fn register_audio_clear_callback(
                     {
                         warn!("Failed to queue clear audio operation: {:?}", e);
                     } else {
-                        // Wait for the operation to complete
+                        // Wait for the operation to complete (which will reset the flag)
                         match rx.await {
                             Ok(Ok(())) => {
                                 debug!("Cleared LiveKit audio buffer during interruption");

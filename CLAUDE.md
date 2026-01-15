@@ -23,14 +23,15 @@ docker build -t saynaai/sayna .      # Build Docker image
 ### Feature Flags
 By default, no optional features are enabled.
 
-- `turn-detect` (disabled by default): ONNX-based turn detection. Required for `sayna init`.
+- `stt-vad` (disabled by default): Silero-VAD voice activity detection with integrated ONNX-based turn detection. When enabled, VAD monitors audio for silence and triggers the turn detection model to confirm if the speaker's turn is complete.
 - `noise-filter` (disabled by default): DeepFilterNet noise suppression. Disable to reduce dependencies.
 - `openapi` (disabled by default): OpenAPI 3.1 specification generation using utoipa crate.
 
 ```bash
-cargo check                                   # Default build, no optional features
-cargo check --no-default-features             # Explicitly disable optional features
-cargo build --features turn-detect,openapi     # Enable specific features
+cargo check                                        # Default build, no optional features
+cargo check --no-default-features                  # Explicitly disable optional features
+cargo build --features stt-vad                     # Enable VAD with turn detection
+cargo build --features stt-vad,openapi             # Enable specific features
 cargo run --features openapi -- openapi -o docs/openapi.yaml  # Generate OpenAPI spec
 ```
 
@@ -72,6 +73,43 @@ Always consult these rule files when implementing new features.
 
 6. **Authentication** (`src/auth/` and `src/middleware/auth.rs`):
    - Optional JWT-based auth with external validation service
+
+7. **VAD + Turn Detection** (`src/core/vad/`, `src/core/turn_detect/`) - Feature-gated: `stt-vad`:
+   - **SileroVAD**: ONNX-based voice activity detection model
+   - **SilenceTracker**: Tracks continuous silence duration from VAD
+   - **Turn Detection**: ONNX-based model that confirms turn completion when silence is detected
+   - Integrates with VoiceManager for audio processing
+   - VAD and turn detection are always bundled together under `stt-vad` feature
+
+### Voice Activity Detection (VAD) with Turn Detection
+
+When `stt-vad` feature is enabled, Sayna provides both Silero-VAD for audio-level silence detection and ONNX-based turn detection to determine when a user has finished speaking. Both features are always bundled together under the `stt-vad` feature flag.
+
+**How it works:**
+1. Audio frames are processed through Silero-VAD ONNX model
+2. When 300ms (configurable) of continuous silence is detected, the turn detection model is triggered
+3. The turn detection model analyzes the accumulated transcript to confirm if the turn is complete
+4. If confirmed, an artificial `speech_final` event is emitted
+
+**Configuration:**
+```yaml
+vad:
+  threshold: 0.5              # Speech probability threshold (0.0-1.0)
+  silence_duration_ms: 300    # Silence duration to trigger turn end
+  min_speech_duration_ms: 100 # Minimum speech before checking silence
+```
+
+> **Note:** When `stt-vad` is compiled, VAD is always active. There is no runtime `enabled` toggle.
+
+**WebSocket API:**
+```json
+{
+  "type": "config",
+  "vad": {
+    "silence_duration_ms": 300
+  }
+}
+```
 
 ### Request Flow
 
@@ -135,8 +173,9 @@ See existing implementations for patterns:
 
 ### WebSocket
 - `/ws` - Real-time voice processing
-  - Receives: Config, audio data, speak commands
-  - Sends: Ready, STT results, TTS audio
+  - Receives: Config, audio data, speak commands, **clear command**, send_message, sip_transfer
+  - Sends: Ready, STT results, TTS audio, messages, participant events
+  - **Clear command**: Immediately stops TTS and clears audio buffers (fire-and-forget, respects `allow_interruption` setting)
 
 ### Webhooks
 - `POST /livekit/webhook` - LiveKit event receiver (signature verified)
@@ -146,11 +185,15 @@ See [docs/](docs/) for detailed API documentation.
 ## Critical Files
 
 - `src/core/voice_manager/manager.rs`: Central voice processing orchestration
+- `src/core/voice_manager/stt_result.rs`: STT result processing with VAD integration
+- `src/core/vad/detector.rs`: Silero-VAD detector (feature-gated: `stt-vad`)
+- `src/core/vad/silence_tracker.rs`: Silence duration tracking for turn detection
+- `src/core/turn_detect/mod.rs`: ONNX-based turn detection model (feature-gated: `stt-vad`)
 - `src/handlers/ws/handler.rs`: WebSocket message handling
 - `src/livekit/manager.rs`: LiveKit room management
 - `src/config/mod.rs`: Configuration loading and merging
 - `src/errors/mod.rs`: Centralized error types (thiserror)
-- `src/docs/openapi.rs`: OpenAPI spec generation (feature-gated)
+- `src/docs/openapi.rs`: OpenAPI spec generation (feature-gated: `openapi`)
 
 ## Testing
 
@@ -158,6 +201,7 @@ See [docs/](docs/) for detailed API documentation.
 cargo test                          # All tests
 cargo test test_name                # Specific test
 cargo test -- --nocapture           # With output
+cargo test --features stt-vad       # Tests including VAD feature tests
 ```
 
 - Unit tests: Embedded in modules using `#[cfg(test)]`

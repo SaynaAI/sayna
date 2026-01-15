@@ -1025,6 +1025,41 @@ components:
             enum:
             - tts_playback_complete
       - type: object
+        description: |-
+          VAD event notification
+
+          Emitted when VAD detects speech activity changes:
+          - `speech_start`: User started speaking
+          - `silence_detected`: Brief silence detected
+          - `speech_resumed`: User resumed speaking after brief silence
+          - `turn_end`: Silence exceeded threshold, turn complete
+        required:
+        - event
+        - timestamp_ms
+        - type
+        properties:
+          event:
+            type: string
+            description: 'Event type: "speech_start", "silence_detected", "speech_resumed", "turn_end"'
+            example: turn_end
+          silence_duration_ms:
+            type:
+            - integer
+            - 'null'
+            format: int64
+            description: Silence duration in milliseconds (only present for silence_detected and turn_end events)
+            minimum: 0
+          timestamp_ms:
+            type: integer
+            format: int64
+            description: Timestamp when the event occurred (milliseconds since epoch)
+            example: 1704067200000
+            minimum: 0
+          type:
+            type: string
+            enum:
+            - vad_event
+      - type: object
         required:
         - message
         - type

@@ -157,17 +157,61 @@ pub async fn handle_speak_message(
     true
 }
 
-/// Handle audio clear/interruption command
+/// Handle audio clear/interruption command.
 ///
-/// Clears the TTS queue and any pending audio. Respects non-interruptible
-/// audio playback settings.
+/// Clears all pending TTS audio and stops ongoing synthesis. This function
+/// coordinates clearing across multiple components to ensure audio stops
+/// as quickly as possible.
+///
+/// # Clearing Process
+///
+/// The clear operation proceeds in the following order:
+/// 1. Checks if audio is currently in a non-interruptible state
+/// 2. If interruptible, calls `VoiceManager::clear_tts()` which:
+///    - Clears the TTS provider's internal text queue
+///    - Triggers the audio_clear_callback (clears LiveKit audio)
+/// 3. If audio is disabled but LiveKit is configured, clears LiveKit audio directly
+///
+/// # What Gets Cleared
+///
+/// - **TTS Provider Queue**: Pending text waiting to be synthesized
+/// - **TTS Audio Buffer**: Audio chunks waiting to be sent
+/// - **LiveKit Audio Source**: NativeAudioSource internal buffer
+/// - **Audio Frame Queue**: Pending frames not yet sent to WebRTC
+/// - **Operation Worker Queue**: Pending audio operations
+///
+/// # Timing Guarantees
+///
+/// - Cancellation is immediate for queued operations not yet in flight
+/// - In-flight audio (already in WebRTC transport) may still play briefly (~10-50ms)
+/// - A brief settling period ensures all buffers are properly flushed
+///
+/// # Limitations
+///
+/// - Audio frames already captured to WebRTC transport cannot be recalled
+/// - This is a limitation of the WebRTC protocol, not this implementation
+/// - STT processing is NOT affected (only TTS output is cleared)
+///
+/// # Non-Interruptible Audio
+///
+/// If `allow_interruption: false` was set on the current audio playback,
+/// this command is silently ignored until the non-interruptible period ends.
+/// No error is returned - the command simply has no effect.
 ///
 /// # Arguments
+///
 /// * `state` - Connection state containing voice and LiveKit managers
 /// * `message_tx` - Channel for sending response messages
 ///
 /// # Returns
+///
 /// * `bool` - true to continue processing, false to terminate connection
+///
+/// # Thread Safety
+///
+/// This function acquires read locks on state and may acquire write locks
+/// on LiveKit audio resources. It is safe to call concurrently with
+/// audio sending operations.
 pub async fn handle_clear_message(
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,

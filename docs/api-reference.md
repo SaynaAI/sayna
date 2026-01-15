@@ -10,7 +10,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 - Bidirectional WebSocket endpoint (`/ws`) for low-latency audio streaming, TTS commands, LiveKit coordination, and control signals.
 - REST endpoints for health checks, voice discovery, one-shot TTS synthesis, and LiveKit token issuance.
 - Pluggable provider layer with Deepgram (STT + TTS), ElevenLabs (STT + TTS), Google (STT + TTS), and Microsoft Azure (STT) adapters; adding providers requires implementing the trait in `src/core/stt` or `src/core/tts`.
-- Optional DSP layers: ONNX-based turn detection (`turn-detect` feature) and DeepFilterNet noise suppression (`noise-filter` feature).
+- Optional DSP layers: Silero-VAD voice activity detection with ONNX-based turn detection (`stt-vad` feature) and DeepFilterNet noise suppression (`noise-filter` feature).
 - Request pooling, adaptive retry logic, and binary audio caching so repeated prompts replay instantly while respecting provider rate limits.
 
 ## Core Architecture
@@ -52,8 +52,8 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 
 | Feature | Default | Effect |
 | --- | --- | --- |
-| `turn-detect` | Enabled | Loads the ONNX turn detector, improving `is_speech_final` timing in STT responses. Required for `sayna init`. |
-| `noise-filter` | Enabled | Activates DeepFilterNet-based denoising before STT ingestion and LiveKit playback. Disable for lower CPU usage. |
+| `stt-vad` | Disabled | Enables Silero-VAD voice activity detection with integrated ONNX-based turn detection. Improves `is_speech_final` timing in STT responses by detecting silence and confirming turn completion. |
+| `noise-filter` | Disabled | Activates DeepFilterNet-based denoising before STT ingestion and LiveKit playback. Disable for lower CPU usage. |
 | `openapi` | Disabled | Compiles utoipa annotations and exposes the CLI generator (`cargo run --features openapi -- openapi`). |
 
 ### Configuration & Environment
@@ -618,7 +618,7 @@ Send raw audio bytes that match `sample_rate`, `channels`, and `encoding` suppli
 | `type` | string | `stt_result`. |
 | `transcript` | string | Recognized text. |
 | `is_final` | boolean | `true` when no more updates are expected for the utterance. |
-| `is_speech_final` | boolean | Indicates end-of-turn detection (improved by the `turn-detect` feature). |
+| `is_speech_final` | boolean | Indicates end-of-turn detection (improved by the `stt-vad` feature which includes VAD and turn detection). |
 | `confidence` | number | Provider-supplied confidence score. |
 
 **Speech Final Timing Behavior**
@@ -691,5 +691,6 @@ Synthesized audio is streamed as binary frames using the format returned by the 
 - Reuse the same `tts_config` when possible; the VoiceManager hashes the configuration and caches rendered audio to eliminate provider round-trips.
 - If you disable `audio` in the `config` message, you can still use LiveKit data relaying and the `/livekit/token` flow for text-only experiences.
 - The `noise-filter` feature improves transcription quality but increases CPU usage; disable it for ultra-low-latency or resource-constrained deployments.
+- The `stt-vad` feature enables integrated VAD and turn detection for improved end-of-turn timing.
 - Use integration tests in `tests/` (for example `tests/ws_tests.rs`) as references when extending message formats or LiveKit behavior.
 - Generate refreshed machine-readable docs with `cargo run --features openapi -- openapi -o docs/openapi.yaml` whenever request/response structures change.

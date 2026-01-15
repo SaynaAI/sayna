@@ -29,7 +29,10 @@ fn test_voice_manager_with_elevenlabs_stt() {
     };
 
     let config = VoiceManagerConfig::new(stt_config, tts_config);
+    #[cfg(not(feature = "stt-vad"))]
     let result = VoiceManager::new(config, None);
+    #[cfg(feature = "stt-vad")]
+    let result = VoiceManager::new(config, None, None);
 
     assert!(result.is_ok());
 }
@@ -51,7 +54,10 @@ fn test_voice_manager_elevenlabs_requires_api_key() {
     let tts_config = TTSConfig::default();
 
     let config = VoiceManagerConfig::new(stt_config, tts_config);
+    #[cfg(not(feature = "stt-vad"))]
     let result = VoiceManager::new(config, None);
+    #[cfg(feature = "stt-vad")]
+    let result = VoiceManager::new(config, None, None);
 
     assert!(result.is_err());
 }
@@ -78,7 +84,10 @@ fn test_voice_manager_elevenlabs_stt_deepgram_tts() {
     };
 
     let config = VoiceManagerConfig::new(stt_config, tts_config);
+    #[cfg(not(feature = "stt-vad"))]
     let result = VoiceManager::new(config, None);
+    #[cfg(feature = "stt-vad")]
+    let result = VoiceManager::new(config, None, None);
 
     assert!(result.is_ok());
 }
@@ -107,7 +116,10 @@ fn test_voice_manager_elevenlabs_different_sample_rates() {
         };
 
         let config = VoiceManagerConfig::new(stt_config, tts_config);
+        #[cfg(not(feature = "stt-vad"))]
         let result = VoiceManager::new(config, None);
+        #[cfg(feature = "stt-vad")]
+        let result = VoiceManager::new(config, None, None);
 
         assert!(
             result.is_ok(),
@@ -141,7 +153,10 @@ fn test_voice_manager_elevenlabs_different_languages() {
         };
 
         let config = VoiceManagerConfig::new(stt_config, tts_config);
+        #[cfg(not(feature = "stt-vad"))]
         let result = VoiceManager::new(config, None);
+        #[cfg(feature = "stt-vad")]
+        let result = VoiceManager::new(config, None, None);
 
         assert!(
             result.is_ok(),

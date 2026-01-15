@@ -63,7 +63,7 @@ pub enum GraphOptimizationLevel {
 }
 
 impl GraphOptimizationLevel {
-    #[cfg(feature = "turn-detect")]
+    #[cfg(feature = "stt-vad")]
     pub fn to_ort_level(&self) -> ort::session::builder::GraphOptimizationLevel {
         use ort::session::builder::GraphOptimizationLevel as OrtLevel;
         match self {

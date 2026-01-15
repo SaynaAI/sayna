@@ -3,6 +3,9 @@
 //! This module provides an operation queue system that eliminates lock contention
 //! by processing all LiveKit operations sequentially through a dedicated worker task.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error};
@@ -27,6 +30,8 @@ pub enum LiveKitOperation {
     SendAudio {
         audio_data: Vec<u8>,
         response_tx: oneshot::Sender<Result<(), AppError>>,
+        /// Generation at queue time - operations with older generation are skipped
+        generation: u64,
     },
     /// Send a data message
     SendMessage {
@@ -105,22 +110,71 @@ impl QueuedOperation {
 /// Operation queue manager
 pub struct OperationQueue {
     sender: mpsc::Sender<QueuedOperation>,
+    /// Generation counter - audio operations with lower generation are skipped
+    audio_generation: Arc<AtomicU64>,
 }
 
 impl OperationQueue {
-    /// Create a new operation queue with the specified buffer size
-    pub fn new(buffer_size: usize) -> (Self, mpsc::Receiver<QueuedOperation>) {
+    /// Create a new operation queue with the specified buffer size.
+    ///
+    /// Returns the queue, receiver, and a shared generation counter that can be
+    /// passed to the operation worker for checking during audio operations.
+    pub fn new(buffer_size: usize) -> (Self, mpsc::Receiver<QueuedOperation>, Arc<AtomicU64>) {
         let (sender, receiver) = mpsc::channel(buffer_size);
-        (Self { sender }, receiver)
+        let audio_generation = Arc::new(AtomicU64::new(0));
+        (
+            Self {
+                sender,
+                audio_generation: audio_generation.clone(),
+            },
+            receiver,
+            audio_generation,
+        )
     }
 
-    /// Queue an operation for processing
+    /// Increment the audio generation counter to invalidate pending audio operations.
+    ///
+    /// This increments the generation counter which causes the operation worker
+    /// to skip any pending `SendAudio` operations with older generations.
+    /// Returns the new generation value.
+    pub fn cancel_audio(&self) -> u64 {
+        self.audio_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Get the current audio generation value.
+    ///
+    /// Used when queueing audio operations to stamp them with the current generation.
+    pub fn current_audio_generation(&self) -> u64 {
+        self.audio_generation.load(Ordering::Acquire)
+    }
+
+    /// Queue an operation for processing.
+    ///
+    /// For `SendAudio` operations, use `queue_audio` instead to properly stamp
+    /// the operation with the current generation.
     pub async fn queue(&self, operation: LiveKitOperation) -> Result<(), AppError> {
         let queued_op = QueuedOperation::new(operation);
         self.sender.send(queued_op).await.map_err(|e| {
             error!("Failed to queue operation: {}", e);
             AppError::InternalServerError("Operation queue is full or closed".to_string())
         })
+    }
+
+    /// Queue a SendAudio operation stamped with the current generation.
+    ///
+    /// This ensures the operation is properly tagged for staleness detection.
+    pub async fn queue_audio(
+        &self,
+        audio_data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<(), AppError>>,
+    ) -> Result<(), AppError> {
+        let generation = self.current_audio_generation();
+        let operation = LiveKitOperation::SendAudio {
+            audio_data,
+            response_tx,
+            generation,
+        };
+        self.queue(operation).await
     }
 
     /// Get the number of pending operations (approximate)
@@ -133,6 +187,7 @@ impl Clone for OperationQueue {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            audio_generation: self.audio_generation.clone(),
         }
     }
 }
@@ -212,6 +267,7 @@ mod tests {
         let op = LiveKitOperation::SendAudio {
             audio_data: vec![1, 2, 3],
             response_tx: tx,
+            generation: 0,
         };
 
         assert_eq!(op.priority(), OperationPriority::High);
@@ -298,6 +354,7 @@ mod tests {
         let op = LiveKitOperation::SendAudio {
             audio_data: vec![],
             response_tx: tx,
+            generation: 0,
         };
 
         stats.record_operation(&op, true, Duration::from_millis(10));
@@ -371,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_operation_queue_creation() {
-        let (queue, _receiver) = OperationQueue::new(100);
+        let (queue, _receiver, _audio_generation) = OperationQueue::new(100);
 
         // Queue should start with capacity
         // pending_count starts at 0 when no operations are queued
@@ -380,10 +437,142 @@ mod tests {
 
     #[tokio::test]
     async fn test_operation_queue_clone() {
-        let (queue, _receiver) = OperationQueue::new(100);
+        let (queue, _receiver, _audio_generation) = OperationQueue::new(100);
         let _cloned_queue = queue.clone();
 
         // Both queues should be usable
         assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_audio_generation_initial_state() {
+        let (queue, _receiver, audio_generation) = OperationQueue::new(100);
+
+        // Generation should start at 0
+        assert_eq!(queue.current_audio_generation(), 0);
+        assert_eq!(audio_generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_audio_generation_increments_on_cancel() {
+        let (queue, _receiver, audio_generation) = OperationQueue::new(100);
+
+        // First cancel increments to 1
+        let new_gen = queue.cancel_audio();
+        assert_eq!(new_gen, 1);
+        assert_eq!(queue.current_audio_generation(), 1);
+        assert_eq!(audio_generation.load(Ordering::Acquire), 1);
+
+        // Second cancel increments to 2
+        let new_gen = queue.cancel_audio();
+        assert_eq!(new_gen, 2);
+        assert_eq!(queue.current_audio_generation(), 2);
+        assert_eq!(audio_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn test_audio_generation_shared_between_queue_and_arc() {
+        let (queue, _receiver, audio_generation) = OperationQueue::new(100);
+
+        // Increment via queue, check via arc
+        queue.cancel_audio();
+        assert_eq!(audio_generation.load(Ordering::Acquire), 1);
+
+        // Increment via arc (simulating worker), check via queue
+        audio_generation.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(queue.current_audio_generation(), 2);
+    }
+
+    #[test]
+    fn test_audio_generation_cloned_queue() {
+        let (queue, _receiver, audio_generation) = OperationQueue::new(100);
+        let cloned_queue = queue.clone();
+
+        // Increment via original queue
+        queue.cancel_audio();
+
+        // Both queues and the arc should see the new generation
+        assert_eq!(queue.current_audio_generation(), 1);
+        assert_eq!(cloned_queue.current_audio_generation(), 1);
+        assert_eq!(audio_generation.load(Ordering::Acquire), 1);
+
+        // Increment via cloned queue
+        cloned_queue.cancel_audio();
+
+        // All should see the new generation
+        assert_eq!(queue.current_audio_generation(), 2);
+        assert_eq!(cloned_queue.current_audio_generation(), 2);
+        assert_eq!(audio_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn test_stale_generation_detection() {
+        let (queue, _receiver, audio_generation) = OperationQueue::new(100);
+
+        // Capture initial generation for an operation
+        let op_generation = queue.current_audio_generation();
+        assert_eq!(op_generation, 0);
+
+        // Simulate clear being called (increments generation)
+        queue.cancel_audio();
+        let current_gen = queue.current_audio_generation();
+        assert_eq!(current_gen, 1);
+
+        // The operation's generation is now stale
+        assert!(op_generation < current_gen);
+
+        // New operations after clear have current generation
+        let new_op_generation = queue.current_audio_generation();
+        assert_eq!(new_op_generation, current_gen);
+        assert!(new_op_generation >= current_gen);
+
+        // Verify via arc as well
+        assert!(op_generation < audio_generation.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_concurrent_cancel_calls() {
+        let (queue, _receiver, _audio_generation) = OperationQueue::new(100);
+
+        // Multiple cancel calls should each increment
+        let gen1 = queue.cancel_audio();
+        let gen2 = queue.cancel_audio();
+        let gen3 = queue.cancel_audio();
+
+        assert_eq!(gen1, 1);
+        assert_eq!(gen2, 2);
+        assert_eq!(gen3, 3);
+        assert_eq!(queue.current_audio_generation(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_queue_audio_stamps_generation() {
+        let (queue, mut receiver, _audio_generation) = OperationQueue::new(100);
+
+        // Queue audio at generation 0
+        let (tx1, _rx1) = oneshot::channel();
+        queue.queue_audio(vec![1, 2, 3], tx1).await.unwrap();
+
+        // Cancel to increment to generation 1
+        queue.cancel_audio();
+
+        // Queue audio at generation 1
+        let (tx2, _rx2) = oneshot::channel();
+        queue.queue_audio(vec![4, 5, 6], tx2).await.unwrap();
+
+        // Receive and verify generations
+        let queued_op1 = receiver.recv().await.unwrap();
+        if let LiveKitOperation::SendAudio { generation, .. } = queued_op1.operation {
+            assert_eq!(generation, 0);
+        } else {
+            panic!("Expected SendAudio operation");
+        }
+
+        let queued_op2 = receiver.recv().await.unwrap();
+        if let LiveKitOperation::SendAudio { generation, .. } = queued_op2.operation {
+            assert_eq!(generation, 1);
+        } else {
+            panic!("Expected SendAudio operation");
+        }
     }
 }

@@ -183,6 +183,25 @@ pub enum OutgoingMessage {
         /// Timestamp when completion occurred (milliseconds since epoch)
         timestamp: u64,
     },
+    /// VAD event notification
+    ///
+    /// Emitted when VAD detects speech activity changes:
+    /// - `speech_start`: User started speaking
+    /// - `silence_detected`: Brief silence detected
+    /// - `speech_resumed`: User resumed speaking after brief silence
+    /// - `turn_end`: Silence exceeded threshold, turn complete
+    #[serde(rename = "vad_event")]
+    VadEvent {
+        /// Event type: "speech_start", "silence_detected", "speech_resumed", "turn_end"
+        #[cfg_attr(feature = "openapi", schema(example = "turn_end"))]
+        event: String,
+        /// Timestamp when the event occurred (milliseconds since epoch)
+        #[cfg_attr(feature = "openapi", schema(example = 1704067200000_u64))]
+        timestamp_ms: u64,
+        /// Silence duration in milliseconds (only present for silence_detected and turn_end events)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        silence_duration_ms: Option<u64>,
+    },
     #[serde(rename = "error")]
     Error {
         /// Error message
@@ -385,5 +404,36 @@ mod tests {
         let json = serde_json::to_string(&error).expect("Should serialize");
         assert!(json.contains(r#""type":"sip_transfer_error""#));
         assert!(json.contains(r#""message":"Invalid phone number""#));
+    }
+
+    #[test]
+    fn test_vad_event_serialization() {
+        let event = OutgoingMessage::VadEvent {
+            event: "turn_end".to_string(),
+            timestamp_ms: 1704067200000,
+            silence_duration_ms: Some(350),
+        };
+
+        let json = serde_json::to_string(&event).expect("Should serialize");
+        assert!(json.contains(r#""type":"vad_event""#));
+        assert!(json.contains(r#""event":"turn_end""#));
+        assert!(json.contains(r#""timestamp_ms":1704067200000"#));
+        assert!(json.contains(r#""silence_duration_ms":350"#));
+    }
+
+    #[test]
+    fn test_vad_event_serialization_without_silence_duration() {
+        let event = OutgoingMessage::VadEvent {
+            event: "speech_start".to_string(),
+            timestamp_ms: 1704067200000,
+            silence_duration_ms: None,
+        };
+
+        let json = serde_json::to_string(&event).expect("Should serialize");
+        assert!(json.contains(r#""type":"vad_event""#));
+        assert!(json.contains(r#""event":"speech_start""#));
+        assert!(json.contains(r#""timestamp_ms":1704067200000"#));
+        // silence_duration_ms should be omitted
+        assert!(!json.contains("silence_duration_ms"));
     }
 }

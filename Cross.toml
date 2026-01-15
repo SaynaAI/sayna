@@ -15,7 +15,7 @@
 #   cross build --target aarch64-unknown-linux-gnu --release
 #
 # Note: This configuration is for the default build (no features enabled).
-# The turn-detect and noise-filter features require native dependencies
+# The stt-vad and noise-filter features require native dependencies
 # that are only included in Docker image builds.
 
 [build]
