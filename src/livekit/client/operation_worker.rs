@@ -5,11 +5,12 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use livekit::prelude::{LocalTrackPublication, Room};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     AudioCallback, DataCallback, LiveKitClient, LiveKitConfig, LiveKitOperation, OperationQueue,
@@ -29,11 +30,13 @@ pub(super) struct OperationContext {
     pub(super) audio_callback: Option<AudioCallback>,
     pub(super) data_callback: Option<DataCallback>,
     pub(super) participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
+    /// Generation counter - audio operations with lower generation are skipped
+    pub(super) audio_generation: Arc<AtomicU64>,
 }
 
 impl LiveKitClient {
     pub(super) async fn start_operation_worker(&mut self) {
-        let (queue, mut receiver) = OperationQueue::new(1024);
+        let (queue, mut receiver, audio_generation) = OperationQueue::new(1024);
         self.operation_queue = Some(queue);
 
         let context = OperationContext {
@@ -47,6 +50,7 @@ impl LiveKitClient {
             audio_callback: self.audio_callback.clone(),
             data_callback: self.data_callback.clone(),
             participant_disconnect_callback: self.participant_disconnect_callback.clone(),
+            audio_generation,
         };
         let stats = Arc::clone(&self.stats);
 
@@ -125,7 +129,18 @@ impl LiveKitClient {
             LiveKitOperation::SendAudio {
                 audio_data,
                 response_tx,
+                generation,
             } => {
+                // Skip if audio operation is stale (generation is older than current)
+                let current_gen = ctx.audio_generation.load(Ordering::Acquire);
+                if generation < current_gen {
+                    debug!(
+                        "Skipping stale SendAudio operation (gen {} < current {})",
+                        generation, current_gen
+                    );
+                    let _ = response_tx.send(Ok(()));
+                    return Ok(());
+                }
                 let result = LiveKitClient::process_send_audio(
                     audio_data,
                     &ctx.audio_queue,
@@ -177,6 +192,9 @@ impl LiveKitClient {
                     &ctx.is_connected,
                 )
                 .await;
+                // With generation-based staleness detection, no reset is needed.
+                // New audio operations will be stamped with current generation
+                // and will process normally.
                 let _ = response_tx.send(result);
             }
             LiveKitOperation::IsConnected { response_tx } => {

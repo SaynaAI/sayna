@@ -359,7 +359,7 @@ See [Configuration](#configuration) section for detailed field specifications.
 
 #### 4. Clear Message
 
-**Purpose:** Stop current TTS playback and clear queued audio.
+**Purpose:** Stop current TTS playback and clear all pending audio operations.
 
 **Structure:**
 ```json
@@ -368,12 +368,38 @@ See [Configuration](#configuration) section for detailed field specifications.
 }
 ```
 
-**Behavior:**
-- Clears TTS provider's audio queue
-- Clears LiveKit audio buffer (if connected)
-- Resets interruption guard to allow new TTS
-- **Ignored** if current playback has `allow_interruption=false`
-- Does NOT clear STT processing (only affects TTS)
+**What Gets Cleared:**
+1. **TTS Provider Queue** - All pending text waiting to be synthesized
+2. **TTS Provider Audio Buffer** - Any audio chunks waiting to be sent
+3. **LiveKit Audio Source Buffer** - NativeAudioSource internal buffer (if LiveKit connected)
+4. **Audio Frame Queue** - Pending audio frames not yet sent to WebRTC
+5. **Pending Audio Operations** - Queued operations in the operation worker
+
+**Response Behavior:**
+- The clear command is **fire-and-forget** - no response message is sent
+- Errors during clearing are logged server-side but not returned to client
+- Success is assumed unless an error message is received
+
+**Timing Guarantees:**
+- Cancellation is **immediate** for queued operations not yet in flight
+- Audio operations queued after the clear command will proceed normally
+- There may be a brief settling period (~10-50ms) where in-flight audio completes
+- **WebRTC transport buffers cannot be cleared retroactively** - audio frames already captured to WebRTC may still be transmitted to remote participants
+
+**Limitations:**
+- Does NOT clear STT processing (only affects TTS output)
+- Cannot stop audio that has already entered the WebRTC transport layer
+- When using LiveKit, participants may hear a small amount of audio after clear due to network latency
+
+**Non-Interruptible Audio Behavior:**
+If `allow_interruption: false` was set on the most recent speak command, the clear command will be **silently ignored** until the non-interruptible playback completes. This protects critical audio (alerts, legal disclaimers) from being interrupted.
+
+```javascript
+// Non-interruptible audio protection example
+{"type": "speak", "text": "Important legal notice...", "allow_interruption": false}
+// At this point, clear commands are ignored until playback completes
+{"type": "clear"}  // Ignored - no error, just silently skipped
+```
 
 **Use Cases:**
 ```javascript
@@ -383,7 +409,15 @@ See [Configuration](#configuration) section for detailed field specifications.
 
 // User clicks "Stop" button in UI
 {"type": "clear"}
+
+// Urgent message needs to interrupt current speech
+{"type": "clear"}
+{"type": "speak", "text": "URGENT: System alert!", "flush": true}
 ```
+
+**Implementation Notes:**
+- If audio processing is disabled (`audio=false` in config), the clear command only clears LiveKit audio buffers (if configured)
+- The clear operation acquires locks on audio resources, which may briefly delay concurrent audio operations
 
 ---
 

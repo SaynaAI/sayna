@@ -147,12 +147,7 @@ impl LiveKitClient {
 
         if let Some(queue) = &self.operation_queue {
             let (tx, rx) = oneshot::channel();
-            queue
-                .queue(LiveKitOperation::SendAudio {
-                    audio_data,
-                    response_tx: tx,
-                })
-                .await?;
+            queue.queue_audio(audio_data, tx).await?;
             rx.await.map_err(|_| {
                 AppError::InternalServerError("Operation worker disconnected".to_string())
             })?
@@ -170,6 +165,44 @@ impl LiveKitClient {
     }
 
     /// Clear any buffered audio data from the local source and queue.
+    ///
+    /// This method clears all pending audio that has not yet been transmitted,
+    /// allowing new audio to be sent without interference from previously
+    /// queued data.
+    ///
+    /// # What Gets Cleared
+    ///
+    /// 1. **NativeAudioSource Buffer** (`audio_source.clear_buffer()`)
+    ///    - Clears the internal buffer of the LiveKit audio source
+    ///    - Audio frames waiting to be captured to WebRTC are discarded
+    ///
+    /// 2. **Audio Frame Queue** (`audio_queue.clear()`)
+    ///    - Clears pending audio frames not yet sent to the audio source
+    ///    - These are frames queued when the source was busy or unavailable
+    ///
+    /// # Limitations
+    ///
+    /// - **WebRTC Transport Layer**: Audio frames already captured to the
+    ///   WebRTC transport cannot be cleared. Due to WebRTC buffering and
+    ///   network latency, a small amount of audio may still be transmitted
+    ///   to remote participants after this method returns.
+    ///
+    /// - **Network Latency**: Remote participants may hear audio for a brief
+    ///   period (~10-100ms depending on network conditions) after clearing.
+    ///
+    /// - This is a fundamental limitation of the WebRTC protocol, not this
+    ///   implementation. Once frames enter the transport layer, they are
+    ///   handled by the WebRTC stack.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is safe to call concurrently with `send_tts_audio()`.
+    /// When using the operation queue (default), the clear operation is
+    /// serialized with other audio operations to prevent race conditions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not connected to a LiveKit room.
     pub async fn clear_audio(&self) -> Result<(), AppError> {
         debug!("clear_audio requested");
 

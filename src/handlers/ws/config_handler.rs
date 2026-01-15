@@ -599,10 +599,7 @@ async fn register_final_tts_callback(
                 if let Some(queue) = operation_queue {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if queue
-                        .queue(crate::livekit::LiveKitOperation::SendAudio {
-                            audio_data: audio_data.data.clone(),
-                            response_tx: tx,
-                        })
+                        .queue_audio(audio_data.data.clone(), tx)
                         .await
                         .is_ok()
                     {
@@ -1098,6 +1095,12 @@ async fn register_audio_clear_callback(
             .on_audio_clear(move || {
                 let queue = queue_clone.clone();
                 Box::pin(async move {
+                    // FIRST: Cancel any pending audio operations synchronously
+                    // This sets an atomic flag that causes the operation worker
+                    // to skip any pending SendAudio operations immediately
+                    queue.cancel_audio();
+
+                    // THEN: Queue the clear operation
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if let Err(e) = queue
                         .queue(crate::livekit::LiveKitOperation::ClearAudio { response_tx: tx })
@@ -1105,7 +1108,7 @@ async fn register_audio_clear_callback(
                     {
                         warn!("Failed to queue clear audio operation: {:?}", e);
                     } else {
-                        // Wait for the operation to complete
+                        // Wait for the operation to complete (which will reset the flag)
                         match rx.await {
                             Ok(Ok(())) => {
                                 debug!("Cleared LiveKit audio buffer during interruption");

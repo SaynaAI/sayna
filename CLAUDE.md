@@ -173,8 +173,9 @@ See existing implementations for patterns:
 
 ### WebSocket
 - `/ws` - Real-time voice processing
-  - Receives: Config, audio data, speak commands
-  - Sends: Ready, STT results, TTS audio
+  - Receives: Config, audio data, speak commands, **clear command**, send_message, sip_transfer
+  - Sends: Ready, STT results, TTS audio, messages, participant events
+  - **Clear command**: Immediately stops TTS and clears audio buffers (fire-and-forget, respects `allow_interruption` setting)
 
 ### Webhooks
 - `POST /livekit/webhook` - LiveKit event receiver (signature verified)
