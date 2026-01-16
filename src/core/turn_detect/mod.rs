@@ -45,6 +45,9 @@ mod stub;
 pub use config::TurnDetectorConfig;
 
 #[cfg(feature = "stt-vad")]
+pub use config::MODEL_FILENAME;
+
+#[cfg(feature = "stt-vad")]
 pub use detector::{TurnDetector, TurnDetectorBuilder};
 
 #[cfg(feature = "stt-vad")]

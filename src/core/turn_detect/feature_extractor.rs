@@ -133,10 +133,17 @@ impl FeatureExtractor {
         Ok(normalized)
     }
 
-    /// Prepare audio by truncating or zero-padding.
+    /// Prepare audio by truncating or zero-padding following Whisper standard.
     ///
-    /// If audio is longer than max_samples, keeps the most recent audio.
-    /// If audio is shorter, pads with zeros at the beginning.
+    /// This follows the smart-turn model's expected input format (Whisper-style):
+    /// - **Short audio** (< 8 seconds): Pad with zeros at the BEGINNING so that
+    ///   the actual audio data is at the END of the input vector.
+    /// - **Long audio** (> 8 seconds): Truncate from the BEGINNING to keep the
+    ///   most recent 8 seconds of audio.
+    ///
+    /// Reference: <https://huggingface.co/pipecat-ai/smart-turn-v3>
+    /// > "If the user turn is less than 8 seconds, insert padding at the beginning"
+    /// > "If the user turn is greater than 8 seconds, trim 8 seconds from the beginning"
     fn prepare_audio(&self, audio: &[f32], max_samples: usize) -> Vec<f32> {
         if audio.len() > max_samples {
             // Truncate to last max_samples (keep most recent audio)
@@ -223,27 +230,40 @@ impl FeatureExtractor {
         Ok(mel_spec)
     }
 
-    /// Convert mel spectrogram to log scale.
+    /// Convert mel spectrogram to log scale and apply Whisper-style normalization.
     ///
-    /// Applies log10 with a small floor value to avoid log(0).
+    /// This implements the exact normalization from OpenAI Whisper:
+    /// 1. Clamp minimum value to 1e-10 to avoid log(0)
+    /// 2. Apply log10
+    /// 3. Clamp to max - 8.0 (equivalent to 80dB dynamic range)
+    /// 4. Normalize with (x + 4.0) / 4.0
+    ///
+    /// Reference: https://github.com/openai/whisper/blob/main/whisper/audio.py
     fn log_mel_spectrogram(&self, mel_spec: &Array2<f32>) -> Array2<f32> {
+        // Step 1 & 2: Clamp and apply log10
         let min_val = 1e-10f32;
-        mel_spec.mapv(|x| x.max(min_val).log10())
+        let mut log_spec = mel_spec.mapv(|x| x.max(min_val).log10());
+
+        // Step 3: Clamp to max - 8.0 (80dB dynamic range)
+        let max_val = log_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min_threshold = max_val - 8.0;
+        log_spec.mapv_inplace(|x| x.max(min_threshold));
+
+        // Step 4: Whisper normalization: (x + 4.0) / 4.0
+        log_spec.mapv_inplace(|x| (x + 4.0) / 4.0);
+
+        log_spec
     }
 
-    /// Normalize and resize mel spectrogram to model_frames.
+    /// Resize mel spectrogram to model_frames following Whisper standard.
     ///
-    /// Applies per-channel (Whisper-style) normalization and pads/truncates
-    /// the time dimension to match the expected model input size.
-    fn normalize_and_resize(&self, mut mel_spec: Array2<f32>) -> Result<Array2<f32>> {
-        // Per-channel normalization (Whisper style)
-        let mean = mel_spec.mean().unwrap_or(0.0);
-        let std = mel_spec.std(0.0);
-        let std = if std < 1e-6 { 1.0 } else { std };
-
-        mel_spec = (mel_spec - mean) / std;
-
-        // Resize to model_frames
+    /// This mirrors the audio padding/truncation strategy for mel frames:
+    /// - **Short spectrograms**: Pad with zeros at the BEGINNING (audio at end)
+    /// - **Long spectrograms**: Truncate from the BEGINNING (keep most recent frames)
+    ///
+    /// This ensures temporal alignment: the most recent audio/frames are always
+    /// at the end of the input, which is critical for turn detection accuracy.
+    fn normalize_and_resize(&self, mel_spec: Array2<f32>) -> Result<Array2<f32>> {
         let current_frames = mel_spec.dim().1;
 
         if current_frames == self.model_frames {
@@ -254,7 +274,7 @@ impl FeatureExtractor {
                 .slice(s![.., current_frames - self.model_frames..])
                 .to_owned())
         } else {
-            // Pad at the beginning with zeros
+            // Pad at the beginning with zeros (Whisper pads at start, audio at end)
             let mut padded = Array2::<f32>::zeros((self.n_mels, self.model_frames));
             let offset = self.model_frames - current_frames;
             padded.slice_mut(s![.., offset..]).assign(&mel_spec);
@@ -262,19 +282,23 @@ impl FeatureExtractor {
         }
     }
 
-    /// Create mel filterbank matrix.
+    /// Create mel filterbank matrix using Slaney's mel scale.
     ///
-    /// Creates triangular mel-frequency filterbank using the HTK mel scale formula.
+    /// Creates triangular mel-frequency filterbank matching librosa/Whisper conventions.
+    /// Uses Slaney's formula: linear below 1kHz, logarithmic above.
+    ///
+    /// Reference: Malcolm Slaney, "Auditory Toolbox", 1998
+    /// Also matches: https://librosa.org/doc/main/generated/librosa.filters.mel.html
     fn create_mel_filterbank(n_mels: usize, sample_rate: u32) -> Result<Array2<f32>> {
         let n_freqs = FFT_SIZE / 2 + 1;
         let mut filters = Array2::<f32>::zeros((n_mels, n_freqs));
 
-        // Mel scale parameters
+        // Mel scale parameters (matching Whisper: 0 to Nyquist)
         let f_min = 0.0f32;
         let f_max = (sample_rate / 2) as f32;
 
-        let mel_min = Self::hz_to_mel(f_min);
-        let mel_max = Self::hz_to_mel(f_max);
+        let mel_min = Self::hz_to_mel_slaney(f_min);
+        let mel_max = Self::hz_to_mel_slaney(f_max);
 
         // Create mel points (n_mels + 2 points for triangular filters)
         let mel_points: Vec<f32> = (0..=n_mels + 1)
@@ -282,30 +306,41 @@ impl FeatureExtractor {
             .collect();
 
         // Convert back to Hz and then to FFT bin indices
-        let hz_points: Vec<f32> = mel_points.iter().map(|&m| Self::mel_to_hz(m)).collect();
+        let hz_points: Vec<f32> = mel_points
+            .iter()
+            .map(|&m| Self::mel_to_hz_slaney(m))
+            .collect();
 
         let bin_points: Vec<usize> = hz_points
             .iter()
             .map(|&hz| ((FFT_SIZE as f32 + 1.0) * hz / (sample_rate as f32)).floor() as usize)
             .collect();
 
-        // Create triangular filters
+        // Create triangular filters with Slaney normalization (area normalization)
         for i in 0..n_mels {
             let start = bin_points[i];
             let center = bin_points[i + 1];
             let end = bin_points[i + 2];
 
+            // Slaney-style area normalization: divide by mel bandwidth
+            let mel_width = mel_points[i + 2] - mel_points[i];
+            let norm = if mel_width > 0.0 {
+                2.0 / mel_width
+            } else {
+                1.0
+            };
+
             // Rising slope (from start to center)
             for k in start..center {
                 if k < n_freqs && center > start {
-                    filters[[i, k]] = (k - start) as f32 / (center - start) as f32;
+                    filters[[i, k]] = norm * (k - start) as f32 / (center - start) as f32;
                 }
             }
 
             // Falling slope (from center to end)
             for k in center..end {
                 if k < n_freqs && end > center {
-                    filters[[i, k]] = (end - k) as f32 / (end - center) as f32;
+                    filters[[i, k]] = norm * (end - k) as f32 / (end - center) as f32;
                 }
             }
         }
@@ -321,13 +356,47 @@ impl FeatureExtractor {
         )
     }
 
+    /// Slaney's mel scale constants.
+    /// Linear below 1kHz, logarithmic above.
+    const F_SP: f32 = 200.0 / 3.0; // ~66.67 Hz per mel below 1kHz
+    const MIN_LOG_HZ: f32 = 1000.0; // Transition frequency
+    const MIN_LOG_MEL: f32 = 15.0; // Mel value at transition (1000 / F_SP)
+    const LOG_STEP: f32 = 0.068751777; // ln(6.4) / 27 ≈ 0.0687 mels per step above 1kHz
+
+    /// Convert frequency in Hz to mel scale (Slaney formula).
+    ///
+    /// Linear below 1kHz: mel = hz / F_SP
+    /// Logarithmic above: mel = MIN_LOG_MEL + ln(hz / MIN_LOG_HZ) / LOG_STEP
+    ///
+    /// This matches librosa's default mel scale and Whisper's mel filterbank.
+    fn hz_to_mel_slaney(hz: f32) -> f32 {
+        if hz < Self::MIN_LOG_HZ {
+            hz / Self::F_SP
+        } else {
+            Self::MIN_LOG_MEL + (hz / Self::MIN_LOG_HZ).ln() / Self::LOG_STEP
+        }
+    }
+
+    /// Convert mel scale to frequency in Hz (Slaney formula).
+    fn mel_to_hz_slaney(mel: f32) -> f32 {
+        if mel < Self::MIN_LOG_MEL {
+            mel * Self::F_SP
+        } else {
+            Self::MIN_LOG_HZ * ((mel - Self::MIN_LOG_MEL) * Self::LOG_STEP).exp()
+        }
+    }
+
     /// Convert frequency in Hz to mel scale (HTK formula).
-    fn hz_to_mel(hz: f32) -> f32 {
+    /// Kept for reference/testing purposes.
+    #[allow(dead_code)]
+    fn hz_to_mel_htk(hz: f32) -> f32 {
         2595.0 * (1.0 + hz / 700.0).log10()
     }
 
     /// Convert mel scale to frequency in Hz (HTK formula).
-    fn mel_to_hz(mel: f32) -> f32 {
+    /// Kept for reference/testing purposes.
+    #[allow(dead_code)]
+    fn mel_to_hz_htk(mel: f32) -> f32 {
         700.0 * (10.0f32.powf(mel / 2595.0) - 1.0)
     }
 }
@@ -341,32 +410,75 @@ mod tests {
     }
 
     #[test]
-    fn test_hz_to_mel_conversion() {
-        // Test known conversion values (HTK mel scale)
-        assert!((FeatureExtractor::hz_to_mel(0.0) - 0.0).abs() < 0.01);
-
-        // At 1000 Hz, mel value should be approximately 1000 (by design of HTK formula)
-        let mel_1000 = FeatureExtractor::hz_to_mel(1000.0);
+    fn test_hz_to_mel_slaney_conversion() {
+        // Test Slaney mel scale conversion
+        // At 0 Hz, mel should be 0
         assert!(
-            (mel_1000 - 999.985).abs() < 1.0,
-            "mel(1000Hz) = {}, expected ~1000",
+            (FeatureExtractor::hz_to_mel_slaney(0.0) - 0.0).abs() < 0.01,
+            "mel(0Hz) should be 0"
+        );
+
+        // At 1000 Hz (transition point), mel should be 15 (1000 / 66.67)
+        let mel_1000 = FeatureExtractor::hz_to_mel_slaney(1000.0);
+        assert!(
+            (mel_1000 - 15.0).abs() < 0.1,
+            "mel(1000Hz) = {}, expected ~15.0 (Slaney scale)",
             mel_1000
+        );
+
+        // Below 1kHz, should be linear: mel = hz / 66.67
+        let mel_500 = FeatureExtractor::hz_to_mel_slaney(500.0);
+        assert!(
+            (mel_500 - 7.5).abs() < 0.1,
+            "mel(500Hz) = {}, expected ~7.5 (linear region)",
+            mel_500
+        );
+
+        // Above 1kHz, should be logarithmic
+        let mel_4000 = FeatureExtractor::hz_to_mel_slaney(4000.0);
+        assert!(
+            mel_4000 > 15.0,
+            "mel(4000Hz) = {} should be > 15.0 (log region)",
+            mel_4000
         );
     }
 
     #[test]
-    fn test_mel_to_hz_roundtrip() {
-        let test_frequencies = [0.0, 100.0, 500.0, 1000.0, 4000.0, 8000.0];
+    fn test_mel_to_hz_slaney_roundtrip() {
+        let test_frequencies = [0.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
         for &hz in &test_frequencies {
-            let mel = FeatureExtractor::hz_to_mel(hz);
-            let hz_back = FeatureExtractor::mel_to_hz(mel);
+            let mel = FeatureExtractor::hz_to_mel_slaney(hz);
+            let hz_back = FeatureExtractor::mel_to_hz_slaney(mel);
             assert!(
-                (hz - hz_back).abs() < 0.01,
-                "Roundtrip failed for {} Hz: got {} Hz",
+                (hz - hz_back).abs() < 0.5,
+                "Slaney roundtrip failed for {} Hz: got {} Hz",
                 hz,
                 hz_back
             );
         }
+    }
+
+    #[test]
+    fn test_htk_mel_scale_reference() {
+        // Test HTK formula (kept for reference)
+        // At 1000 Hz, HTK mel value should be approximately 1000
+        let mel_1000 = FeatureExtractor::hz_to_mel_htk(1000.0);
+        assert!(
+            (mel_1000 - 999.985).abs() < 1.0,
+            "HTK mel(1000Hz) = {}, expected ~1000",
+            mel_1000
+        );
+
+        // Roundtrip test for HTK
+        let hz = 4000.0;
+        let mel = FeatureExtractor::hz_to_mel_htk(hz);
+        let hz_back = FeatureExtractor::mel_to_hz_htk(mel);
+        assert!(
+            (hz - hz_back).abs() < 0.01,
+            "HTK roundtrip failed for {} Hz: got {} Hz",
+            hz,
+            hz_back
+        );
     }
 
     #[test]
@@ -550,12 +662,11 @@ mod tests {
     }
 
     #[test]
-    fn test_normalization() {
+    fn test_whisper_normalization() {
         let config = create_test_config();
         let extractor = FeatureExtractor::new(&config).unwrap();
 
         // Create 8 seconds of audio (full duration) to avoid zero-padding
-        // which would affect normalization stats
         let max_samples =
             (config.sample_rate as usize) * (config.max_audio_duration_seconds as usize);
         let audio: Vec<f32> = (0..max_samples)
@@ -564,21 +675,43 @@ mod tests {
 
         let mel_spec = extractor.extract_from_f32(&audio).unwrap();
 
-        // After normalization, mean should be close to 0 and std close to 1
-        // Note: With resize/truncation the stats may shift slightly
-        let mean = mel_spec.mean().unwrap();
-        let std = mel_spec.std(0.0);
+        // Whisper normalization: (log10(x) + 4.0) / 4.0 with max-8.0 clamping
+        // The normalization puts log mel values into a usable range for the model.
+        //
+        // For mel spectrogram magnitude values:
+        // - Typical range after mel filters: 1e-10 to ~100
+        // - log10 range: -10 to 2
+        // - After max-8 clamping: max_val to max_val - 8
+        // - After (x+4)/4: roughly centered around 0 to 1.5
+        let max_val = mel_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min_val = mel_spec.iter().cloned().fold(f32::INFINITY, f32::min);
 
-        // Allow more tolerance since resize may truncate some frames
+        // Whisper's normalization doesn't strictly bound values to [-1, 1]
+        // The key property is the max-8 clamping limits dynamic range to 8 log10 units
+        // After (x+4)/4 normalization, the dynamic range becomes 8/4 = 2.0
+        let dynamic_range = max_val - min_val;
         assert!(
-            mean.abs() < 0.1,
-            "Normalized mean should be ~0, got {}",
-            mean
+            dynamic_range <= 2.1,
+            "Dynamic range should be <= 2.0 due to max-8 clamping, got {}",
+            dynamic_range
+        );
+
+        // Values should be in a reasonable range (not extreme)
+        assert!(
+            max_val <= 2.0,
+            "Max value should be <= 2.0, got {}",
+            max_val
         );
         assert!(
-            (std - 1.0).abs() < 0.1,
-            "Normalized std should be ~1, got {}",
-            std
+            min_val >= -1.0,
+            "Min value should be >= -1.0 after max-8 clamping, got {}",
+            min_val
+        );
+
+        // Values should not be NaN or infinite
+        assert!(
+            !mel_spec.iter().any(|v| v.is_nan() || v.is_infinite()),
+            "Mel spectrogram should not contain NaN or infinite values"
         );
     }
 

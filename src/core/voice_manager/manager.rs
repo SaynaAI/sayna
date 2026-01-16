@@ -64,11 +64,28 @@ pub struct VoiceManager {
     // Silence tracker for VAD output
     silence_tracker: Arc<SilenceTracker>,
 
-    // Buffer for accumulating audio samples for turn detection
-    // This buffer accumulates ALL samples during an utterance and is cleared after speech_final
+    // Buffer for accumulating audio samples for turn detection.
+    //
+    // Per smart-turn best practices: "run Smart Turn on the entire recording of the user's turn"
+    // This buffer accumulates ALL samples during an utterance so that when silence is detected,
+    // the turn detection model can analyze the complete context (up to 8 seconds).
+    //
+    // Lifecycle:
+    // - SpeechStart: Buffer is cleared (new utterance starting)
+    // - During speech: All audio samples are appended
+    // - TurnEnd: Buffer contents passed to smart-turn model for analysis
+    // - After speech_final: Buffer is cleared
     vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
 
-    // Temporary buffer for VAD frame processing (accumulates partial frames between calls)
+    // Temporary buffer for VAD frame processing.
+    //
+    // This buffer accumulates partial frames between `receive_audio` calls. VAD requires
+    // complete frames (e.g., 512 samples at 16kHz = 32ms) for inference. Since audio
+    // may arrive in arbitrary chunk sizes, we accumulate samples here and drain
+    // complete frames for VAD processing.
+    //
+    // Note: This is separate from vad_audio_buffer - this buffer is drained as frames
+    // are processed, while vad_audio_buffer accumulates the entire utterance.
     vad_frame_buffer: Arc<SyncRwLock<Vec<i16>>>,
 
     // Interruption control - mostly lock-free with atomics

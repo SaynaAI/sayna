@@ -2,6 +2,17 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Filename of the smart-turn ONNX model
+pub const MODEL_FILENAME: &str = "smart-turn-v3.2-cpu.onnx";
+
+/// Base URL for downloading smart-turn models from HuggingFace
+const MODEL_BASE_URL: &str = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main";
+
+/// Returns the default model download URL
+fn default_model_url() -> String {
+    format!("{}/{}", MODEL_BASE_URL, MODEL_FILENAME)
+}
+
 /// Default number of mel frequency bins (Whisper standard configuration)
 pub const DEFAULT_MEL_BINS: usize = 80;
 
@@ -32,10 +43,7 @@ impl Default for TurnDetectorConfig {
             mel_bins: DEFAULT_MEL_BINS,
             mel_frames: DEFAULT_MEL_FRAMES,
             model_path: None,
-            model_url: Some(
-                "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx"
-                    .to_string(),
-            ),
+            model_url: Some(default_model_url()),
             cache_path: None,
             use_quantized: true,
             num_threads: Some(4),

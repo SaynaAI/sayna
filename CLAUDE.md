@@ -85,18 +85,49 @@ Always consult these rule files when implementing new features.
 
 When `stt-vad` feature is enabled, Sayna provides both Silero-VAD for audio-level silence detection and smart-turn v3 model for semantic turn detection. Both features are always bundled together under the `stt-vad` feature flag.
 
+**Why Use Both VAD and Smart-Turn?**
+
+VAD (Silero) provides:
+- Fast, efficient silence detection (~2ms per frame)
+- Low latency feedback on speech activity
+- Immediate signal when user stops speaking
+
+Smart-Turn provides:
+- Semantic understanding of turn completion
+- Higher accuracy (>90% for most languages)
+- Context-aware decision making
+
+**Combined Pattern**: VAD detects silence first (fast, cheap), then smart-turn confirms if the turn is semantically complete (more accurate, slightly slower). This two-stage approach provides both speed and accuracy.
+
 **How it works:**
+```
+Audio In -> VAD -> SilenceTracker -> TurnEnd Event -> Smart-Turn -> speech_final
+                         ^                               |
+                         |                               |
+                         +-- If false, reset and wait ---+
+```
+
 1. Audio frames are processed through Silero-VAD ONNX model
 2. When configurable silence threshold (default: 300ms) is detected, the smart-turn model is triggered
 3. The smart-turn model analyzes the accumulated audio to confirm if the turn is complete
 4. If confirmed, an artificial `speech_final` event is emitted
+5. If smart-turn returns false (turn incomplete), the system resets and waits for the next silence detection
 
 **Smart-Turn Model:**
 - Model: [pipecat-ai/smart-turn-v3](https://huggingface.co/pipecat-ai/smart-turn-v3)
+- Version: `smart-turn-v3.2-cpu.onnx` (quantized int8)
 - Input: Up to 8 seconds of 16kHz mono PCM audio
+- Input Format: Mel spectrogram (1, 80, 800) via Whisper-style preprocessing
 - Output: Probability that the speaker has finished their turn (0.0-1.0)
 - Architecture: Whisper Tiny encoder + linear classifier (~8M parameters)
-- Inference: ~12ms on CPU (quantized int8 model)
+- Performance: Feature extraction ~10-30ms + model inference ~12-20ms = ~50ms total (release build)
+
+**Mel Spectrogram Parameters (Whisper Standard):**
+- Sample Rate: 16000 Hz
+- FFT Size: 400
+- Hop Length: 160
+- Mel Bins: 80
+- Max Frames: 800 (8 seconds)
 
 **Configuration:**
 ```yaml
@@ -107,6 +138,11 @@ vad:
 
 turn_detect:
   threshold: 0.5              # Turn completion probability threshold (0.0-1.0)
+  num_threads: 4              # ONNX inference threads (default: 4)
+  # Advanced options (rarely need changing):
+  # model_path: /path/to/model.onnx  # Override model location
+  # model_url: https://...           # Override download URL
+  # use_quantized: true              # Use int8 quantized model (default: true)
 ```
 
 > **Note:** When `stt-vad` is compiled, VAD and turn detection are always active. There is no runtime `enabled` toggle.
@@ -198,6 +234,8 @@ See [docs/](docs/) for detailed API documentation.
 - `src/core/voice_manager/stt_result.rs`: STT result processing with VAD integration
 - `src/core/vad/detector.rs`: Silero-VAD detector (feature-gated: `stt-vad`)
 - `src/core/vad/silence_tracker.rs`: Silence duration tracking for turn detection
+- `src/core/turn_detect/assets.rs`: Model download and hash verification for smart-turn (feature-gated: `stt-vad`)
+- `src/core/turn_detect/config.rs`: Configuration and constants for smart-turn detection
 - `src/core/turn_detect/detector.rs`: Smart-turn audio-based turn detection (feature-gated: `stt-vad`)
 - `src/core/turn_detect/feature_extractor.rs`: Mel spectrogram extraction for smart-turn (feature-gated: `stt-vad`)
 - `src/core/turn_detect/model_manager.rs`: ONNX model management for smart-turn (feature-gated: `stt-vad`)

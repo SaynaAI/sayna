@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio::fs;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::core::turn_detect::config::TurnDetectorConfig;
+use crate::core::turn_detect::config::{MODEL_FILENAME, TurnDetectorConfig};
 
-const MODEL_FILENAME: &str = "smart-turn-v3.1.onnx";
+/// SHA-256 hash of smart-turn-v3.2-cpu.onnx model file for integrity verification
+const MODEL_HASH: &str = "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f";
 
 /// Download smart-turn model if not already cached.
 pub async fn download_assets(config: &TurnDetectorConfig) -> Result<()> {
@@ -98,7 +99,7 @@ async fn download_file(url: &str, path: &Path) -> Result<()> {
     let bytes = response.bytes().await?;
 
     if let Some(expected_hash) = get_expected_hash(url) {
-        verify_hash(&bytes, &expected_hash)?;
+        verify_hash(&bytes, expected_hash)?;
     }
 
     fs::write(path, bytes).await?;
@@ -107,9 +108,9 @@ async fn download_file(url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn get_expected_hash(url: &str) -> Option<String> {
+fn get_expected_hash(url: &str) -> Option<&'static str> {
     if url.contains(MODEL_FILENAME) {
-        Some("expected_hash_here".to_string())
+        Some(MODEL_HASH)
     } else {
         None
     }
@@ -123,9 +124,10 @@ fn verify_hash(data: &[u8], expected: &str) -> Result<()> {
     let actual = format!("{:x}", hasher.finalize());
 
     if actual != expected {
-        warn!(
+        anyhow::bail!(
             "Smart-turn artifact hash mismatch - expected: {}, actual: {}",
-            expected, actual
+            expected,
+            actual
         );
     }
 

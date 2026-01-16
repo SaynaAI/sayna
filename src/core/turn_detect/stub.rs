@@ -112,6 +112,11 @@ impl TurnDetectorBuilder {
         self
     }
 
+    pub fn cache_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.cache_path = Some(path.into());
+        self
+    }
+
     pub async fn build(self) -> Result<TurnDetector> {
         TurnDetector::with_config(self.config).await
     }

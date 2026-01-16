@@ -311,3 +311,5 @@ pub use callbacks::{
 pub use config::{SpeechFinalConfig, VoiceManagerConfig};
 pub use errors::{VoiceManagerError, VoiceManagerResult};
 pub use manager::VoiceManager;
+pub use state::SpeechFinalState;
+pub use stt_result::{STTProcessingConfig, STTResultProcessor};

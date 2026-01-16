@@ -28,6 +28,51 @@
 //!
 //! VAD mode provides faster and more accurate turn detection by analyzing
 //! actual audio-level silence rather than relying on timeouts.
+//!
+//! ## VAD + Smart-Turn Integration Pattern
+//!
+//! The integration follows best practices from the smart-turn documentation:
+//!
+//! ### Why Use Both VAD and Smart-Turn?
+//!
+//! **VAD (Silero)** provides:
+//! - Fast, efficient silence detection (~2ms per frame)
+//! - Low latency feedback on speech activity
+//! - Immediate signal when user stops speaking
+//!
+//! **Smart-Turn** provides:
+//! - Semantic understanding of turn completion
+//! - Higher accuracy (>90% for most languages)
+//! - Context-aware decision making
+//!
+//! **Combined Pattern**: VAD detects silence first (fast, cheap), then smart-turn
+//! confirms if the turn is semantically complete (more accurate, slightly slower).
+//!
+//! ### How It Works
+//!
+//! ```text
+//! Audio In ─► VAD ─► SilenceTracker ─► TurnEnd Event ─► Smart-Turn ─► speech_final
+//!                          ▲                               │
+//!                          │                               │
+//!                          └── If false, reset and wait ───┘
+//! ```
+//!
+//! 1. **VAD monitors silence**: Silero-VAD continuously processes audio frames
+//! 2. **TurnEnd triggers smart-turn**: When silence exceeds threshold, we run smart-turn
+//! 3. **Smart-turn sees full context**: The model receives ALL accumulated audio
+//! 4. **Rejection allows retry**: If smart-turn returns false, we reset and wait
+//!
+//! ### Audio Buffer Management
+//!
+//! - `SpeechStart`: Clear buffer (new utterance starting)
+//! - `SpeechResumed`: Keep buffer (same utterance continues)
+//! - `TurnEnd`: Pass buffer to smart-turn
+//! - After `speech_final`: Clear buffer
+//!
+//! ### Why This Pattern?
+//!
+//! Smart-turn needs context and "is not designed to run on very short audio segments."
+//! Running it on the entire accumulated turn (up to 8 seconds) provides the best accuracy.
 
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;

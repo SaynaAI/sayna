@@ -31,7 +31,7 @@ use anyhow::anyhow;
 #[cfg(feature = "stt-vad")]
 use crate::config::ServerConfig;
 #[cfg(feature = "stt-vad")]
-use crate::core::turn_detect::{TurnDetectorConfig, assets as turn_assets};
+use crate::core::turn_detect::{MODEL_FILENAME, TurnDetectorConfig, assets as turn_assets};
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SileroVADConfig, assets as vad_assets};
 #[cfg(feature = "stt-vad")]
@@ -67,7 +67,8 @@ pub async fn run() -> Result<()> {
             Err(e) => {
                 tracing::error!("Failed to download smart-turn model: {}", e);
                 tracing::error!(
-                    "You can manually download from: https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.1.onnx"
+                    "You can manually download from: https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/{}",
+                    MODEL_FILENAME
                 );
                 tracing::error!("And place it at: {:?}", cache_path.join("turn_detect"));
                 return Err(e);
@@ -113,7 +114,7 @@ async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
 
     #[cfg(feature = "stt-vad")]
     {
-        let model_path = cache_path.join("turn_detect/smart-turn-v3.1.onnx");
+        let model_path = cache_path.join(format!("turn_detect/{}", MODEL_FILENAME));
         if !model_path.exists() {
             anyhow::bail!(
                 "Smart-turn model missing at {:?}. Download may have failed.",
