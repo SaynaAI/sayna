@@ -64,8 +64,12 @@ pub struct VoiceManager {
     // Silence tracker for VAD output
     silence_tracker: Arc<SilenceTracker>,
 
-    // Buffer for accumulating audio samples for VAD processing
+    // Buffer for accumulating audio samples for turn detection
+    // This buffer accumulates ALL samples during an utterance and is cleared after speech_final
     vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+
+    // Temporary buffer for VAD frame processing (accumulates partial frames between calls)
+    vad_frame_buffer: Arc<SyncRwLock<Vec<i16>>>,
 
     // Interruption control - mostly lock-free with atomics
     interruption_state: Arc<InterruptionState>,
@@ -161,9 +165,17 @@ impl VoiceManager {
         );
         let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
 
-        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
-        const VAD_BUFFER_CAPACITY: usize = 16000;
-        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
+        // Initialize VAD audio buffer with capacity for 8 seconds of audio at 16kHz (max for turn detection)
+        const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8;
+        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(
+            VAD_AUDIO_BUFFER_CAPACITY,
+        )));
+
+        // Initialize VAD frame buffer with capacity for one frame (512 samples typical)
+        const VAD_FRAME_BUFFER_CAPACITY: usize = 512;
+        let vad_frame_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(
+            VAD_FRAME_BUFFER_CAPACITY,
+        )));
 
         // Create STT processor with VAD enabled (feature is compiled in)
         let processing_config = STTProcessingConfig::with_vad(vad_config.silence_duration_ms)
@@ -199,6 +211,7 @@ impl VoiceManager {
             vad,
             silence_tracker,
             vad_audio_buffer,
+            vad_frame_buffer,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -235,9 +248,17 @@ impl VoiceManager {
         );
         let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
 
-        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
-        const VAD_BUFFER_CAPACITY: usize = 16000;
-        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
+        // Initialize VAD audio buffer with capacity for 8 seconds of audio at 16kHz (max for turn detection)
+        const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8;
+        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(
+            VAD_AUDIO_BUFFER_CAPACITY,
+        )));
+
+        // Initialize VAD frame buffer with capacity for one frame (512 samples typical)
+        const VAD_FRAME_BUFFER_CAPACITY: usize = 512;
+        let vad_frame_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(
+            VAD_FRAME_BUFFER_CAPACITY,
+        )));
 
         // Create STT processor with timeout-based approach (no VAD feature)
         let processing_config = STTProcessingConfig::new(
@@ -277,6 +298,7 @@ impl VoiceManager {
             stt_result_processor,
             silence_tracker,
             vad_audio_buffer,
+            vad_frame_buffer,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -383,6 +405,10 @@ impl VoiceManager {
         self.silence_tracker.reset();
         {
             let mut buffer = self.vad_audio_buffer.write();
+            buffer.clear();
+        }
+        {
+            let mut buffer = self.vad_frame_buffer.write();
             buffer.clear();
         }
 
@@ -505,8 +531,10 @@ impl VoiceManager {
 
     /// Process audio through Silero-VAD for silence detection
     ///
-    /// This method converts raw PCM bytes to i16 samples, accumulates them
-    /// in a buffer, and processes complete frames through the VAD model.
+    /// This method converts raw PCM bytes to i16 samples and:
+    /// 1. Accumulates ALL samples in `vad_audio_buffer` for turn detection
+    /// 2. Processes complete frames through VAD using `vad_frame_buffer`
+    ///
     /// VAD events are fed to the SilenceTracker which triggers speech_final
     /// when silence exceeds the configured threshold.
     #[cfg(feature = "stt-vad")]
@@ -527,18 +555,24 @@ impl VoiceManager {
             vad_guard.frame_size()
         };
 
-        // Extract complete frames from buffer synchronously to avoid holding lock across await
+        // Accumulate samples in vad_audio_buffer for turn detection (never drained here)
+        {
+            let mut audio_buffer = self.vad_audio_buffer.write();
+            audio_buffer.extend_from_slice(&samples);
+        }
+
+        // Extract complete frames from vad_frame_buffer for VAD processing
         let frames_to_process: Vec<Vec<i16>> = {
-            let mut buffer = self.vad_audio_buffer.write();
-            buffer.extend_from_slice(&samples);
+            let mut frame_buffer = self.vad_frame_buffer.write();
+            frame_buffer.extend_from_slice(&samples);
 
             let mut frames = Vec::new();
-            while buffer.len() >= frame_size {
-                let frame: Vec<i16> = buffer.drain(..frame_size).collect();
+            while frame_buffer.len() >= frame_size {
+                let frame: Vec<i16> = frame_buffer.drain(..frame_size).collect();
                 frames.push(frame);
             }
             frames
-        }; // Buffer lock released here
+        }; // Frame buffer lock released here
 
         // Process frames through VAD (without holding buffer lock)
         for frame in frames_to_process {

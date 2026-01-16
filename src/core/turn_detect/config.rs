@@ -2,15 +2,21 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Default number of mel frequency bins (Whisper standard configuration)
+pub const DEFAULT_MEL_BINS: usize = 80;
+
+/// Default number of mel spectrogram time frames
+pub const DEFAULT_MEL_FRAMES: usize = 800;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnDetectorConfig {
     pub threshold: f32,
-    pub max_context_turns: usize,
-    pub max_sequence_length: usize,
+    pub sample_rate: u32,
+    pub max_audio_duration_seconds: u8,
+    pub mel_bins: usize,
+    pub mel_frames: usize,
     pub model_path: Option<PathBuf>,
     pub model_url: Option<String>,
-    pub tokenizer_path: Option<PathBuf>,
-    pub tokenizer_url: Option<String>,
     pub cache_path: Option<PathBuf>,
     pub use_quantized: bool,
     pub num_threads: Option<usize>,
@@ -20,18 +26,14 @@ pub struct TurnDetectorConfig {
 impl Default for TurnDetectorConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.7,
-            max_context_turns: 4,
-            max_sequence_length: 512,
+            threshold: 0.5,
+            sample_rate: 16000,
+            max_audio_duration_seconds: 8,
+            mel_bins: DEFAULT_MEL_BINS,
+            mel_frames: DEFAULT_MEL_FRAMES,
             model_path: None,
-            // Use the LiveKit model - it outputs language model logits
             model_url: Some(
-                "https://huggingface.co/livekit/turn-detector/resolve/main/model_quantized.onnx"
-                    .to_string(),
-            ),
-            tokenizer_path: None,
-            tokenizer_url: Some(
-                "https://huggingface.co/livekit/turn-detector/resolve/main/tokenizer.json"
+                "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx"
                     .to_string(),
             ),
             cache_path: None,
@@ -71,33 +73,6 @@ impl GraphOptimizationLevel {
             Self::Basic => OrtLevel::Level1,
             Self::Extended => OrtLevel::Level2,
             Self::Level3 => OrtLevel::Level3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    pub threshold: f32,
-    pub max_context_turns: usize,
-    pub max_sequence_length: usize,
-    pub model_revision: String,
-    pub tokenizer_revision: String,
-    pub language_thresholds: std::collections::HashMap<String, f32>,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        let mut language_thresholds = std::collections::HashMap::new();
-        language_thresholds.insert("en".to_string(), 0.7);
-        language_thresholds.insert("multilingual".to_string(), 0.7);
-
-        Self {
-            threshold: 0.7,
-            max_context_turns: 4,
-            max_sequence_length: 512,
-            model_revision: "main".to_string(),
-            tokenizer_revision: "main".to_string(),
-            language_thresholds,
         }
     }
 }

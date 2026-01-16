@@ -23,7 +23,8 @@ use crate::{
 
 use super::{
     config::{
-        LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, compute_tts_config_hash,
+        LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, TurnDetectConfigUpdate,
+        VADConfigUpdate, compute_tts_config_hash,
     },
     messages::{MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
     state::ConnectionState,
@@ -1156,6 +1157,79 @@ async fn register_audio_clear_callback(
             warn!("Failed to register audio clear callback: {:?}", e);
         }
     }
+}
+
+/// Handle runtime configuration update message
+///
+/// This function processes configuration updates for VAD and turn detection
+/// parameters during an active WebSocket session.
+///
+/// # Arguments
+/// * `vad_config` - Optional VAD configuration updates
+/// * `turn_detect_config` - Optional turn detection configuration updates
+/// * `message_tx` - Channel for sending response messages
+/// * `app_state` - Application state containing the shared turn detector
+///
+/// # Returns
+/// * `bool` - true to continue processing, false to terminate connection
+#[allow(unused_variables)]
+pub async fn handle_update_config_message(
+    vad_config: Option<VADConfigUpdate>,
+    turn_detect_config: Option<TurnDetectConfigUpdate>,
+    message_tx: &mpsc::Sender<MessageRoute>,
+    app_state: &Arc<AppState>,
+) -> bool {
+    // Handle turn detection threshold update
+    #[cfg(feature = "stt-vad")]
+    if let Some(turn_config) = turn_detect_config
+        && let Some(threshold) = turn_config.threshold
+    {
+        // Validate threshold range
+        if !(0.0..=1.0).contains(&threshold) {
+            warn!(
+                "Invalid turn detection threshold: {}. Must be between 0.0 and 1.0",
+                threshold
+            );
+            let _ = message_tx
+                .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                    message: format!(
+                        "Invalid turn detection threshold: {}. Must be between 0.0 and 1.0",
+                        threshold
+                    ),
+                }))
+                .await;
+            return true;
+        }
+
+        // Update turn detector threshold
+        if let Some(detector) = app_state.core_state.get_turn_detector() {
+            let mut detector_guard = detector.write().await;
+            detector_guard.set_threshold(threshold);
+            info!(
+                "Turn detection threshold updated to {:.2}",
+                detector_guard.get_threshold()
+            );
+        } else {
+            debug!("Turn detector not available - threshold update ignored");
+        }
+    }
+
+    // Handle VAD configuration update
+    // Note: silence_duration_ms would require updates to the SilenceTracker
+    // which is per-VoiceManager instance. For now, we log and acknowledge.
+    #[cfg(feature = "stt-vad")]
+    if let Some(vad) = vad_config
+        && let Some(silence_duration_ms) = vad.silence_duration_ms
+    {
+        debug!(
+            "VAD silence_duration_ms update requested: {}ms (per-session updates not yet implemented)",
+            silence_duration_ms
+        );
+        // TODO: Implement per-session silence_duration_ms updates
+        // This would require modifying the SilenceTracker in the VoiceManager
+    }
+
+    true
 }
 
 #[cfg(test)]

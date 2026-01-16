@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ndarray::{Array2, ArrayView2};
+use ndarray::ArrayView2;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 use ort::value::Value;
@@ -9,23 +9,21 @@ use tracing::{debug, info, warn};
 
 use crate::core::turn_detect::{assets, config::TurnDetectorConfig};
 
+/// Expected input tensor name for smart-turn model
+const INPUT_TENSOR_NAME: &str = "input_features";
+
 pub struct ModelManager {
     session: Arc<Mutex<Session>>,
     config: TurnDetectorConfig,
-    // Cached input names to avoid repeated allocations
-    input_names: Vec<String>,
-    // Pre-allocated attention mask for common sequence lengths
-    cached_attention_mask: Option<Array2<i64>>,
 }
 
 impl ModelManager {
     pub async fn new(config: TurnDetectorConfig) -> Result<Self> {
         let model_path = assets::model_path(&config)?;
 
-        info!("Loading ONNX model from: {:?}", model_path);
+        info!("Loading smart-turn ONNX model from: {:?}", model_path);
 
-        // Move the blocking ONNX model loading to a dedicated blocking thread
-        // to prevent blocking the async runtime
+        // Load model in blocking thread to avoid blocking async runtime
         let session = tokio::task::spawn_blocking({
             let model_path = model_path.clone();
             let config = config.clone();
@@ -34,20 +32,12 @@ impl ModelManager {
         .await
         .context("Failed to spawn blocking task for ONNX model loading")??;
 
-        // Cache input names to avoid repeated allocations
-        let input_names: Vec<String> = session
-            .inputs
-            .iter()
-            .map(|input| input.name.clone())
-            .collect();
-
-        debug!("Cached model input names: {:?}", input_names);
+        // Validate model inputs
+        Self::validate_model_io(&session)?;
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
             config,
-            input_names,
-            cached_attention_mask: None,
         })
     }
 
@@ -63,226 +53,119 @@ impl ModelManager {
 
         let session = builder.commit_from_file(model_path)?;
 
-        Self::validate_model_inputs(&session)?;
-
         Ok(session)
     }
 
-    fn validate_model_inputs(session: &Session) -> Result<()> {
+    fn validate_model_io(session: &Session) -> Result<()> {
         let inputs = &session.inputs;
-
-        debug!("Model input count: {}", inputs.len());
-        for (i, input) in inputs.iter().enumerate() {
-            debug!("Input {}: {:?}", i, input.name);
-        }
-
         let outputs = &session.outputs;
-        debug!("Model output count: {}", outputs.len());
-        for (i, output) in outputs.iter().enumerate() {
-            debug!("Output {}: {:?}", i, output.name);
+
+        debug!("Smart-turn model input count: {}", inputs.len());
+        for (i, input) in inputs.iter().enumerate() {
+            debug!("  Input {}: name={}", i, input.name);
         }
 
+        debug!("Smart-turn model output count: {}", outputs.len());
+        for (i, output) in outputs.iter().enumerate() {
+            debug!("  Output {}: name={}", i, output.name);
+        }
+
+        // Validate we have at least one input
         if inputs.is_empty() {
-            anyhow::bail!("Model has no inputs");
+            anyhow::bail!("Smart-turn model has no inputs");
+        }
+
+        // Check for expected input name
+        let has_input_features = inputs.iter().any(|i| i.name == INPUT_TENSOR_NAME);
+        if !has_input_features {
+            warn!(
+                "Smart-turn model doesn't have expected input '{}'. Available inputs: {:?}",
+                INPUT_TENSOR_NAME,
+                inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+            );
+        }
+
+        if outputs.is_empty() {
+            anyhow::bail!("Smart-turn model has no outputs");
         }
 
         Ok(())
     }
 
-    pub async fn predict(
-        &mut self,
-        input_ids: ArrayView2<'_, i64>,
-        attention_mask: Option<ArrayView2<'_, i64>>,
-    ) -> Result<f32> {
-        let batch_size = input_ids.shape()[0];
-        let sequence_length = input_ids.shape()[1];
+    /// Run inference on mel spectrogram features.
+    ///
+    /// # Arguments
+    /// * `mel_features` - Mel spectrogram with shape (mel_bins, mel_frames) as configured
+    ///
+    /// # Returns
+    /// * `f32` - Turn completion probability (0.0-1.0)
+    pub async fn predict(&mut self, mel_features: ArrayView2<'_, f32>) -> Result<f32> {
+        let (mel_bins, mel_frames) = mel_features.dim();
 
-        debug!(
-            "Running inference with batch_size={}, sequence_length={}",
-            batch_size, sequence_length
-        );
-
-        // Use cached input names
-        if self.input_names.is_empty() {
-            anyhow::bail!("Model has no input names");
+        // Validate input dimensions against config (single source of truth)
+        if mel_bins != self.config.mel_bins || mel_frames != self.config.mel_frames {
+            anyhow::bail!(
+                "Invalid mel spectrogram dimensions: got ({}, {}), expected ({}, {})",
+                mel_bins,
+                mel_frames,
+                self.config.mel_bins,
+                self.config.mel_frames
+            );
         }
 
-        debug!("Using cached input names: {:?}", self.input_names);
-
-        // Prepare arrays as owned Array2 for ort 2.0
-        let input_array = input_ids.to_owned();
-        let mask_array = if let Some(mask) = attention_mask {
-            mask.to_owned()
-        } else {
-            // Reuse cached attention mask if dimensions match, otherwise create new
-            let needs_new_mask = self
-                .cached_attention_mask
-                .as_ref()
-                .is_none_or(|cached| cached.dim() != (batch_size, sequence_length));
-
-            if needs_new_mask {
-                self.cached_attention_mask =
-                    Some(Array2::<i64>::ones((batch_size, sequence_length)));
-            }
-
-            self.cached_attention_mask.as_ref().unwrap().clone()
-        };
-
-        // Build input values with names - ort 2.0 uses Vec<(&str, Value)>
-        let input_name_0 = &self.input_names[0];
-        let input_name_1 = if self.input_names.len() > 1 {
-            &self.input_names[1]
-        } else {
-            input_name_0
-        };
-
         debug!(
-            "Creating input tensors for: {} and {}",
-            input_name_0, input_name_1
+            "Running smart-turn inference with mel features shape: ({}, {})",
+            mel_bins, mel_frames
         );
 
-        // Convert ndarray 0.15.6 arrays to format compatible with ort 2.0
-        // ort expects ([shape...], Vec<data>) tuples for OwnedTensorArrayData
-        let input_dim = input_array.dim();
-        let input_data: Vec<i64> = input_array.iter().copied().collect();
-        let input_value = Value::from_array(([input_dim.0, input_dim.1], input_data))?.into();
+        // Convert to 3D tensor: (1, mel_bins, mel_frames) for batch dimension
+        let input_data: Vec<f32> = mel_features.iter().copied().collect();
+        let input_value = Value::from_array(([1, self.config.mel_bins, self.config.mel_frames], input_data))
+            .context("Failed to create input tensor")?
+            .into();
 
-        let mask_dim = mask_array.dim();
-        let mask_data: Vec<i64> = mask_array.iter().copied().collect();
-        let mask_value = Value::from_array(([mask_dim.0, mask_dim.1], mask_data))?.into();
+        // Build inputs
+        let inputs: Vec<(&str, Value)> = vec![(INPUT_TENSOR_NAME, input_value)];
 
-        let inputs: Vec<(&str, Value)> = vec![
-            (input_name_0.as_str(), input_value),
-            (input_name_1.as_str(), mask_value),
-        ];
-
-        // Lock the session mutex for inference
+        // Lock session and run inference
         let mut session = self.session.lock().unwrap();
 
-        // Get output name before running to avoid borrow conflicts
+        // Get output name before running
         let output_name = session.outputs[0].name.clone();
 
-        let outputs = session.run(inputs)?;
+        let outputs = session.run(inputs).context("Smart-turn inference failed")?;
 
-        let logits_tensor = outputs
+        // Extract output probability
+        let output_tensor = outputs
             .get(output_name.as_str())
-            .context("No output from model")?
+            .context("No output from smart-turn model")?
             .try_extract_tensor::<f32>()
-            .context("Failed to extract tensor")?;
+            .context("Failed to extract output tensor")?;
 
-        // Extract shape and data from tensor tuple
-        let (shape, data) = logits_tensor;
+        let (shape, data) = output_tensor;
 
-        debug!("Model output shape: {:?}", shape);
+        debug!("Smart-turn output shape: {:?}", shape);
 
-        // Log some sample values to understand the output range
-        if !data.is_empty() {
-            let first_values: Vec<f32> = data.iter().take(10).copied().collect();
-            debug!("First 10 output values: {:?}", first_values);
-        }
+        // Extract probability value
+        // Smart-turn outputs a single sigmoid probability
+        let probability = if !data.is_empty() {
+            let raw_value = data[0];
 
-        // Handle different output formats based on shape dimensions
-        let shape_dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let end_prob = if shape_dims.len() == 2 && shape_dims[1] == 2 {
-            // Binary classification output [batch_size, 2]
-            // Index 0: probability of continuing
-            // Index 1: probability of turn completion
-            let end_logit = data[1];
-            let continue_logit = data[0];
-            Self::softmax(end_logit, continue_logit)
-        } else if shape_dims.len() == 2 && shape_dims[1] == 1 {
-            // Single probability output [batch_size, 1]
-            // Direct probability of turn completion
-            let prob = data[0];
-            // If it's already a probability (0-1), use it directly
-            // If it's a logit, apply sigmoid
-            if (0.0..=1.0).contains(&prob) {
-                prob
+            // Check if value is already in probability range
+            if (0.0..=1.0).contains(&raw_value) {
+                raw_value
             } else {
-                // Apply sigmoid to convert logit to probability
-                1.0 / (1.0 + (-prob).exp())
+                // Apply sigmoid if it's a logit
+                1.0 / (1.0 + (-raw_value).exp())
             }
-        } else if shape_dims.len() == 1 {
-            // Single value output
-            let prob = data[0];
-            // If it's already a probability (0-1), use it directly
-            // If it's a logit, apply sigmoid
-            if (0.0..=1.0).contains(&prob) {
-                prob
-            } else {
-                // Apply sigmoid to convert logit to probability
-                1.0 / (1.0 + (-prob).exp())
-            }
-        } else if shape_dims.len() == 3 && shape_dims[0] == 1 {
-            // LiveKit turn detector output format: [batch_size=1, sequence_length, num_classes]
-            // The model outputs LOGITS that need to be converted to probabilities
-
-            let seq_len = shape_dims[1];
-            let num_classes = shape_dims[2];
-
-            debug!(
-                "Turn detector output: seq_len={}, num_classes={}",
-                seq_len, num_classes
-            );
-
-            // Get all logits at the last sequence position
-            let last_position_start = (seq_len - 1) * num_classes;
-
-            // Get the logits for key tokens at the last position
-            // Token 2 is </s> (standard end-of-sequence)
-            // Token 49153 is <|im_end|> (chat format end marker)
-            let eos_token_id = 2;
-
-            // Guard against out-of-bounds access if model has fewer classes
-            if num_classes <= eos_token_id {
-                warn!(
-                    "Model has {} classes, but EOS token ID is {}. Using fallback.",
-                    num_classes, eos_token_id
-                );
-                return Ok(0.3); // Conservative fallback
-            }
-
-            let eos_logit = data[last_position_start + eos_token_id];
-
-            // Find the maximum logit for numerical stability in softmax
-            let max_logit = data[last_position_start..(last_position_start + num_classes)]
-                .iter()
-                .cloned()
-                .fold(f32::NEG_INFINITY, f32::max);
-
-            // Apply softmax to get probability
-            let exp_sum: f32 = (0..num_classes)
-                .map(|i| (data[last_position_start + i] - max_logit).exp())
-                .sum();
-
-            let eos_prob = (eos_logit - max_logit).exp() / exp_sum;
-
-            debug!(
-                "EOS token (</s>) logit: {:.4}, probability: {:.6}",
-                eos_logit, eos_prob
-            );
-            debug!("Turn completion probability: {:.4}", eos_prob);
-
-            // The model predicts </s> (end-of-sequence) token for complete turns
-            eos_prob
         } else {
-            warn!(
-                "Unexpected output shape: {:?}. Using conservative estimate.",
-                shape_dims
-            );
-            0.3 // Conservative estimate
+            warn!("Smart-turn model produced empty output");
+            0.0
         };
 
-        debug!("End probability: {:.4}", end_prob);
+        debug!("Smart-turn probability: {:.4}", probability);
 
-        Ok(end_prob)
-    }
-
-    fn softmax(end_logit: f32, continue_logit: f32) -> f32 {
-        let max_logit = end_logit.max(continue_logit);
-        let exp_end = (end_logit - max_logit).exp();
-        let exp_continue = (continue_logit - max_logit).exp();
-        exp_end / (exp_end + exp_continue)
+        Ok(probability)
     }
 
     pub fn config(&self) -> &TurnDetectorConfig {

@@ -13,3 +13,4 @@ vertex.json
 libonnxruntime.so
 onnxruntime/
 dist/
+task.md

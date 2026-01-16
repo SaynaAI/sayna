@@ -8,8 +8,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, default_allow_interruption,
-    default_audio_enabled,
+    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, TurnDetectConfigUpdate,
+    VADConfigUpdate, default_allow_interruption, default_audio_enabled,
 };
 
 /// WebSocket message types for incoming messages
@@ -91,6 +91,23 @@ pub enum IncomingMessage {
         /// Validation is performed by the handler, not during deserialization.
         #[cfg_attr(feature = "openapi", schema(example = "+1234567890"))]
         transfer_to: String,
+    },
+    /// Update runtime configuration for VAD and turn detection.
+    ///
+    /// This message allows dynamic adjustment of VAD and turn detection parameters
+    /// during an active WebSocket session. Only parameters that are provided will
+    /// be updated; omitted parameters retain their current values.
+    ///
+    /// **Note**: These settings affect the shared turn detector and may impact
+    /// other active sessions using the same server instance.
+    #[serde(rename = "update_config")]
+    UpdateConfig {
+        /// VAD configuration updates (silence threshold, etc.)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vad: Option<VADConfigUpdate>,
+        /// Turn detection configuration updates (probability threshold)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_detect: Option<TurnDetectConfigUpdate>,
     },
 }
 
@@ -435,5 +452,82 @@ mod tests {
         assert!(json.contains(r#""timestamp_ms":1704067200000"#));
         // silence_duration_ms should be omitted
         assert!(!json.contains("silence_duration_ms"));
+    }
+
+    #[test]
+    fn test_update_config_message_full() {
+        let json = r#"{"type": "update_config", "vad": {"silence_duration_ms": 400}, "turn_detect": {"threshold": 0.6}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::UpdateConfig { vad, turn_detect } => {
+                assert!(vad.is_some());
+                assert_eq!(vad.unwrap().silence_duration_ms, Some(400));
+                assert!(turn_detect.is_some());
+                assert_eq!(turn_detect.unwrap().threshold, Some(0.6));
+            }
+            _ => panic!("Expected UpdateConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_config_message_turn_detect_only() {
+        let json = r#"{"type": "update_config", "turn_detect": {"threshold": 0.8}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::UpdateConfig { vad, turn_detect } => {
+                assert!(vad.is_none());
+                assert!(turn_detect.is_some());
+                assert_eq!(turn_detect.unwrap().threshold, Some(0.8));
+            }
+            _ => panic!("Expected UpdateConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_config_message_vad_only() {
+        let json = r#"{"type": "update_config", "vad": {"silence_duration_ms": 250}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::UpdateConfig { vad, turn_detect } => {
+                assert!(vad.is_some());
+                assert_eq!(vad.unwrap().silence_duration_ms, Some(250));
+                assert!(turn_detect.is_none());
+            }
+            _ => panic!("Expected UpdateConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_config_message_empty() {
+        let json = r#"{"type": "update_config"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::UpdateConfig { vad, turn_detect } => {
+                assert!(vad.is_none());
+                assert!(turn_detect.is_none());
+            }
+            _ => panic!("Expected UpdateConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_config_message_serialization() {
+        let msg = IncomingMessage::UpdateConfig {
+            vad: Some(VADConfigUpdate {
+                silence_duration_ms: Some(300),
+            }),
+            turn_detect: Some(TurnDetectConfigUpdate {
+                threshold: Some(0.5),
+            }),
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"update_config""#));
+        assert!(json.contains(r#""silence_duration_ms":300"#));
+        assert!(json.contains(r#""threshold":0.5"#));
     }
 }

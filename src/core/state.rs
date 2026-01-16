@@ -189,33 +189,37 @@ impl CoreState {
     }
 
     #[cfg(feature = "stt-vad")]
-    /// Warmup the Turn Detector model with sample inputs
+    /// Warmup the Turn Detector model with sample audio inputs
     async fn warmup_turn_detector(detector: &TurnDetector) -> anyhow::Result<()> {
-        debug!("Starting Turn Detector warmup with sample inputs");
+        debug!("Starting Turn Detector warmup with sample audio inputs");
 
-        // Sample inputs that cover common speech patterns
-        let warmup_samples = [
-            "Hello",
-            "How are you?",
-            "What is the weather like today?",
-            "Thank you very much",
-            "I was wondering if",
-            "Can you help me with",
-            "That's great, thanks!",
-            "Let me think about it",
-            "I need to",
-        ];
+        let sample_rate = detector.sample_rate();
+
+        // Generate sample audio inputs with varying durations to warm up the model
+        // These simulate different audio lengths that the model might receive
+        let warmup_durations_seconds = [0.5, 1.0, 2.0, 4.0];
 
         // Run predictions on all samples to ensure model is fully loaded
-        for (i, sample) in warmup_samples.iter().enumerate() {
+        for (i, duration) in warmup_durations_seconds.iter().enumerate() {
+            // Generate a simple sine wave at 440 Hz (A4 note) for warmup
+            let num_samples = (sample_rate as f32 * duration) as usize;
+            let audio_samples: Vec<i16> = (0..num_samples)
+                .map(|j| {
+                    let t = j as f32 / sample_rate as f32;
+                    let sample = (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+                    (sample * 16000.0) as i16
+                })
+                .collect();
+
             let start = Instant::now();
-            match detector.predict_end_of_turn(sample).await {
+            match detector.predict_end_of_turn(&audio_samples).await {
                 Ok(probability) => {
                     let elapsed = start.elapsed();
                     debug!(
-                        "Warmup sample {} ('{}...'): probability={:.3}, time={:?}",
+                        "Warmup sample {} ({}s, {} samples): probability={:.3}, time={:?}",
                         i + 1,
-                        &sample.chars().take(20).collect::<String>(),
+                        duration,
+                        audio_samples.len(),
                         probability,
                         elapsed
                     );

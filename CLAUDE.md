@@ -83,23 +83,33 @@ Always consult these rule files when implementing new features.
 
 ### Voice Activity Detection (VAD) with Turn Detection
 
-When `stt-vad` feature is enabled, Sayna provides both Silero-VAD for audio-level silence detection and ONNX-based turn detection to determine when a user has finished speaking. Both features are always bundled together under the `stt-vad` feature flag.
+When `stt-vad` feature is enabled, Sayna provides both Silero-VAD for audio-level silence detection and smart-turn v3 model for semantic turn detection. Both features are always bundled together under the `stt-vad` feature flag.
 
 **How it works:**
 1. Audio frames are processed through Silero-VAD ONNX model
-2. When 300ms (configurable) of continuous silence is detected, the turn detection model is triggered
-3. The turn detection model analyzes the accumulated transcript to confirm if the turn is complete
+2. When configurable silence threshold (default: 300ms) is detected, the smart-turn model is triggered
+3. The smart-turn model analyzes the accumulated audio to confirm if the turn is complete
 4. If confirmed, an artificial `speech_final` event is emitted
+
+**Smart-Turn Model:**
+- Model: [pipecat-ai/smart-turn-v3](https://huggingface.co/pipecat-ai/smart-turn-v3)
+- Input: Up to 8 seconds of 16kHz mono PCM audio
+- Output: Probability that the speaker has finished their turn (0.0-1.0)
+- Architecture: Whisper Tiny encoder + linear classifier (~8M parameters)
+- Inference: ~12ms on CPU (quantized int8 model)
 
 **Configuration:**
 ```yaml
 vad:
-  threshold: 0.5              # Speech probability threshold (0.0-1.0)
-  silence_duration_ms: 300    # Silence duration to trigger turn end
+  threshold: 0.5              # Speech probability threshold for VAD (0.0-1.0)
+  silence_duration_ms: 300    # Silence duration to trigger turn detection
   min_speech_duration_ms: 100 # Minimum speech before checking silence
+
+turn_detect:
+  threshold: 0.5              # Turn completion probability threshold (0.0-1.0)
 ```
 
-> **Note:** When `stt-vad` is compiled, VAD is always active. There is no runtime `enabled` toggle.
+> **Note:** When `stt-vad` is compiled, VAD and turn detection are always active. There is no runtime `enabled` toggle.
 
 **WebSocket API:**
 ```json
@@ -188,7 +198,9 @@ See [docs/](docs/) for detailed API documentation.
 - `src/core/voice_manager/stt_result.rs`: STT result processing with VAD integration
 - `src/core/vad/detector.rs`: Silero-VAD detector (feature-gated: `stt-vad`)
 - `src/core/vad/silence_tracker.rs`: Silence duration tracking for turn detection
-- `src/core/turn_detect/mod.rs`: ONNX-based turn detection model (feature-gated: `stt-vad`)
+- `src/core/turn_detect/detector.rs`: Smart-turn audio-based turn detection (feature-gated: `stt-vad`)
+- `src/core/turn_detect/feature_extractor.rs`: Mel spectrogram extraction for smart-turn (feature-gated: `stt-vad`)
+- `src/core/turn_detect/model_manager.rs`: ONNX model management for smart-turn (feature-gated: `stt-vad`)
 - `src/handlers/ws/handler.rs`: WebSocket message handling
 - `src/livekit/manager.rs`: LiveKit room management
 - `src/config/mod.rs`: Configuration loading and merging

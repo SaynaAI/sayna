@@ -1,23 +1,16 @@
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::core::turn_detect::{
-    config::TurnDetectorConfig, model_manager::ModelManager, tokenizer::Tokenizer,
+    config::TurnDetectorConfig, feature_extractor::FeatureExtractor, model_manager::ModelManager,
 };
-
-// Static regex for text normalization
-static PUNCT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\s'-]").unwrap());
-
-static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 pub struct TurnDetector {
     model: Arc<tokio::sync::Mutex<ModelManager>>,
-    tokenizer: Arc<Tokenizer>,
+    feature_extractor: Arc<FeatureExtractor>,
     config: TurnDetectorConfig,
 }
 
@@ -32,7 +25,10 @@ impl TurnDetector {
     }
 
     pub async fn with_config(config: TurnDetectorConfig) -> Result<Self> {
-        info!("Initializing TurnDetector with config: {:?}", config);
+        info!(
+            "Initializing smart-turn TurnDetector with config: {:?}",
+            config
+        );
 
         let model = Arc::new(tokio::sync::Mutex::new(
             ModelManager::new(config.clone())
@@ -40,127 +36,115 @@ impl TurnDetector {
                 .context("Failed to initialize model manager")?,
         ));
 
-        let tokenizer = Arc::new(
-            Tokenizer::new(&config)
-                .await
-                .context("Failed to initialize tokenizer")?,
+        let feature_extractor = Arc::new(
+            FeatureExtractor::new(&config).context("Failed to initialize feature extractor")?,
         );
 
         Ok(Self {
             model,
-            tokenizer,
+            feature_extractor,
             config,
         })
     }
 
-    /// Normalize text to match LiveKit's preprocessing
-    fn normalize_text(text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-
-        // Convert to lowercase
-        let text = text.to_lowercase();
-
-        // Remove all punctuation except apostrophes and hyphens
-        let text = PUNCT_REGEX.replace_all(&text, " ");
-
-        // Normalize whitespace
-        let text = WHITESPACE_REGEX.replace_all(&text, " ");
-
-        text.trim().to_string()
-    }
-
-    /// Format text as a chat message for the model
-    fn format_as_chat(&self, user_input: &str) -> String {
-        // The model expects chat-formatted input
-        // For single turn detection, we format it as a user message
-        let normalized = Self::normalize_text(user_input);
-
-        // Apply chat template format (simplified version)
-        // The model was trained with SmolLM chat format
-        // We don't include the final <|im_end|> as per LiveKit's implementation
-        format!("<|im_start|>user\n{}", normalized)
-    }
-
-    /// Predict the probability that the given user input represents a complete turn
-    pub async fn predict_end_of_turn(&self, user_input: &str) -> Result<f32> {
-        if user_input.trim().is_empty() {
-            return Ok(0.0); // Empty input is not a complete turn
+    /// Predict the probability that the user has finished their turn.
+    ///
+    /// # Arguments
+    /// * `audio` - Raw audio samples as i16 PCM (16kHz mono)
+    ///
+    /// # Returns
+    /// * `f32` - Probability of turn completion (0.0 to 1.0)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let audio_samples: &[i16] = &[/* 16kHz PCM samples */];
+    /// let probability = turn_detector.predict_end_of_turn(audio_samples).await?;
+    /// if probability > 0.5 {
+    ///     println!("Turn is likely complete");
+    /// }
+    /// ```
+    pub async fn predict_end_of_turn(&self, audio: &[i16]) -> Result<f32> {
+        if audio.is_empty() {
+            return Ok(0.0); // Empty audio is not a complete turn
         }
 
         let start = Instant::now();
 
-        // Format the input as a chat message with proper normalization
-        let formatted_input = self.format_as_chat(user_input);
-        debug!("Formatted input for model: '{}'", formatted_input);
+        // Extract mel spectrogram features
+        let mel_features = self
+            .feature_extractor
+            .extract(audio)
+            .context("Failed to extract mel features")?;
 
-        // Encode the formatted input
-        let (input_ids, attention_mask) = self
-            .tokenizer
-            .encode_single_text(&formatted_input)
-            .await
-            .context("Failed to encode user input")?;
+        debug!("Feature extraction completed in {:?}", start.elapsed());
 
+        // Run model inference
         let probability = self
             .model
             .lock()
             .await
-            .predict(input_ids.view(), Some(attention_mask.view()))
+            .predict(mel_features.view())
             .await
             .context("Model prediction failed")?;
 
         let elapsed = start.elapsed();
         debug!(
-            "Prediction completed in {:?} for text: '{}'",
-            elapsed, user_input
+            "Smart-turn prediction completed in {:?}, probability: {:.4}",
+            elapsed, probability
         );
 
+        // Warn if inference is slow
         if elapsed > Duration::from_millis(50) {
-            warn!("Prediction took longer than 50ms: {:?}", elapsed);
+            warn!("Smart-turn prediction took longer than 50ms: {:?}", elapsed);
         }
 
         Ok(probability)
     }
 
-    /// Check if the given user input represents a complete turn
-    pub async fn is_turn_complete(&self, user_input: &str) -> Result<bool> {
-        let probability = self.predict_end_of_turn(user_input).await?;
+    /// Check if the given audio represents a complete turn.
+    ///
+    /// # Arguments
+    /// * `audio` - Raw audio samples as i16 PCM (16kHz mono)
+    ///
+    /// # Returns
+    /// * `bool` - true if turn is likely complete (probability >= threshold)
+    pub async fn is_turn_complete(&self, audio: &[i16]) -> Result<bool> {
+        let probability = self.predict_end_of_turn(audio).await?;
         debug!(
-            "User input: '{}', Turn completion probability: {:.4}",
-            user_input, probability
+            "Audio samples: {}, Turn completion probability: {:.4}",
+            audio.len(),
+            probability
         );
         Ok(probability >= self.config.threshold)
     }
 
+    /// Set the detection threshold.
     pub fn set_threshold(&mut self, threshold: f32) {
         self.config.threshold = threshold.clamp(0.0, 1.0);
     }
 
+    /// Get the current detection threshold.
     pub fn get_threshold(&self) -> f32 {
         self.config.threshold
     }
 
-    /// Process streaming text and check if it represents a complete turn
-    pub async fn process_streaming_text(
-        &self,
-        partial_text: &str,
-        check_interval_ms: u64,
-    ) -> Result<bool> {
-        if partial_text.trim().is_empty() {
-            return Ok(false);
-        }
-
-        tokio::time::sleep(Duration::from_millis(check_interval_ms)).await;
-
-        self.is_turn_complete(partial_text).await
-    }
-
+    /// Get the current configuration.
     pub fn get_config(&self) -> &TurnDetectorConfig {
         &self.config
     }
+
+    /// Get the expected sample rate for audio input.
+    pub fn sample_rate(&self) -> u32 {
+        self.config.sample_rate
+    }
+
+    /// Get the maximum audio duration in seconds.
+    pub fn max_audio_duration_seconds(&self) -> u8 {
+        self.config.max_audio_duration_seconds
+    }
 }
 
+/// Builder for TurnDetector with fluent configuration API.
 pub struct TurnDetectorBuilder {
     config: TurnDetectorConfig,
 }
@@ -183,11 +167,6 @@ impl TurnDetectorBuilder {
         self
     }
 
-    pub fn max_sequence_length(mut self, length: usize) -> Self {
-        self.config.max_sequence_length = length;
-        self
-    }
-
     pub fn model_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.model_path = Some(path.into());
         self
@@ -198,16 +177,6 @@ impl TurnDetectorBuilder {
         self
     }
 
-    pub fn tokenizer_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.tokenizer_path = Some(path.into());
-        self
-    }
-
-    pub fn tokenizer_url(mut self, url: impl Into<String>) -> Self {
-        self.config.tokenizer_url = Some(url.into());
-        self
-    }
-
     pub fn use_quantized(mut self, quantized: bool) -> Self {
         self.config.use_quantized = quantized;
         self
@@ -215,6 +184,16 @@ impl TurnDetectorBuilder {
 
     pub fn num_threads(mut self, threads: usize) -> Self {
         self.config.num_threads = Some(threads);
+        self
+    }
+
+    pub fn sample_rate(mut self, rate: u32) -> Self {
+        self.config.sample_rate = rate;
+        self
+    }
+
+    pub fn cache_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.cache_path = Some(path.into());
         self
     }
 
@@ -232,11 +211,13 @@ mod tests {
         let builder = TurnDetectorBuilder::new()
             .threshold(0.6)
             .use_quantized(true)
-            .num_threads(2);
+            .num_threads(2)
+            .sample_rate(16000);
 
         assert!(builder.config.threshold == 0.6);
         assert!(builder.config.use_quantized);
         assert!(builder.config.num_threads == Some(2));
+        assert!(builder.config.sample_rate == 16000);
     }
 
     #[test]

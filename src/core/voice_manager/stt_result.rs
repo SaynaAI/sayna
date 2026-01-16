@@ -266,10 +266,10 @@ impl STTResultProcessor {
     ///
     /// # VAD Events Handled
     ///
-    /// - `SpeechStart`: Resets VAD state, starts tracking new utterance
+    /// - `SpeechStart`: Resets VAD state and clears audio buffer for new utterance
     /// - `SpeechResumed`: Cancels pending VAD turn detection (user still talking)
     /// - `SilenceDetected`: Logged but no action (waiting for threshold)
-    /// - `TurnEnd`: Triggers turn detection on accumulated text
+    /// - `TurnEnd`: Triggers turn detection on accumulated audio samples
     pub fn process_vad_event(
         &self,
         event: VADEvent,
@@ -287,9 +287,12 @@ impl STTResultProcessor {
 
         match event {
             VADEvent::SpeechStart => {
-                debug!("VAD: Speech started - resetting VAD state");
+                debug!("VAD: Speech started - resetting VAD state and clearing audio buffer");
                 let mut state = speech_final_state.write();
                 state.reset_vad_state();
+                // Clear audio buffer for new utterance
+                let mut buffer = vad_audio_buffer.write();
+                buffer.clear();
             }
 
             VADEvent::SpeechResumed => {
@@ -321,7 +324,7 @@ impl STTResultProcessor {
     ///
     /// Called when SilenceTracker detects that silence has exceeded the configured
     /// threshold after sufficient speech. Spawns a task to run turn detection
-    /// on the accumulated text buffer.
+    /// on the accumulated audio buffer.
     fn handle_vad_turn_end(
         &self,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
@@ -329,7 +332,8 @@ impl STTResultProcessor {
         silence_tracker: Arc<SilenceTracker>,
         vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
     ) {
-        let (buffered_text, should_trigger) = {
+        // Get audio buffer for turn detection
+        let (audio_samples, buffered_text, should_trigger) = {
             let mut state = speech_final_state.write();
 
             // Check if already handled or not waiting
@@ -338,16 +342,21 @@ impl STTResultProcessor {
                 return;
             }
 
-            // Only trigger if we have text and are waiting for speech_final
+            // Only trigger if we have audio and are waiting for speech_final
             if !state.waiting_for_speech_final.load(Ordering::Acquire) {
                 debug!("VAD: TurnEnd received but not waiting for speech_final - skipping");
                 return;
             }
 
-            if state.text_buffer.is_empty() {
-                debug!("VAD: TurnEnd received but text buffer is empty - skipping");
+            // Get audio samples from buffer
+            let audio_buffer = vad_audio_buffer.read();
+            if audio_buffer.is_empty() {
+                debug!("VAD: TurnEnd received but audio buffer is empty - skipping");
                 return;
             }
+
+            // Clone audio samples for turn detection
+            let audio = audio_buffer.clone();
 
             // Mark as detected to prevent duplicates
             state.vad_turn_end_detected.store(true, Ordering::Release);
@@ -358,7 +367,7 @@ impl STTResultProcessor {
                 old_handle.abort();
             }
 
-            (state.text_buffer.clone(), true)
+            (audio, state.text_buffer.clone(), true)
         };
 
         if !should_trigger {
@@ -366,13 +375,14 @@ impl STTResultProcessor {
         }
 
         info!(
-            "VAD: TurnEnd after {}ms silence - spawning turn detection for '{}...'",
+            "VAD: TurnEnd after {}ms silence - spawning turn detection with {} audio samples",
             self.config.vad_silence_duration_ms,
-            buffered_text.chars().take(50).collect::<String>()
+            audio_samples.len()
         );
 
-        // Spawn VAD-triggered turn detection task
-        let handle = self.spawn_vad_turn_detection(
+        // Spawn VAD-triggered turn detection task with audio samples
+        let handle = self.spawn_vad_turn_detection_audio(
+            audio_samples,
             buffered_text,
             speech_final_state.clone(),
             turn_detector,
@@ -385,12 +395,21 @@ impl STTResultProcessor {
         state.vad_turn_detection_handle = Some(handle);
     }
 
-    /// Spawn turn detection task after VAD silence threshold.
+    /// Spawn turn detection task with audio input.
     ///
-    /// This task runs the turn detection ML model on the accumulated text
+    /// This task runs the turn detection ML model on the provided audio samples
     /// and fires speech_final if the turn is confirmed.
-    fn spawn_vad_turn_detection(
+    ///
+    /// # Arguments
+    /// * `audio_samples` - Audio samples to pass to turn detector
+    /// * `buffered_text` - Text buffer for logging/backward compatibility
+    /// * `speech_final_state` - Shared state for speech final tracking
+    /// * `turn_detector` - Optional turn detector for audio-level confirmation
+    /// * `silence_tracker` - SilenceTracker to reset after firing speech_final
+    /// * `vad_audio_buffer` - VAD audio buffer to clear after firing speech_final
+    fn spawn_vad_turn_detection_audio(
         &self,
+        audio_samples: Vec<i16>,
         buffered_text: String,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
@@ -412,25 +431,26 @@ impl STTResultProcessor {
                 return;
             }
 
-            // Run turn detection
+            // Run turn detection with audio samples
             let detection_method = if let Some(detector) = turn_detector {
+                let sample_count = audio_samples.len();
                 let turn_result =
                     tokio::time::timeout(Duration::from_millis(inference_timeout_ms), async {
                         let detector_guard = detector.read().await;
-                        detector_guard.is_turn_complete(&buffered_text).await
+                        detector_guard.is_turn_complete(&audio_samples).await
                     })
                     .await;
 
                 match turn_result {
                     Ok(Ok(true)) => {
                         info!(
-                            "VAD+TurnDetect: Turn complete confirmed for '{}'",
-                            buffered_text.chars().take(50).collect::<String>()
+                            "VAD+SmartTurn: Turn complete confirmed for {} audio samples",
+                            sample_count
                         );
-                        "vad_turn_detection_confirmed"
+                        "vad_smart_turn_confirmed"
                     }
                     Ok(Ok(false)) => {
-                        info!("VAD: Turn detection says incomplete - waiting for more input");
+                        info!("VAD: Smart-turn says incomplete - waiting for more input");
                         // Reset VAD state so next TurnEnd can trigger again
                         {
                             let state = speech_final_state.write();
@@ -441,12 +461,12 @@ impl STTResultProcessor {
                         return; // Don't fire
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!("VAD turn detection error: {:?} - firing anyway", e);
-                        "vad_turn_detection_error_fallback"
+                        tracing::warn!("VAD smart-turn detection error: {:?} - firing anyway", e);
+                        "vad_smart_turn_error_fallback"
                     }
                     Err(_) => {
                         tracing::warn!(
-                            "VAD turn detection timeout after {}ms - firing anyway",
+                            "VAD smart-turn detection timeout after {}ms - firing anyway",
                             inference_timeout_ms
                         );
                         "vad_inference_timeout_fallback"
@@ -685,21 +705,24 @@ impl STTResultProcessor {
         })
     }
 
-    /// Create a detection task that waits for STT provider, then uses turn detection as fallback
+    /// Create a detection task that waits for STT provider, then fires as timeout fallback.
     ///
     /// Voice AI Best Practice Logic:
     /// 1. Wait for STT provider to send real speech_final (they see the audio stream)
-    /// 2. If STT is silent and text hasn't changed, run turn detection to confirm
-    /// 3. Only fire artificial speech_final if turn detection confirms turn is complete
+    /// 2. If STT is silent and text hasn't changed, fire artificial speech_final
+    ///
+    /// Note: This path does NOT use the TurnDetector because it doesn't have access
+    /// to the audio buffer. Turn detection with audio is handled by the VAD path
+    /// (`spawn_vad_turn_detection`). This timeout-based path serves as a fallback
+    /// when VAD is not available or hasn't fired.
     fn create_detection_task(
         &self,
         result: STTResult,
         buffered_text: String,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        _turn_detector: Option<Arc<RwLock<TurnDetector>>>,
     ) -> JoinHandle<()> {
         let stt_wait_ms = self.config.stt_speech_final_wait_ms;
-        let inference_timeout_ms = self.config.turn_detection_inference_timeout_ms;
 
         tokio::spawn(async move {
             // PHASE 1: Wait for STT provider to send real speech_final
@@ -721,69 +744,29 @@ impl STTResultProcessor {
                 return;
             }
 
-            // PHASE 2: STT didn't send speech_final - verify with turn detection
-            let detection_method = if let Some(detector) = turn_detector {
-                // Check if text buffer has changed (new transcripts arrived)
-                let current_text = {
-                    let state = speech_final_state.read();
-                    state.text_buffer.clone()
-                };
-
-                // If text changed, someone is still talking - don't fire
-                if current_text != buffered_text {
-                    info!(
-                        "Text buffer changed during wait (old: '{}', new: '{}') - person still talking, not firing",
-                        buffered_text, current_text
-                    );
-                    return;
-                }
-
-                // Text hasn't changed - run turn detection to confirm turn is complete
-                debug!(
-                    "STT silent for {}ms, running turn detection to confirm",
-                    stt_wait_ms
-                );
-                let turn_result =
-                    tokio::time::timeout(Duration::from_millis(inference_timeout_ms), async {
-                        let detector_guard = detector.read().await;
-                        detector_guard.is_turn_complete(&current_text).await
-                    })
-                    .await;
-
-                match turn_result {
-                    Ok(Ok(true)) => {
-                        info!(
-                            "Turn detection confirms turn complete - firing artificial speech_final"
-                        );
-                        "turn_detection_confirmed"
-                    }
-                    Ok(Ok(false)) => {
-                        info!(
-                            "Turn detection says turn incomplete - not firing (person may still be thinking)"
-                        );
-                        return; // Don't fire - person may continue speaking
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            "Turn detection error: {:?} - firing as fallback ({}ms silence)",
-                            e,
-                            stt_wait_ms
-                        );
-                        "turn_detection_error_fallback"
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "Turn detection inference timeout after {}ms - firing as fallback",
-                            inference_timeout_ms
-                        );
-                        "inference_timeout_fallback"
-                    }
-                }
-            } else {
-                // No turn detector - fire based on silence duration alone
-                info!("No turn detector - firing after {}ms silence", stt_wait_ms);
-                "no_detector_timeout"
+            // PHASE 2: STT didn't send speech_final - check if text changed
+            // Check if text buffer has changed (new transcripts arrived)
+            let current_text = {
+                let state = speech_final_state.read();
+                state.text_buffer.clone()
             };
+
+            // If text changed, someone is still talking - don't fire
+            if current_text != buffered_text {
+                info!(
+                    "Text buffer changed during wait (old: '{}', new: '{}') - person still talking, not firing",
+                    buffered_text, current_text
+                );
+                return;
+            }
+
+            // Text hasn't changed - fire based on timeout
+            // Note: Turn detection with audio is handled by VAD path, not here
+            let detection_method = "timeout_fallback";
+            info!(
+                "STT silent for {}ms, text unchanged - firing artificial speech_final",
+                stt_wait_ms
+            );
 
             // PHASE 3: Fire artificial speech_final
             Self::fire_speech_final(result, buffered_text, speech_final_state, detection_method)
