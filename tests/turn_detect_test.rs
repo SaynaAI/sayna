@@ -36,7 +36,9 @@ mod feature_extractor_tests {
             mel.dim(),
             (config.mel_bins, config.mel_frames),
             "Expected mel shape ({}, {}), got {:?}",
-            config.mel_bins, config.mel_frames, mel.dim()
+            config.mel_bins,
+            config.mel_frames,
+            mel.dim()
         );
     }
 
@@ -54,7 +56,8 @@ mod feature_extractor_tests {
             mel.dim(),
             (config.mel_bins, config.mel_frames),
             "Short audio should be padded to ({}, {})",
-            config.mel_bins, config.mel_frames
+            config.mel_bins,
+            config.mel_frames
         );
     }
 
@@ -72,7 +75,8 @@ mod feature_extractor_tests {
             mel.dim(),
             (config.mel_bins, config.mel_frames),
             "Long audio should be truncated to ({}, {})",
-            config.mel_bins, config.mel_frames
+            config.mel_bins,
+            config.mel_frames
         );
     }
 
@@ -241,7 +245,7 @@ mod turn_detector_tests {
 
         println!("Silence probability: {:.4}", probability);
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability out of range"
         );
     }
@@ -256,7 +260,7 @@ mod turn_detector_tests {
         let probability = detector.predict_end_of_turn(&audio).await.unwrap();
 
         println!("Audio probability: {:.4}", probability);
-        assert!(probability >= 0.0 && probability <= 1.0);
+        assert!((0.0..=1.0).contains(&probability));
     }
 
     #[tokio::test]
@@ -340,7 +344,7 @@ mod turn_detector_tests {
         let probability = detector.predict_end_of_turn(&max_samples).await.unwrap();
         println!("Max duration audio - Probability: {:.4}", probability);
 
-        assert!(probability >= 0.0 && probability <= 1.0);
+        assert!((0.0..=1.0).contains(&probability));
     }
 
     #[tokio::test]
@@ -358,7 +362,7 @@ mod turn_detector_tests {
             probability
         );
 
-        assert!(probability >= 0.0 && probability <= 1.0);
+        assert!((0.0..=1.0).contains(&probability));
     }
 
     #[tokio::test]

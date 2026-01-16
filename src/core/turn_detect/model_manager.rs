@@ -120,9 +120,12 @@ impl ModelManager {
 
         // Convert to 3D tensor: (1, mel_bins, mel_frames) for batch dimension
         let input_data: Vec<f32> = mel_features.iter().copied().collect();
-        let input_value = Value::from_array(([1, self.config.mel_bins, self.config.mel_frames], input_data))
-            .context("Failed to create input tensor")?
-            .into();
+        let input_value = Value::from_array((
+            [1, self.config.mel_bins, self.config.mel_frames],
+            input_data,
+        ))
+        .context("Failed to create input tensor")?
+        .into();
 
         // Build inputs
         let inputs: Vec<(&str, Value)> = vec![(INPUT_TENSOR_NAME, input_value)];
