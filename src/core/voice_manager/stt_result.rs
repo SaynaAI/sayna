@@ -7,10 +7,15 @@
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+#[cfg(feature = "stt-vad")]
 use tokio::sync::RwLock;
+#[cfg(not(feature = "stt-vad"))]
 use tracing::debug;
+#[cfg(feature = "stt-vad")]
+use tracing::{debug, info};
 
 use crate::core::stt::STTResult;
+#[cfg(feature = "stt-vad")]
 use crate::core::turn_detect::TurnDetector;
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SilenceTracker, VADEvent};
@@ -18,6 +23,11 @@ use crate::core::vad::{SilenceTracker, VADEvent};
 use super::state::SpeechFinalState;
 use super::stt_config::STTProcessingConfig;
 use super::turn_detection_tasks;
+#[cfg(feature = "stt-vad")]
+use super::utils::MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION;
+use super::utils::get_current_time_ms;
+#[cfg(feature = "stt-vad")]
+use super::vad_processor::VADState;
 
 /// Processor for STT results with timing control
 #[derive(Clone)]
@@ -32,9 +42,9 @@ pub struct STTResultProcessor {
     #[cfg(feature = "stt-vad")]
     silence_tracker: Option<Arc<SilenceTracker>>,
 
-    /// Optional audio buffer for smart-turn fallback (feature-gated: `stt-vad`)
+    /// Optional VAD state containing audio buffer for smart-turn fallback (feature-gated: `stt-vad`)
     #[cfg(feature = "stt-vad")]
-    vad_audio_buffer: Option<Arc<SyncRwLock<Vec<i16>>>>,
+    vad_state: Option<Arc<VADState>>,
 }
 
 impl STTResultProcessor {
@@ -51,7 +61,7 @@ impl STTResultProcessor {
             config,
             turn_detector: None,
             silence_tracker: None,
-            vad_audio_buffer: None,
+            vad_state: None,
         }
     }
 
@@ -61,13 +71,13 @@ impl STTResultProcessor {
         config: STTProcessingConfig,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
         silence_tracker: Arc<SilenceTracker>,
-        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+        vad_state: Arc<VADState>,
     ) -> Self {
         Self {
             config,
             turn_detector,
             silence_tracker: Some(silence_tracker),
-            vad_audio_buffer: Some(vad_audio_buffer),
+            vad_state: Some(vad_state),
         }
     }
 
@@ -76,14 +86,13 @@ impl STTResultProcessor {
         &self,
         result: STTResult,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        _turn_detector: Option<Arc<RwLock<TurnDetector>>>,
     ) -> Option<STTResult> {
         // Fast synchronous checks - no awaits
         if !self.should_deliver_result(&result) {
             return None;
         }
 
-        let now_ms = self.get_current_time_ms();
+        let now_ms = get_current_time_ms();
 
         // Handle real speech_final
         if result.is_speech_final {
@@ -104,29 +113,37 @@ impl STTResultProcessor {
     // ─────────────────────────────────────────────────────────────────────────────
 
     /// Process a VAD event, triggering turn detection on silence.
+    ///
+    /// This method requires that the processor was initialized with VAD components
+    /// via `with_vad_components`. If VAD components are not available, the event
+    /// is ignored with a debug log.
     #[cfg(feature = "stt-vad")]
     pub fn process_vad_event(
         &self,
         event: VADEvent,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-        silence_tracker: Arc<SilenceTracker>,
-        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
     ) {
-        super::vad_processor::process_vad_event(
-            &self.config,
+        // Use stored VAD components - these should be Some if initialized via with_vad_components
+        let (Some(silence_tracker), Some(vad_state)) = (&self.silence_tracker, &self.vad_state)
+        else {
+            debug!("VAD event received but VAD components not initialized - ignoring");
+            return;
+        };
+
+        self.handle_vad_event_internal(
             event,
             speech_final_state,
-            turn_detector,
-            silence_tracker,
-            vad_audio_buffer,
+            silence_tracker.clone(),
+            vad_state.clone(),
         );
     }
 
     /// Check if VAD-based silence detection is enabled.
+    ///
+    /// When `stt-vad` is compiled, VAD is always active and cannot be disabled at runtime.
     #[cfg(feature = "stt-vad")]
     pub fn is_vad_enabled(&self) -> bool {
-        super::vad_processor::is_vad_enabled()
+        true
     }
 
     /// Check if VAD-based silence detection is enabled.
@@ -170,7 +187,7 @@ impl STTResultProcessor {
                 old_handle.abort();
             }
 
-            state.text_buffer = format!("{}{}", state.text_buffer, result.transcript);
+            state.text_buffer.push_str(&result.transcript);
 
             // Check if this is the first is_final for a new segment
             let is_new = state.segment_start_ms.load(Ordering::Acquire) == 0;
@@ -182,23 +199,20 @@ impl STTResultProcessor {
         // When stt-vad is enabled and components are available, use smart fallback
         #[cfg(feature = "stt-vad")]
         let detection_handle = {
-            if let (Some(turn_detector), Some(silence_tracker), Some(vad_audio_buffer)) = (
-                &self.turn_detector,
-                &self.silence_tracker,
-                &self.vad_audio_buffer,
-            ) {
+            if let (Some(turn_detector), Some(silence_tracker), Some(vad_state)) =
+                (&self.turn_detector, &self.silence_tracker, &self.vad_state)
+            {
                 turn_detection_tasks::create_smart_fallback_task(
                     &self.config,
                     buffered_text.clone(),
                     speech_final_state.clone(),
                     turn_detector.clone(),
                     silence_tracker.clone(),
-                    vad_audio_buffer.clone(),
+                    vad_state.clone(),
                 )
             } else {
                 turn_detection_tasks::create_detection_task(
                     &self.config,
-                    result,
                     buffered_text.clone(),
                     speech_final_state.clone(),
                 )
@@ -208,7 +222,6 @@ impl STTResultProcessor {
         #[cfg(not(feature = "stt-vad"))]
         let detection_handle = turn_detection_tasks::create_detection_task(
             &self.config,
-            result,
             buffered_text,
             speech_final_state.clone(),
         );
@@ -221,7 +234,7 @@ impl STTResultProcessor {
 
         // Schedule hard-timeout task if this is a new segment
         if is_new_segment {
-            let now_ms = self.get_current_time_ms();
+            let now_ms = get_current_time_ms();
             state.segment_start_ms.store(now_ms, Ordering::Release);
 
             let deadline_ms = now_ms + self.config.speech_final_hard_timeout_ms as usize;
@@ -267,29 +280,10 @@ impl STTResultProcessor {
             return None;
         }
 
-        // Cancel any pending detection tasks
-        self.cancel_detection_task(&mut state);
-
-        // Reset state for next speech segment
-        self.reset_speech_state(&mut state);
+        // Cancel pending detection tasks and reset state for next speech segment
+        state.reset_for_next_segment();
 
         Some(result)
-    }
-
-    /// Fire a forced speech_final event via callback.
-    pub async fn fire_speech_final(
-        result: STTResult,
-        buffered_text: String,
-        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        detection_method: &str,
-    ) {
-        turn_detection_tasks::fire_speech_final(
-            result,
-            buffered_text,
-            speech_final_state,
-            detection_method,
-        )
-        .await;
     }
 
     fn is_duplicate_speech_final(
@@ -305,61 +299,128 @@ impl STTResultProcessor {
             && state.last_forced_text == transcript
     }
 
-    fn cancel_detection_task(&self, state: &mut SpeechFinalState) {
-        if let Some(handle) = state.turn_detection_handle.take() {
-            debug!("Cancelling pending turn detection task");
-            handle.abort();
-            state
-                .waiting_for_speech_final
-                .store(false, Ordering::Release);
-        }
+    // ─────────────────────────────────────────────────────────────────────────────
+    // VAD event handling (internal)
+    // ─────────────────────────────────────────────────────────────────────────────
 
-        // Also cancel hard timeout handle if present
-        if let Some(handle) = state.hard_timeout_handle.take() {
-            debug!("Cancelling pending hard timeout task");
-            handle.abort();
-        }
+    /// Handle a VAD event internally, processing speech start/resume/silence/turn-end.
+    #[cfg(feature = "stt-vad")]
+    fn handle_vad_event_internal(
+        &self,
+        event: VADEvent,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_state: Arc<VADState>,
+    ) {
+        match event {
+            VADEvent::SpeechStart => {
+                let is_mid_turn = {
+                    let mut state = speech_final_state.write();
+                    let is_mid_turn = state.waiting_for_speech_final.load(Ordering::Acquire);
+                    state.reset_vad_state();
+                    is_mid_turn
+                };
 
-        // Cancel VAD turn detection handle if present
-        if let Some(handle) = state.vad_turn_detection_handle.take() {
-            debug!("Cancelling pending VAD turn detection task");
-            handle.abort();
-        }
+                if is_mid_turn {
+                    debug!(
+                        "VAD: Speech started mid-turn - resetting VAD state but preserving audio buffer for context"
+                    );
+                } else {
+                    debug!(
+                        "VAD: New speech started - resetting VAD state and clearing audio buffer"
+                    );
+                    vad_state.clear_audio_buffer();
+                }
+            }
 
-        // Reset VAD state
-        state.vad_turn_end_detected.store(false, Ordering::Release);
+            VADEvent::SpeechResumed => {
+                debug!(
+                    "VAD: Speech resumed - cancelling pending VAD turn detection but preserving audio buffer"
+                );
+                let mut state = speech_final_state.write();
+                state.reset_vad_state();
+            }
+
+            VADEvent::SilenceDetected => {
+                debug!("VAD: Silence detected - waiting for turn end threshold");
+            }
+
+            VADEvent::TurnEnd => {
+                self.handle_vad_turn_end(speech_final_state, silence_tracker, vad_state);
+            }
+        }
     }
 
-    fn reset_speech_state(&self, state: &mut SpeechFinalState) {
-        state.text_buffer.clear();
-        state.last_forced_text.clear();
-        state
-            .waiting_for_speech_final
-            .store(false, Ordering::Release);
-        state
-            .turn_detection_last_fired_ms
-            .store(0, Ordering::Release);
-        state.segment_start_ms.store(0, Ordering::Release);
-        state.hard_timeout_deadline_ms.store(0, Ordering::Release);
+    /// Handle VAD TurnEnd event by spawning turn detection.
+    #[cfg(feature = "stt-vad")]
+    fn handle_vad_turn_end(
+        &self,
+        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_state: Arc<VADState>,
+    ) {
+        let (audio_samples, buffered_text, should_trigger) = {
+            let mut state = speech_final_state.write();
 
-        // Cancel and clear hard timeout handle if present
-        if let Some(handle) = state.hard_timeout_handle.take() {
-            handle.abort();
+            if state.vad_turn_end_detected.load(Ordering::Acquire) {
+                debug!("VAD: TurnEnd already detected for this segment - skipping");
+                return;
+            }
+
+            if !state.waiting_for_speech_final.load(Ordering::Acquire) {
+                debug!("VAD: TurnEnd received but not waiting for speech_final - skipping");
+                return;
+            }
+
+            let audio_buffer = vad_state.audio_buffer.read();
+            if audio_buffer.is_empty() {
+                debug!("VAD: TurnEnd received but audio buffer is empty - skipping");
+                return;
+            }
+
+            if audio_buffer.len() < MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION {
+                debug!(
+                    "VAD: TurnEnd received but audio buffer too short ({} samples < {} min) - skipping",
+                    audio_buffer.len(),
+                    MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION
+                );
+                return;
+            }
+
+            let audio = audio_buffer.clone();
+
+            state.vad_turn_end_detected.store(true, Ordering::Release);
+
+            if let Some(old_handle) = state.turn_detection_handle.take() {
+                debug!("VAD: Cancelling timeout-based turn detection task");
+                old_handle.abort();
+            }
+
+            (audio, state.text_buffer.clone(), true)
+        };
+
+        if !should_trigger {
+            return;
         }
 
-        // Reset VAD state
-        state.reset_vad_state();
-    }
+        info!(
+            "VAD: TurnEnd after {}ms silence - spawning turn detection with {} audio samples",
+            self.config.vad_silence_duration_ms,
+            audio_samples.len()
+        );
 
-    fn get_current_time_ms(&self) -> usize {
-        Self::get_current_time_ms_static()
-    }
+        let handle = turn_detection_tasks::create_vad_turn_detection_task(
+            &self.config,
+            audio_samples,
+            buffered_text,
+            speech_final_state.clone(),
+            self.turn_detector.clone(),
+            silence_tracker,
+            vad_state,
+        );
 
-    fn get_current_time_ms_static() -> usize {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as usize
+        let mut state = speech_final_state.write();
+        state.vad_turn_detection_handle = Some(handle);
     }
 }
 

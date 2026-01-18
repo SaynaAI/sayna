@@ -4,6 +4,7 @@ use crate::core::stt::{STTConfig, STTResult};
 use crate::core::tts::TTSConfig;
 use crate::core::voice_manager::state::SpeechFinalState;
 use crate::core::voice_manager::stt_result::STTResultProcessor;
+use crate::core::voice_manager::utils::get_current_time_ms;
 use crate::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -151,7 +152,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Should return original result immediately
@@ -182,7 +183,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Test message".to_string(), true, false, 0.8);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Should return the original result immediately
@@ -213,7 +214,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
         let _processed1 = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Verify timer was started
@@ -228,7 +229,7 @@ async fn test_speech_final_timing_control() {
         let result2 = STTResult::new("final result".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should return the original speech_final result
@@ -260,7 +261,7 @@ async fn test_speech_final_timing_control() {
         let result = STTResult::new("Direct speech final".to_string(), true, true, 0.85);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result, speech_final_state.clone(), None)
+            .process_result(result, speech_final_state.clone())
             .await;
 
         assert!(processed.is_some());
@@ -289,7 +290,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1.clone(), speech_final_state.clone(), None)
+            .process_result(result1.clone(), speech_final_state.clone())
             .await;
 
         assert!(processed1.is_some());
@@ -305,10 +306,7 @@ async fn test_duplicate_speech_final_prevention() {
         // 2. Simulate timer firing (mark as fired)
         {
             let mut state = speech_final_state.write();
-            let fire_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let fire_time_ms = get_current_time_ms();
             state
                 .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
@@ -322,7 +320,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("Hello world".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should be None (ignored) because timer already fired
@@ -337,7 +335,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("First".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         assert!(processed1.is_some());
@@ -345,11 +343,7 @@ async fn test_duplicate_speech_final_prevention() {
         // Mark timer as fired (simulate timer expiry)
         {
             let mut state = speech_final_state.write();
-            let old_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize
-                - 1000; // 1 second ago
+            let old_time_ms = get_current_time_ms() - 1000; // 1 second ago
             state
                 .turn_detection_last_fired_ms
                 .store(old_time_ms, Ordering::Release);
@@ -363,7 +357,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("Second".to_string(), true, false, 0.9);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should still return the result but NOT start a new timer
@@ -386,17 +380,14 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
         assert!(processed1.is_some());
 
         // Mark timer as fired (with recent timestamp)
         {
             let mut state = speech_final_state.write();
-            let fire_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let fire_time_ms = get_current_time_ms();
             state
                 .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
@@ -410,7 +401,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("First segment".to_string(), true, true, 0.9);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
         assert!(processed2.is_none()); // Ignored due to timer fired recently with same text
 
@@ -428,7 +419,7 @@ async fn test_duplicate_speech_final_prevention() {
         let new_result = STTResult::new("New segment".to_string(), true, false, 0.9);
         let processor_new = STTResultProcessor::default();
         let processed_new = processor_new
-            .process_result(new_result, speech_final_state.clone(), None)
+            .process_result(new_result, speech_final_state.clone())
             .await;
 
         assert!(processed_new.is_some());
@@ -485,7 +476,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        let processed = processor.process_result(result, state.clone(), None).await;
+        let processed = processor.process_result(result, state.clone()).await;
         assert!(processed.is_some());
 
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -538,7 +529,7 @@ mod hard_timeout_tests {
         };
 
         processor
-            .process_result(is_final_result, state.clone(), None)
+            .process_result(is_final_result, state.clone())
             .await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -551,7 +542,7 @@ mod hard_timeout_tests {
         };
 
         processor
-            .process_result(speech_final_result, state.clone(), None)
+            .process_result(speech_final_result, state.clone())
             .await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -595,7 +586,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        processor.process_result(result1, state.clone(), None).await;
+        processor.process_result(result1, state.clone()).await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -606,7 +597,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        processor.process_result(result2, state.clone(), None).await;
+        processor.process_result(result2, state.clone()).await;
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -643,7 +634,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        processor.process_result(result, state.clone(), None).await;
+        processor.process_result(result, state.clone()).await;
 
         {
             let s = state.read();
@@ -658,9 +649,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        processor
-            .process_result(speech_final, state.clone(), None)
-            .await;
+        processor.process_result(speech_final, state.clone()).await;
 
         {
             let s = state.read();
@@ -675,7 +664,7 @@ mod hard_timeout_tests {
             confidence: 0.95,
         };
 
-        processor.process_result(result2, state.clone(), None).await;
+        processor.process_result(result2, state.clone()).await;
 
         {
             let s = state.read();

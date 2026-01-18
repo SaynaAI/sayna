@@ -652,8 +652,8 @@ mod vad_turn_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_vad_smart_turn_end_to_end_flow() {
-        use parking_lot::RwLock as SyncRwLock;
         use sayna::core::turn_detect::TurnDetector;
+        use sayna::core::voice_manager::VADState;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -670,9 +670,8 @@ mod vad_turn_integration_tests {
         let detector = TurnDetector::new(None).await.unwrap();
         let detector = Arc::new(tokio::sync::RwLock::new(detector));
 
-        // Simulate VAD audio buffer (accumulates all samples during utterance)
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        // Create VAD state for accumulating audio samples during utterance
+        let vad_state = Arc::new(VADState::new(16000 * 8, 512));
 
         // Track if speech_final would be fired
         let speech_final_fired = Arc::new(AtomicBool::new(false));
@@ -694,7 +693,7 @@ mod vad_turn_integration_tests {
 
         for frame in &speech_frames {
             // Accumulate in VAD audio buffer
-            vad_audio_buffer.write().extend_from_slice(frame);
+            vad_state.audio_buffer.write().extend_from_slice(frame);
 
             // Simulate VAD probability for speech (high probability)
             let speech_prob = 0.9;
@@ -703,7 +702,7 @@ mod vad_turn_integration_tests {
 
         assert!(silence_tracker.has_speech(), "Should have detected speech");
         assert!(
-            vad_audio_buffer.read().len() >= 16000,
+            vad_state.audio_buffer.read().len() >= 16000,
             "Should have ~1 second of audio"
         );
 
@@ -716,7 +715,7 @@ mod vad_turn_integration_tests {
         let mut turn_end_detected = false;
         for frame in &silence_frames {
             // Accumulate in VAD audio buffer
-            vad_audio_buffer.write().extend_from_slice(frame);
+            vad_state.audio_buffer.write().extend_from_slice(frame);
 
             // Simulate VAD probability for silence (low probability)
             let silence_prob = 0.1;
@@ -731,7 +730,7 @@ mod vad_turn_integration_tests {
         assert!(turn_end_detected, "Should have detected TurnEnd");
 
         // Phase 3: Run smart-turn on accumulated audio
-        let audio_buffer = vad_audio_buffer.read().clone();
+        let audio_buffer = vad_state.audio_buffer.read().clone();
         assert!(
             audio_buffer.len() > 16000,
             "Should have more than 1 second of audio"
@@ -773,10 +772,10 @@ mod vad_turn_integration_tests {
 
         // Cleanup: Reset for next utterance
         silence_tracker.reset();
-        vad_audio_buffer.write().clear();
+        vad_state.audio_buffer.write().clear();
 
         assert!(!silence_tracker.has_speech());
-        assert!(vad_audio_buffer.read().is_empty());
+        assert!(vad_state.audio_buffer.read().is_empty());
     }
 
     /// Test that speech resume correctly cancels pending turn detection.
@@ -788,7 +787,7 @@ mod vad_turn_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_speech_resume_cancels_pending_turn_detection() {
-        use parking_lot::RwLock as SyncRwLock;
+        use sayna::core::voice_manager::VADState;
         use std::sync::Arc;
 
         let silence_config = SilenceTrackerConfig {
@@ -798,20 +797,19 @@ mod vad_turn_integration_tests {
             frame_duration_ms: 32.0,
         };
         let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        let vad_state = Arc::new(VADState::new(16000 * 8, 512));
 
         // Phase 1: Initial speech
         for _ in 0..5 {
             let frame: Vec<i16> = vec![1000i16; 512];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // Phase 2: Brief silence (not enough for TurnEnd)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; 512];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.1);
             // Should be SilenceDetected, not TurnEnd
             if let Some(e) = event {
@@ -821,12 +819,12 @@ mod vad_turn_integration_tests {
 
         // Phase 3: Speech resumes
         let frame: Vec<i16> = vec![1000i16; 512];
-        vad_audio_buffer.write().extend_from_slice(&frame);
+        vad_state.audio_buffer.write().extend_from_slice(&frame);
         let event = silence_tracker.process(0.9);
         assert_eq!(event, Some(VADEvent::SpeechResumed));
 
         // Audio buffer should NOT be cleared (continues accumulating)
-        assert!(!vad_audio_buffer.read().is_empty());
+        assert!(!vad_state.audio_buffer.read().is_empty());
 
         // Silence tracker should be back in speaking state
         assert!(silence_tracker.is_speaking());
@@ -888,8 +886,13 @@ mod vad_turn_integration_tests {
 #[cfg(feature = "stt-vad")]
 mod audio_buffer_accumulation_tests {
     use super::*;
-    use parking_lot::RwLock as SyncRwLock;
+    use sayna::core::voice_manager::VADState;
     use std::sync::Arc;
+
+    /// Helper to create VADState with default capacities for testing
+    fn create_vad_state() -> Arc<VADState> {
+        Arc::new(VADState::new(16000 * 8, 512))
+    }
 
     /// Test Case 1: Verify that SpeechResumed preserves the full audio buffer.
     ///
@@ -911,8 +914,7 @@ mod audio_buffer_accumulation_tests {
             frame_duration_ms: 32.0,
         };
         let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        let vad_state = create_vad_state();
 
         let frame_size = 512; // 32ms at 16kHz
 
@@ -920,11 +922,11 @@ mod audio_buffer_accumulation_tests {
         let initial_speech_frames = 16;
         for i in 0..initial_speech_frames {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size]; // Distinguishable values
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9); // High speech probability
         }
 
-        let buffer_after_initial_speech = vad_audio_buffer.read().len();
+        let buffer_after_initial_speech = vad_state.audio_buffer.read().len();
         assert_eq!(
             buffer_after_initial_speech,
             initial_speech_frames * frame_size,
@@ -936,7 +938,7 @@ mod audio_buffer_accumulation_tests {
         let brief_silence_frames = 2;
         for _ in 0..brief_silence_frames {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.1); // Low speech probability
             // Should be SilenceDetected, not TurnEnd
             if let Some(e) = event {
@@ -955,7 +957,7 @@ mod audio_buffer_accumulation_tests {
 
             // First frame after silence triggers SpeechResumed
             // In the real implementation, process_vad_event does NOT clear the buffer on SpeechResumed
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.9);
 
             if i == 0 {
@@ -973,7 +975,7 @@ mod audio_buffer_accumulation_tests {
         let max_silence_frames = 10;
         for _ in 0..max_silence_frames {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             if let Some(event) = silence_tracker.process(0.1)
                 && event == VADEvent::TurnEnd
             {
@@ -986,7 +988,7 @@ mod audio_buffer_accumulation_tests {
 
         // Verify buffer contains ALL audio from all phases
         let total_frames = initial_speech_frames + brief_silence_frames + resume_speech_frames + 3; // frames until TurnEnd (96ms = 3 frames)
-        let final_buffer_len = vad_audio_buffer.read().len();
+        let final_buffer_len = vad_state.audio_buffer.read().len();
 
         // Buffer should contain at least the expected samples
         // (may have a few more frames depending on exact timing)
@@ -1001,7 +1003,7 @@ mod audio_buffer_accumulation_tests {
         );
 
         // Verify the buffer contains distinguishable audio from all speech phases
-        let buffer = vad_audio_buffer.read();
+        let buffer = vad_state.audio_buffer.read();
 
         // Check initial speech samples are present
         let first_speech_sample = buffer[0];
@@ -1046,8 +1048,7 @@ mod audio_buffer_accumulation_tests {
             frame_duration_ms: 32.0,
         };
         let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        let vad_state = create_vad_state();
 
         let frame_size = 512;
 
@@ -1056,19 +1057,19 @@ mod audio_buffer_accumulation_tests {
         // Speech for first turn
         for i in 0..5 {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         assert!(
-            !vad_audio_buffer.read().is_empty(),
+            !vad_state.audio_buffer.read().is_empty(),
             "Buffer should have audio"
         );
 
         // Silence until TurnEnd
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.1);
             if let Some(VADEvent::TurnEnd) = event {
                 // In real implementation, turn detection would run here
@@ -1080,13 +1081,13 @@ mod audio_buffer_accumulation_tests {
         // Simulate speech_final firing - this clears the buffer
         // (In stt_result.rs:492-498, buffer is cleared after speech_final)
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.clear();
         }
         silence_tracker.reset();
 
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Buffer should be cleared after speech_final"
         );
 
@@ -1104,19 +1105,19 @@ mod audio_buffer_accumulation_tests {
         // In this test, we already cleared it, but in real implementation,
         // process_vad_event clears it on SpeechStart
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Buffer should be empty at start of new turn"
         );
 
         // New turn accumulates fresh audio
         for i in 0..3 {
             let frame: Vec<i16> = vec![(1000 + i * 100) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // Verify new turn has only new audio
-        let buffer = vad_audio_buffer.read();
+        let buffer = vad_state.audio_buffer.read();
         assert_eq!(
             buffer.len(),
             3 * frame_size,
@@ -1144,8 +1145,7 @@ mod audio_buffer_accumulation_tests {
             frame_duration_ms: 32.0,
         };
         let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        let vad_state = create_vad_state();
 
         let frame_size = 512;
 
@@ -1153,7 +1153,7 @@ mod audio_buffer_accumulation_tests {
         let phase1_frames = 10;
         for i in 0..phase1_frames {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1161,7 +1161,7 @@ mod audio_buffer_accumulation_tests {
         let mut first_turn_end = false;
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 first_turn_end = true;
                 // In real system, turn detection would be spawned here
@@ -1171,7 +1171,7 @@ mod audio_buffer_accumulation_tests {
         }
         assert!(first_turn_end, "Should have triggered first TurnEnd");
 
-        let buffer_at_first_turn_end = vad_audio_buffer.read().len();
+        let buffer_at_first_turn_end = vad_state.audio_buffer.read().len();
 
         // Phase 3: Speech resumes BEFORE turn detection completes
         // (In real system, this would cancel the pending turn detection task)
@@ -1179,7 +1179,7 @@ mod audio_buffer_accumulation_tests {
         let phase3_frames = 5;
         for i in 0..phase3_frames {
             let frame: Vec<i16> = vec![((phase1_frames + i) * 100) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
 
             if i == 0 {
                 let event = silence_tracker.process(0.9);
@@ -1195,7 +1195,7 @@ mod audio_buffer_accumulation_tests {
 
         // Buffer should contain MORE than at first TurnEnd (not cleared)
         assert!(
-            vad_audio_buffer.read().len() > buffer_at_first_turn_end,
+            vad_state.audio_buffer.read().len() > buffer_at_first_turn_end,
             "Buffer should grow after SpeechResumed, not be cleared"
         );
 
@@ -1203,7 +1203,7 @@ mod audio_buffer_accumulation_tests {
         let mut second_turn_end = false;
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 second_turn_end = true;
                 break;
@@ -1212,7 +1212,7 @@ mod audio_buffer_accumulation_tests {
         assert!(second_turn_end, "Should have triggered second TurnEnd");
 
         // At second TurnEnd, turn detection would re-run with FULL accumulated buffer
-        let final_buffer = vad_audio_buffer.read();
+        let final_buffer = vad_state.audio_buffer.read();
         let expected_speech_samples = (phase1_frames + phase3_frames) * frame_size;
 
         // Buffer should contain all speech from both phases plus silence frames
@@ -1349,8 +1349,7 @@ mod audio_buffer_accumulation_tests {
             frame_duration_ms: 32.0,
         };
         let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
+        let vad_state = create_vad_state();
 
         let frame_size = 512;
 
@@ -1360,14 +1359,14 @@ mod audio_buffer_accumulation_tests {
         // "Hello"
         for i in 0..5 {
             let frame: Vec<i16> = vec![1000 + (i * 10) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // "..." (short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.1);
             assert_ne!(
                 event,
@@ -1379,7 +1378,7 @@ mod audio_buffer_accumulation_tests {
         // "um"
         for i in 0..3 {
             let frame: Vec<i16> = vec![2000 + (i * 10) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let event = silence_tracker.process(0.9);
             if i == 0 {
                 assert_eq!(
@@ -1393,28 +1392,28 @@ mod audio_buffer_accumulation_tests {
         // "..." (another short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.1);
         }
 
         // "how are"
         for i in 0..4 {
             let frame: Vec<i16> = vec![3000 + (i * 10) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // "..." (yet another short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.1);
         }
 
         // "you?"
         for i in 0..3 {
             let frame: Vec<i16> = vec![4000 + (i * 10) as i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1422,7 +1421,7 @@ mod audio_buffer_accumulation_tests {
         let mut turn_end_detected = false;
         for _ in 0..10 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend_from_slice(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 turn_end_detected = true;
                 break;
@@ -1432,7 +1431,7 @@ mod audio_buffer_accumulation_tests {
         assert!(turn_end_detected, "Should eventually trigger TurnEnd");
 
         // Verify buffer contains audio from ALL speech segments
-        let buffer = vad_audio_buffer.read();
+        let buffer = vad_state.audio_buffer.read();
         let total_speech_frames = 5 + 3 + 4 + 3; // All speech segments
         let total_pause_frames = 2 + 2 + 2; // All short pauses
         let min_expected = (total_speech_frames + total_pause_frames) * frame_size;
@@ -2061,7 +2060,9 @@ mod stt_result_processor_integration_tests {
     use sayna::core::stt::STTResult;
     use sayna::core::turn_detect::TurnDetector;
     use sayna::core::vad::{SilenceTracker, SilenceTrackerConfig, VADEvent};
-    use sayna::core::voice_manager::{STTCallback, STTProcessingConfig, STTResultProcessor};
+    use sayna::core::voice_manager::{
+        STTCallback, STTProcessingConfig, STTResultProcessor, VADState,
+    };
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -2071,6 +2072,16 @@ mod stt_result_processor_integration_tests {
 
     // Import the state type from the voice_manager module
     use sayna::core::voice_manager::SpeechFinalState;
+
+    /// Helper to create VADState with default capacities for testing
+    fn create_vad_state() -> Arc<VADState> {
+        const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8;
+        const VAD_FRAME_BUFFER_CAPACITY: usize = 512;
+        Arc::new(VADState::new(
+            VAD_AUDIO_BUFFER_CAPACITY,
+            VAD_FRAME_BUFFER_CAPACITY,
+        ))
+    }
 
     /// Test 1: Full Integration - process_vad_event fires callback on turn complete.
     ///
@@ -2082,12 +2093,33 @@ mod stt_result_processor_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_process_vad_event_fires_callback_on_turn_complete() {
+        // Initialize turn detector
+        let detector = TurnDetector::new(None).await.unwrap();
+        let detector = Arc::new(RwLock::new(detector));
+
+        // Create silence tracker with short thresholds for fast testing
+        let silence_config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64, // 2 frames
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
+
+        // Create VAD state
+        let vad_state = create_vad_state();
+
         // Setup processor with fast timeouts for testing
         let config = STTProcessingConfig::default()
             .set_vad_silence_duration_ms(64) // 64ms silence threshold
             .set_hard_timeout_ms(5000);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            Some(detector.clone()),
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         // Track callback invocations
         let callback_count = Arc::new(AtomicUsize::new(0));
@@ -2108,23 +2140,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // Initialize turn detector
-        let detector = TurnDetector::new(None).await.unwrap();
-        let detector = Arc::new(RwLock::new(detector));
-
-        // Create silence tracker with short thresholds for fast testing
-        let silence_config = SilenceTrackerConfig {
-            threshold: 0.5,
-            silence_duration_ms: 64, // 2 frames
-            min_speech_duration_ms: 32,
-            frame_duration_ms: 32.0,
-        };
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-
-        // Create VAD audio buffer
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Set state to waiting for speech_final (simulating an ongoing segment)
         {
             let mut s = state.write();
@@ -2133,35 +2148,23 @@ mod stt_result_processor_integration_tests {
         }
 
         // Phase 1: SpeechStart event - should clear audio buffer and reset VAD state
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add audio to buffer (simulating audio accumulation during speech)
         let audio_samples: Vec<i16> = super::generate_sine_wave(440.0, 1.0, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio_samples);
         }
 
         // Verify audio buffer has samples
         assert!(
-            !vad_audio_buffer.read().is_empty(),
+            !vad_state.audio_buffer.read().is_empty(),
             "Audio buffer should have samples"
         );
 
         // Phase 2: TurnEnd event - should trigger turn detection with audio
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Wait for turn detection task to complete (model inference + callback)
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2181,7 +2184,7 @@ mod stt_result_processor_integration_tests {
 
         // Buffer should be cleared after speech_final
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Audio buffer should be cleared after speech_final"
         );
     }
@@ -2195,11 +2198,31 @@ mod stt_result_processor_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_smart_turn_rejection_allows_retry() {
+        // Initialize turn detector with high threshold so initial prediction fails
+        let mut detector = TurnDetector::new(None).await.unwrap();
+        detector.set_threshold(0.99); // Very high threshold - likely to reject
+        let detector = Arc::new(RwLock::new(detector));
+
+        let silence_config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64,
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
+
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default()
             .set_vad_silence_duration_ms(64)
             .set_hard_timeout_ms(10000);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            Some(detector.clone()),
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         // Track callback invocations
         let callback_count = Arc::new(AtomicUsize::new(0));
@@ -2216,22 +2239,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // Initialize turn detector with high threshold so initial prediction fails
-        let mut detector = TurnDetector::new(None).await.unwrap();
-        detector.set_threshold(0.99); // Very high threshold - likely to reject
-        let detector = Arc::new(RwLock::new(detector));
-
-        let silence_config = SilenceTrackerConfig {
-            threshold: 0.5,
-            silence_duration_ms: 64,
-            min_speech_duration_ms: 32,
-            frame_duration_ms: 32.0,
-        };
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Setup state
         {
             let mut s = state.write();
@@ -2240,29 +2247,17 @@ mod stt_result_processor_integration_tests {
         }
 
         // SpeechStart
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add minimal audio (likely to produce low turn probability)
         let short_audio: Vec<i16> = super::generate_sine_wave(440.0, 0.5, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&short_audio);
         }
 
         // First TurnEnd - likely to be rejected due to high threshold
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Wait for first detection attempt
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -2283,7 +2278,7 @@ mod stt_result_processor_integration_tests {
         // Add more audio (continuing the utterance)
         let more_audio: Vec<i16> = super::generate_sine_wave(880.0, 1.0, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&more_audio);
         }
 
@@ -2300,13 +2295,7 @@ mod stt_result_processor_integration_tests {
         }
 
         // Second TurnEnd - should succeed with low threshold
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Wait for second detection
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2335,6 +2324,22 @@ mod stt_result_processor_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_inference_timeout_fires_speech_final() {
+        // Use stub detector (when stt-vad not compiled) or real one
+        // The stub returns immediately, so this test validates the timeout path
+        // only when real detector is slow enough
+        let detector = TurnDetector::new(None).await.unwrap();
+        let detector = Arc::new(RwLock::new(detector));
+
+        let silence_config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64,
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
+
+        let vad_state = create_vad_state();
+
         // Use very short inference timeout
         let config = STTProcessingConfig::new(
             5000, // stt_speech_final_wait_ms
@@ -2344,7 +2349,12 @@ mod stt_result_processor_integration_tests {
         )
         .set_vad_silence_duration_ms(64);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            Some(detector.clone()),
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2360,23 +2370,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // Use stub detector (when stt-vad not compiled) or real one
-        // The stub returns immediately, so this test validates the timeout path
-        // only when real detector is slow enough
-        let detector = TurnDetector::new(None).await.unwrap();
-        let detector = Arc::new(RwLock::new(detector));
-
-        let silence_config = SilenceTrackerConfig {
-            threshold: 0.5,
-            silence_duration_ms: 64,
-            min_speech_duration_ms: 32,
-            frame_duration_ms: 32.0,
-        };
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Setup state
         {
             let mut s = state.write();
@@ -2385,29 +2378,17 @@ mod stt_result_processor_integration_tests {
         }
 
         // SpeechStart
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add substantial audio to ensure detection runs
         let audio: Vec<i16> = super::generate_sine_wave(440.0, 2.0, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // TurnEnd - should trigger detection with short timeout
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Wait for timeout + callback
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2437,6 +2418,19 @@ mod stt_result_processor_integration_tests {
     #[tokio::test]
     #[ignore = "Requires model files to be downloaded"]
     async fn test_speech_resumed_cancels_pending_detection() {
+        let detector = TurnDetector::new(None).await.unwrap();
+        let detector = Arc::new(RwLock::new(detector));
+
+        let silence_config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64,
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
+
+        let vad_state = create_vad_state();
+
         // Use longer inference timeout so we can inject SpeechResumed before it completes
         let config = STTProcessingConfig::new(
             5000, // stt_speech_final_wait_ms
@@ -2446,7 +2440,12 @@ mod stt_result_processor_integration_tests {
         )
         .set_vad_silence_duration_ms(64);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            Some(detector.clone()),
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2462,20 +2461,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        let detector = TurnDetector::new(None).await.unwrap();
-        let detector = Arc::new(RwLock::new(detector));
-
-        let silence_config = SilenceTrackerConfig {
-            threshold: 0.5,
-            silence_duration_ms: 64,
-            min_speech_duration_ms: 32,
-            frame_duration_ms: 32.0,
-        };
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Setup state
         {
             let mut s = state.write();
@@ -2484,29 +2469,17 @@ mod stt_result_processor_integration_tests {
         }
 
         // SpeechStart
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add audio
         let audio: Vec<i16> = super::generate_sine_wave(440.0, 1.0, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // TurnEnd - starts detection task
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Brief delay to ensure task is spawned
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2515,13 +2488,7 @@ mod stt_result_processor_integration_tests {
         let count_before = callback_count.load(Ordering::SeqCst);
 
         // SpeechResumed - should cancel pending detection and reset VAD state
-        processor.process_vad_event(
-            VADEvent::SpeechResumed,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechResumed, state.clone());
 
         // Verify VAD state was reset
         {
@@ -2540,7 +2507,7 @@ mod stt_result_processor_integration_tests {
         // Audio buffer should NOT be cleared by SpeechResumed
         // (only cleared on SpeechStart or after speech_final)
         assert!(
-            !vad_audio_buffer.read().is_empty(),
+            !vad_state.audio_buffer.read().is_empty(),
             "Audio buffer should be preserved after SpeechResumed"
         );
 
@@ -2571,18 +2538,12 @@ mod stt_result_processor_integration_tests {
         // Add more audio
         let more_audio: Vec<i16> = super::generate_sine_wave(880.0, 0.5, 16000);
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&more_audio);
         }
 
         // Another TurnEnd should be able to trigger detection
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            Some(detector.clone()),
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Verify detection was triggered (vad_turn_end_detected should be set)
         {
@@ -2606,9 +2567,18 @@ mod stt_result_processor_integration_tests {
     /// Only TurnEnd should trigger smart-turn detection.
     #[tokio::test]
     async fn test_silence_detected_does_not_trigger_detection() {
+        // No detector needed - we're testing that SilenceDetected doesn't trigger detection
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default().set_vad_silence_duration_ms(300);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No detector needed
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2624,11 +2594,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // No detector needed - we're testing that SilenceDetected doesn't trigger detection
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Setup state
         {
             let s = state.write();
@@ -2638,18 +2603,12 @@ mod stt_result_processor_integration_tests {
         // Add audio
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // SilenceDetected - should NOT trigger detection
-        processor.process_vad_event(
-            VADEvent::SilenceDetected,
-            state.clone(),
-            None, // No detector needed
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SilenceDetected, state.clone());
 
         // Wait a bit
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2674,8 +2633,17 @@ mod stt_result_processor_integration_tests {
     /// This prevents triggering detection when no active speech segment exists.
     #[tokio::test]
     async fn test_turn_end_ignored_when_not_waiting() {
+        // No detector needed - we're testing early return path
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default();
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No detector needed
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2691,28 +2659,17 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // No detector needed - we're testing early return path
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // DON'T set waiting_for_speech_final
 
         // Add audio
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // TurnEnd - should be ignored because not waiting
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            None, // No detector needed
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2727,8 +2684,18 @@ mod stt_result_processor_integration_tests {
     /// Test that TurnEnd with empty audio buffer is skipped.
     #[tokio::test]
     async fn test_turn_end_skipped_with_empty_buffer() {
+        // No detector needed - we're testing empty buffer early return
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        // Create VADState but leave its audio buffer empty
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default();
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No detector needed
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2744,10 +2711,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // No detector needed - we're testing empty buffer early return
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> = Arc::new(SyncRwLock::new(Vec::new())); // Empty buffer
-
         // Set waiting state
         {
             let s = state.write();
@@ -2755,13 +2718,7 @@ mod stt_result_processor_integration_tests {
         }
 
         // TurnEnd with empty buffer - should be skipped
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            None, // No detector needed
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2786,8 +2743,17 @@ mod stt_result_processor_integration_tests {
     /// should be ignored to prevent duplicate detection runs.
     #[tokio::test]
     async fn test_duplicate_turn_end_prevention() {
+        // No detector needed - we're testing duplicate prevention early return
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default();
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No detector needed
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2803,11 +2769,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        // No detector needed - we're testing duplicate prevention early return
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Set state with vad_turn_end_detected already true (simulating ongoing detection)
         {
             let s = state.write();
@@ -2818,18 +2779,12 @@ mod stt_result_processor_integration_tests {
         // Add audio
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // TurnEnd - should be skipped because detection already in progress
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            None, // No detector needed
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2847,9 +2802,17 @@ mod stt_result_processor_integration_tests {
     /// based on VAD silence detection alone.
     #[tokio::test]
     async fn test_vad_fires_without_turn_detector() {
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default().set_vad_silence_duration_ms(64);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No turn detector
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -2865,10 +2828,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // Setup state
         {
             let mut s = state.write();
@@ -2877,29 +2836,17 @@ mod stt_result_processor_integration_tests {
         }
 
         // SpeechStart
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            None, // No turn detector
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add audio
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&audio);
         }
 
         // TurnEnd without detector - should fire based on silence alone
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            None, // No turn detector
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Wait for callback
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2913,7 +2860,7 @@ mod stt_result_processor_integration_tests {
 
         // Buffer should be cleared
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Buffer should be cleared after speech_final"
         );
     }
@@ -2934,17 +2881,22 @@ mod stt_result_processor_integration_tests {
     /// - TurnEnd + speech_final: CLEAR buffer (utterance complete)
     #[tokio::test]
     async fn test_speech_resumed_preserves_audio_buffer() {
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default();
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None, // No turn detector needed for this test
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback: STTCallback = Arc::new(move |_result: STTResult| {
             Box::pin(async move {}) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
 
         // Setup state
         {
@@ -2955,28 +2907,22 @@ mod stt_result_processor_integration_tests {
         // Add initial audio (simulating accumulated speech)
         let initial_audio: Vec<i16> = vec![1000i16; 8000]; // 0.5s at 16kHz
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&initial_audio);
         }
 
         // Verify initial buffer state
         assert_eq!(
-            vad_audio_buffer.read().len(),
+            vad_state.audio_buffer.read().len(),
             8000,
             "Buffer should contain initial audio"
         );
 
         // Process SpeechResumed event
-        processor.process_vad_event(
-            VADEvent::SpeechResumed,
-            state.clone(),
-            None, // No turn detector needed for this test
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechResumed, state.clone());
 
         // CRITICAL: Verify buffer was NOT cleared by SpeechResumed
-        let buffer = vad_audio_buffer.read();
+        let buffer = vad_state.audio_buffer.read();
         assert_eq!(
             buffer.len(),
             8000,
@@ -3002,11 +2948,26 @@ mod stt_result_processor_integration_tests {
     /// that specifically validates the state machine behavior.
     #[tokio::test]
     async fn test_smart_turn_rejection_state_reset_allows_retrigger() {
+        let silence_config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64,
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
+
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default()
             .set_vad_silence_duration_ms(64)
             .set_hard_timeout_ms(10000);
 
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None,
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
@@ -3022,17 +2983,6 @@ mod stt_result_processor_integration_tests {
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-        let silence_config = SilenceTrackerConfig {
-            threshold: 0.5,
-            silence_duration_ms: 64,
-            min_speech_duration_ms: 32,
-            frame_duration_ms: 32.0,
-        };
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_config));
-
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
-
         // === PHASE 1: Setup initial state ===
         {
             let mut s = state.write();
@@ -3041,19 +2991,13 @@ mod stt_result_processor_integration_tests {
         }
 
         // SpeechStart - clears buffer for new utterance
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            None,
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Add initial audio (1 second)
         let initial_audio: Vec<i16> = super::generate_sine_wave(440.0, 1.0, 16000);
         let initial_samples = initial_audio.len();
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&initial_audio);
         }
 
@@ -3074,7 +3018,7 @@ mod stt_result_processor_integration_tests {
         // Buffer should still have initial audio (NOT cleared on rejection)
 
         // Verify buffer was preserved (simulating post-rejection state)
-        let buffer_after_rejection = vad_audio_buffer.read().len();
+        let buffer_after_rejection = vad_state.audio_buffer.read().len();
         assert_eq!(
             buffer_after_rejection, initial_samples,
             "Audio buffer must NOT be cleared when smart-turn returns false. \
@@ -3087,12 +3031,12 @@ mod stt_result_processor_integration_tests {
         let additional_audio: Vec<i16> = super::generate_sine_wave(880.0, 0.5, 16000);
         let additional_samples = additional_audio.len();
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&additional_audio);
         }
 
         // Verify buffer has grown (accumulated audio)
-        let buffer_after_more_speech = vad_audio_buffer.read().len();
+        let buffer_after_more_speech = vad_state.audio_buffer.read().len();
         assert_eq!(
             buffer_after_more_speech,
             initial_samples + additional_samples,
@@ -3115,13 +3059,7 @@ mod stt_result_processor_integration_tests {
         }
 
         // Second TurnEnd
-        processor.process_vad_event(
-            VADEvent::TurnEnd,
-            state.clone(),
-            None, // No detector - fires based on silence alone
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::TurnEnd, state.clone());
 
         // Verify detection was triggered
         {
@@ -3145,7 +3083,7 @@ mod stt_result_processor_integration_tests {
 
         // Verify buffer was cleared after successful speech_final
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Buffer should be cleared after successful speech_final"
         );
 
@@ -3163,43 +3101,42 @@ mod stt_result_processor_integration_tests {
     /// SpeechStart correctly clears the buffer for a new utterance.
     #[tokio::test]
     async fn test_speech_start_clears_audio_buffer() {
+        let silence_tracker = Arc::new(SilenceTracker::default());
+        let vad_state = create_vad_state();
+
         let config = STTProcessingConfig::default();
-        let processor = STTResultProcessor::new(config);
+        let processor = STTResultProcessor::with_vad_components(
+            config,
+            None,
+            silence_tracker.clone(),
+            vad_state.clone(),
+        );
 
         let callback: STTCallback = Arc::new(move |_result: STTResult| {
             Box::pin(async move {}) as Pin<Box<dyn Future<Output = ()> + Send>>
         });
 
         let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
-        let silence_tracker = Arc::new(SilenceTracker::default());
-        let vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>> =
-            Arc::new(SyncRwLock::new(Vec::with_capacity(16000 * 8)));
 
         // Add audio from "previous utterance"
         let old_audio: Vec<i16> = vec![500i16; 8000];
         {
-            let mut buffer = vad_audio_buffer.write();
+            let mut buffer = vad_state.audio_buffer.write();
             buffer.extend_from_slice(&old_audio);
         }
 
         assert_eq!(
-            vad_audio_buffer.read().len(),
+            vad_state.audio_buffer.read().len(),
             8000,
             "Buffer should contain old audio"
         );
 
         // Process SpeechStart event (new utterance begins)
-        processor.process_vad_event(
-            VADEvent::SpeechStart,
-            state.clone(),
-            None,
-            silence_tracker.clone(),
-            vad_audio_buffer.clone(),
-        );
+        processor.process_vad_event(VADEvent::SpeechStart, state.clone());
 
         // Verify buffer WAS cleared by SpeechStart
         assert!(
-            vad_audio_buffer.read().is_empty(),
+            vad_state.audio_buffer.read().is_empty(),
             "Audio buffer must be cleared on SpeechStart - new utterance starts fresh"
         );
     }

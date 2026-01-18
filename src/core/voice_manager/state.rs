@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use tokio::task::JoinHandle;
 
 use super::callbacks::STTCallback;
+use super::utils::get_current_time_ms;
 
 /// Internal state for managing speech final timing
 /// Uses parking_lot RwLock for faster synchronization and optimized field layout
@@ -82,21 +83,12 @@ impl SpeechFinalState {
         }
     }
 
-    /// Reset all state for a new conversation segment.
+    /// Internal helper for resetting state.
     ///
-    /// Call this after a speech_final has been delivered to prepare for the
-    /// next utterance.
-    pub fn reset_for_next_segment(&mut self) {
-        self.text_buffer.clear();
-        self.last_forced_text.clear();
-        self.waiting_for_speech_final
-            .store(false, Ordering::Release);
-        self.turn_detection_last_fired_ms
-            .store(0, Ordering::Release);
-        self.segment_start_ms.store(0, Ordering::Release);
-        self.hard_timeout_deadline_ms.store(0, Ordering::Release);
-
-        // Cancel and clear handles
+    /// If `keep_fired_stats` is true, preserves `last_forced_text` and
+    /// `turn_detection_last_fired_ms` (used after firing to prevent duplicates).
+    fn reset_internal(&mut self, keep_fired_stats: bool) {
+        // Abort and clear handles
         if let Some(handle) = self.turn_detection_handle.take() {
             handle.abort();
         }
@@ -106,6 +98,38 @@ impl SpeechFinalState {
 
         // Reset VAD state
         self.reset_vad_state();
+
+        // Clear text buffer
+        self.text_buffer.clear();
+
+        // Reset timing state
+        self.waiting_for_speech_final
+            .store(false, Ordering::Release);
+        self.segment_start_ms.store(0, Ordering::Release);
+        self.hard_timeout_deadline_ms.store(0, Ordering::Release);
+
+        // Conditionally clear fired stats
+        if !keep_fired_stats {
+            self.last_forced_text.clear();
+            self.turn_detection_last_fired_ms
+                .store(0, Ordering::Release);
+        }
+    }
+
+    /// Reset all state for a new conversation segment.
+    ///
+    /// Call this after a speech_final has been delivered to prepare for the
+    /// next utterance.
+    pub fn reset_for_next_segment(&mut self) {
+        self.reset_internal(false);
+    }
+
+    /// Reset state after firing a forced speech_final.
+    ///
+    /// This preserves `last_forced_text` and `turn_detection_last_fired_ms`
+    /// to enable duplicate detection for subsequent events.
+    pub fn reset_after_firing(&mut self) {
+        self.reset_internal(true);
     }
 }
 
@@ -139,10 +163,7 @@ impl InterruptionState {
 
         // If completed and past the non-interruptible time, we can interrupt
         if self.is_completed.load(Ordering::Acquire) {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let now_ms = get_current_time_ms();
             let until_ms = self.non_interruptible_until_ms.load(Ordering::Acquire);
 
             if now_ms > until_ms {

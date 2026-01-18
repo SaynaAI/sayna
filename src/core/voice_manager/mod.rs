@@ -302,8 +302,9 @@ pub mod state;
 pub mod stt_config;
 pub mod stt_result;
 mod turn_detection_tasks;
+pub(crate) mod utils;
 #[cfg(feature = "stt-vad")]
-mod vad_processor;
+pub mod vad_processor;
 
 #[cfg(test)]
 mod tests;
@@ -318,3 +319,5 @@ pub use manager::VoiceManager;
 pub use state::SpeechFinalState;
 pub use stt_config::STTProcessingConfig;
 pub use stt_result::STTResultProcessor;
+#[cfg(feature = "stt-vad")]
+pub use vad_processor::VADState;

@@ -1,255 +1,154 @@
-//! VAD-based silence detection and turn processing
+//! VAD-based audio processing for silence detection.
 //!
-//! This module provides VAD event processing for STT result handling.
-//! It is feature-gated under `stt-vad`.
+//! This module provides audio chunk processing through VAD for silence detection.
+//! It is feature-gated under `stt-vad`. VAD event handling logic has been moved
+//! to `STTResultProcessor` for better cohesion.
 
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::warn;
 
-use crate::core::stt::STTResult;
-use crate::core::turn_detect::TurnDetector;
-use crate::core::vad::{SilenceTracker, VADEvent};
+use crate::core::vad::{SilenceTracker, SileroVAD, VADEvent};
 
-use super::state::SpeechFinalState;
-use super::stt_config::STTProcessingConfig;
-use super::stt_result::STTResultProcessor;
-use super::turn_detection_tasks::{SmartTurnResult, run_smart_turn_detection};
+use super::errors::{VoiceManagerError, VoiceManagerResult};
+use super::utils::MAX_VAD_AUDIO_SAMPLES;
 
-/// Process a VAD event for silence detection.
+/// Encapsulates VAD processing buffers and state per VoiceManager instance.
 ///
-/// This function should be called for every VAD event from the SilenceTracker.
-/// When VAD detects silence exceeding the threshold (TurnEnd event), it triggers
-/// turn detection on the accumulated text.
-pub fn process_vad_event(
-    config: &STTProcessingConfig,
-    event: VADEvent,
-    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-    silence_tracker: Arc<SilenceTracker>,
-    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
-) {
-    match event {
-        VADEvent::SpeechStart => {
-            let state = speech_final_state.read();
-            let is_mid_turn = state.waiting_for_speech_final.load(Ordering::Acquire);
-            drop(state);
+/// This struct groups together:
+/// - `audio_buffer`: Accumulates ALL audio samples during an utterance for turn detection
+/// - `frame_buffer`: Temporary buffer for VAD frame processing
+/// - `buffer_limit_warned`: Per-instance flag for logging buffer limit warning once
+pub struct VADState {
+    /// Buffer for accumulating audio samples for turn detection.
+    ///
+    /// Per smart-turn best practices: "run Smart Turn on the entire recording of the user's turn"
+    /// This buffer accumulates ALL samples during an utterance so that when silence is detected,
+    /// the turn detection model can analyze the complete context (up to 8 seconds).
+    pub audio_buffer: SyncRwLock<Vec<i16>>,
 
-            if is_mid_turn {
-                debug!(
-                    "VAD: Speech started mid-turn - resetting VAD state but preserving audio buffer for context"
-                );
-                let mut state = speech_final_state.write();
-                state.reset_vad_state();
-            } else {
-                debug!("VAD: New speech started - resetting VAD state and clearing audio buffer");
-                let mut state = speech_final_state.write();
-                state.reset_vad_state();
-                let mut buffer = vad_audio_buffer.write();
-                buffer.clear();
-            }
-        }
+    /// Temporary buffer for VAD frame processing.
+    ///
+    /// This buffer accumulates partial frames between `receive_audio` calls. VAD requires
+    /// complete frames (e.g., 512 samples at 16kHz = 32ms) for inference. Since audio
+    /// may arrive in arbitrary chunk sizes, we accumulate samples here and drain
+    /// complete frames for VAD processing.
+    pub frame_buffer: SyncRwLock<Vec<i16>>,
 
-        VADEvent::SpeechResumed => {
-            debug!(
-                "VAD: Speech resumed - cancelling pending VAD turn detection but preserving audio buffer"
-            );
-            let mut state = speech_final_state.write();
-            state.reset_vad_state();
-        }
+    /// Per-instance flag to log VAD buffer limit warning only once.
+    buffer_limit_warned: AtomicBool,
+}
 
-        VADEvent::SilenceDetected => {
-            debug!("VAD: Silence detected - waiting for turn end threshold");
+impl VADState {
+    /// Create a new VADState with pre-allocated buffers.
+    ///
+    /// - `audio_buffer_capacity`: Capacity for the audio buffer (default: 8 seconds at 16kHz)
+    /// - `frame_buffer_capacity`: Capacity for the frame buffer (default: 512 samples)
+    pub fn new(audio_buffer_capacity: usize, frame_buffer_capacity: usize) -> Self {
+        Self {
+            audio_buffer: SyncRwLock::new(Vec::with_capacity(audio_buffer_capacity)),
+            frame_buffer: SyncRwLock::new(Vec::with_capacity(frame_buffer_capacity)),
+            buffer_limit_warned: AtomicBool::new(false),
         }
+    }
 
-        VADEvent::TurnEnd => {
-            handle_vad_turn_end(
-                config,
-                speech_final_state,
-                turn_detector,
-                silence_tracker,
-                vad_audio_buffer,
-            );
+    /// Clear both buffers and reset the warning flag.
+    pub fn reset(&self) {
+        {
+            let mut buffer = self.audio_buffer.write();
+            buffer.clear();
         }
+        {
+            let mut buffer = self.frame_buffer.write();
+            buffer.clear();
+        }
+        self.buffer_limit_warned.store(false, Ordering::Relaxed);
+    }
+
+    /// Clear just the audio buffer (used when new speech starts).
+    pub fn clear_audio_buffer(&self) {
+        let mut buffer = self.audio_buffer.write();
+        buffer.clear();
     }
 }
 
-/// Handle VAD TurnEnd event by spawning turn detection.
-fn handle_vad_turn_end(
-    config: &STTProcessingConfig,
-    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-    silence_tracker: Arc<SilenceTracker>,
-    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
-) {
-    let (audio_samples, buffered_text, should_trigger) = {
-        let mut state = speech_final_state.write();
+/// Process an audio chunk through VAD for silence detection.
+///
+/// This function converts raw PCM bytes to i16 samples and:
+/// 1. Accumulates ALL samples in `vad_state.audio_buffer` for turn detection
+/// 2. Processes complete frames through VAD using `vad_state.frame_buffer`
+///
+/// Returns a vector of VAD events generated from processing the audio.
+pub async fn process_audio_chunk(
+    audio: &[u8],
+    vad: &Arc<RwLock<SileroVAD>>,
+    vad_state: &Arc<VADState>,
+    silence_tracker: &Arc<SilenceTracker>,
+) -> VoiceManagerResult<Vec<VADEvent>> {
+    // Convert bytes to i16 samples (assuming 16-bit PCM little-endian)
+    let samples: Vec<i16> = audio
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
 
-        if state.vad_turn_end_detected.load(Ordering::Acquire) {
-            debug!("VAD: TurnEnd already detected for this segment - skipping");
-            return;
-        }
-
-        if !state.waiting_for_speech_final.load(Ordering::Acquire) {
-            debug!("VAD: TurnEnd received but not waiting for speech_final - skipping");
-            return;
-        }
-
-        let audio_buffer = vad_audio_buffer.read();
-        if audio_buffer.is_empty() {
-            debug!("VAD: TurnEnd received but audio buffer is empty - skipping");
-            return;
-        }
-
-        const MIN_AUDIO_SAMPLES: usize = 8000; // 0.5 seconds at 16kHz
-        if audio_buffer.len() < MIN_AUDIO_SAMPLES {
-            debug!(
-                "VAD: TurnEnd received but audio buffer too short ({} samples < {} min) - skipping",
-                audio_buffer.len(),
-                MIN_AUDIO_SAMPLES
-            );
-            return;
-        }
-
-        let audio = audio_buffer.clone();
-
-        state.vad_turn_end_detected.store(true, Ordering::Release);
-
-        if let Some(old_handle) = state.turn_detection_handle.take() {
-            debug!("VAD: Cancelling timeout-based turn detection task");
-            old_handle.abort();
-        }
-
-        (audio, state.text_buffer.clone(), true)
+    // Get VAD frame size
+    let frame_size = {
+        let vad_guard = vad.read().await;
+        vad_guard.frame_size()
     };
 
-    if !should_trigger {
-        return;
+    // Accumulate samples in audio_buffer for turn detection (never drained here)
+    {
+        let mut audio_buffer = vad_state.audio_buffer.write();
+        if audio_buffer.len() < MAX_VAD_AUDIO_SAMPLES {
+            let remaining_capacity = MAX_VAD_AUDIO_SAMPLES - audio_buffer.len();
+            let samples_to_add = samples.len().min(remaining_capacity);
+            audio_buffer.extend_from_slice(&samples[..samples_to_add]);
+
+            if samples_to_add < samples.len()
+                && !vad_state.buffer_limit_warned.swap(true, Ordering::Relaxed)
+            {
+                warn!(
+                    "VAD audio buffer reached limit of {} samples (30 seconds). \
+                     New audio will not be buffered for turn detection until buffer is cleared.",
+                    MAX_VAD_AUDIO_SAMPLES
+                );
+            }
+        }
     }
 
-    info!(
-        "VAD: TurnEnd after {}ms silence - spawning turn detection with {} audio samples",
-        config.vad_silence_duration_ms,
-        audio_samples.len()
-    );
+    // Extract complete frames from frame_buffer for VAD processing
+    let frames_to_process: Vec<Vec<i16>> = {
+        let mut frame_buffer = vad_state.frame_buffer.write();
+        frame_buffer.extend_from_slice(&samples);
 
-    let handle = spawn_vad_turn_detection_audio(
-        config.turn_detection_inference_timeout_ms,
-        audio_samples,
-        buffered_text,
-        speech_final_state.clone(),
-        turn_detector,
-        silence_tracker,
-        vad_audio_buffer,
-    );
+        let mut frames = Vec::new();
+        while frame_buffer.len() >= frame_size {
+            let frame: Vec<i16> = frame_buffer.drain(..frame_size).collect();
+            frames.push(frame);
+        }
+        frames
+    }; // Frame buffer lock released here
 
-    let mut state = speech_final_state.write();
-    state.vad_turn_detection_handle = Some(handle);
-}
+    // Collect events from processing frames
+    let mut events = Vec::new();
 
-/// Spawn turn detection task with audio input.
-fn spawn_vad_turn_detection_audio(
-    inference_timeout_ms: u64,
-    audio_samples: Vec<i16>,
-    buffered_text: String,
-    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-    silence_tracker: Arc<SilenceTracker>,
-    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let should_continue = {
-            let state = speech_final_state.read();
-            state.waiting_for_speech_final.load(Ordering::Acquire)
-                && state.vad_turn_end_detected.load(Ordering::Acquire)
+    // Process frames through VAD (without holding buffer lock)
+    for frame in frames_to_process {
+        let speech_prob = {
+            let vad_guard = vad.write().await;
+            vad_guard.process_audio(&frame).await.map_err(|e| {
+                VoiceManagerError::InitializationError(format!("VAD processing error: {}", e))
+            })?
         };
 
-        if !should_continue {
-            debug!("VAD turn detection cancelled - speech resumed or already handled");
-            return;
+        // Feed to silence tracker and collect events
+        if let Some(event) = silence_tracker.process(speech_prob) {
+            events.push(event);
         }
+    }
 
-        // Use the shared run_smart_turn_detection function
-        let smart_turn_result =
-            run_smart_turn_detection(inference_timeout_ms, &audio_samples, turn_detector).await;
-
-        match smart_turn_result {
-            SmartTurnResult::Complete(detection_method) => {
-                // Prefix detection method with "vad_" to indicate VAD-triggered
-                let vad_method = match detection_method {
-                    "smart_turn_confirmed" => "vad_smart_turn_confirmed",
-                    "smart_turn_error_fallback" => "vad_smart_turn_error_fallback",
-                    "smart_turn_timeout_fallback" => "vad_inference_timeout_fallback",
-                    "timeout_no_detector" => "vad_silence_only",
-                    other => other,
-                };
-
-                let result = STTResult {
-                    transcript: String::new(),
-                    is_final: true,
-                    is_speech_final: true,
-                    confidence: 1.0,
-                };
-
-                STTResultProcessor::fire_speech_final(
-                    result,
-                    buffered_text,
-                    speech_final_state,
-                    vad_method,
-                )
-                .await;
-
-                silence_tracker.reset();
-                {
-                    let mut buffer = vad_audio_buffer.write();
-                    buffer.clear();
-                }
-                info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
-            }
-            SmartTurnResult::Incomplete => {
-                info!("VAD: Smart-turn says incomplete - waiting for more input");
-                {
-                    let state = speech_final_state.write();
-                    state.vad_turn_end_detected.store(false, Ordering::Release);
-                }
-                silence_tracker.reset();
-            }
-            SmartTurnResult::Skipped => {
-                // Should not happen for VAD path since we already check buffer length
-                // in handle_vad_turn_end, but handle gracefully
-                info!("VAD: Smart-turn skipped (buffer too short) - firing based on silence alone");
-                let result = STTResult {
-                    transcript: String::new(),
-                    is_final: true,
-                    is_speech_final: true,
-                    confidence: 1.0,
-                };
-
-                STTResultProcessor::fire_speech_final(
-                    result,
-                    buffered_text,
-                    speech_final_state,
-                    "vad_silence_only",
-                )
-                .await;
-
-                silence_tracker.reset();
-                {
-                    let mut buffer = vad_audio_buffer.write();
-                    buffer.clear();
-                }
-                info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
-            }
-        }
-    })
-}
-
-/// Check if VAD-based silence detection is enabled.
-///
-/// When `stt-vad` is compiled, VAD is always active and cannot be disabled at runtime.
-pub fn is_vad_enabled() -> bool {
-    true
+    Ok(events)
 }

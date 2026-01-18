@@ -21,22 +21,10 @@ use tokio::sync::RwLock;
 use super::state::SpeechFinalState;
 use super::stt_config::STTProcessingConfig;
 #[cfg(feature = "stt-vad")]
-use super::stt_result::STTResultProcessor;
-
-/// Fallback timer duration in milliseconds.
-///
-/// After receiving an STT "final" result, if "speech_final" is not received within
-/// this timeout, the Smart Turn model is executed to determine turn completion.
+use super::utils::MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION;
+use super::utils::get_current_time_ms;
 #[cfg(feature = "stt-vad")]
-pub const SMART_TURN_FALLBACK_MS: u64 = 2800;
-
-/// Get current time in milliseconds since Unix epoch.
-fn get_current_time_ms() -> usize {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as usize
-}
+use super::vad_processor::VADState;
 
 /// Create a hard timeout task that enforces the maximum wait time.
 ///
@@ -89,21 +77,7 @@ pub fn create_hard_timeout_task(
             total_wait_ms
         );
 
-        // Fire speech_final with empty result (we'll use buffered text)
-        let forced_result = STTResult {
-            transcript: String::new(),
-            is_final: true,
-            is_speech_final: false,
-            confidence: 1.0,
-        };
-
-        fire_speech_final(
-            forced_result,
-            buffered_text,
-            speech_final_state,
-            "hard_timeout_fallback",
-        )
-        .await;
+        fire_speech_final(buffered_text, speech_final_state, "hard_timeout_fallback").await;
     })
 }
 
@@ -118,7 +92,6 @@ pub fn create_hard_timeout_task(
 /// This timeout-based path serves as a fallback when VAD is not available or hasn't fired.
 pub fn create_detection_task(
     config: &STTProcessingConfig,
-    _result: STTResult,
     buffered_text: String,
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
 ) -> JoinHandle<()> {
@@ -162,20 +135,13 @@ pub fn create_detection_task(
 
         // Text hasn't changed - fire based on timeout
         // Note: Turn detection with audio is handled by VAD path, not here
-        let detection_method = "timeout_fallback";
         info!(
             "STT silent for {}ms, text unchanged - firing artificial speech_final",
             stt_wait_ms
         );
 
         // PHASE 3: Fire artificial speech_final
-        let result = STTResult {
-            transcript: String::new(),
-            is_final: true,
-            is_speech_final: false,
-            confidence: 1.0,
-        };
-        fire_speech_final(result, buffered_text, speech_final_state, detection_method).await;
+        fire_speech_final(buffered_text, speech_final_state, "timeout_fallback").await;
     })
 }
 
@@ -184,7 +150,6 @@ pub fn create_detection_task(
 /// This function updates state and invokes the user callback with an artificial
 /// speech_final result. Used by both timeout-based and VAD-based paths.
 pub async fn fire_speech_final(
-    _result: STTResult,
     buffered_text: String,
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     detection_method: &str,
@@ -204,27 +169,15 @@ pub async fn fire_speech_final(
         // Update state before firing callback
         {
             let mut state = speech_final_state.write();
+
+            // Set stats that reset_after_firing will preserve (for duplicate detection)
             state
                 .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
             state.last_forced_text = buffered_text.clone();
-            state
-                .waiting_for_speech_final
-                .store(false, Ordering::Release);
-            state.turn_detection_handle = None;
-            state.text_buffer.clear();
 
-            // Cancel and clear hard timeout handle
-            if let Some(handle) = state.hard_timeout_handle.take() {
-                handle.abort();
-            }
-
-            // Clear segment timing for next utterance
-            state.segment_start_ms.store(0, Ordering::Release);
-            state.hard_timeout_deadline_ms.store(0, Ordering::Release);
-
-            // Reset VAD state for next utterance
-            state.reset_vad_state();
+            // Reset all other state (preserves last_fired_ms and last_forced_text)
+            state.reset_after_firing();
         }
 
         let forced_result = STTResult {
@@ -261,18 +214,16 @@ pub enum SmartTurnResult {
 /// - `SmartTurnResult::Incomplete` if turn is not complete (should reset and wait)
 /// - `SmartTurnResult::Skipped` if detection could not run
 #[cfg(feature = "stt-vad")]
-pub async fn run_smart_turn_detection(
+async fn run_smart_turn_detection(
     inference_timeout_ms: u64,
     audio_samples: &[i16],
     turn_detector: Option<Arc<RwLock<TurnDetector>>>,
 ) -> SmartTurnResult {
-    const MIN_AUDIO_SAMPLES: usize = 8000; // 0.5 seconds at 16kHz
-
-    if audio_samples.len() < MIN_AUDIO_SAMPLES {
+    if audio_samples.len() < MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION {
         debug!(
             "Smart-turn: Audio buffer too short ({} samples < {} min) - skipping",
             audio_samples.len(),
-            MIN_AUDIO_SAMPLES
+            MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION
         );
         return SmartTurnResult::Skipped;
     }
@@ -317,10 +268,143 @@ pub async fn run_smart_turn_detection(
     }
 }
 
+/// Handle the result of Smart Turn detection.
+///
+/// This function consolidates the common logic for handling `SmartTurnResult` from both
+/// VAD-triggered events and the smart fallback timer. It handles:
+/// - `Complete`: Fire speech_final, reset silence tracker, clear audio buffer
+/// - `Incomplete`: Reset VAD turn_end state, reset silence tracker
+/// - `Skipped`: Fire speech_final with fallback method, reset tracker, clear buffer
+///
+/// # Arguments
+/// * `smart_turn_result` - The result from `run_smart_turn_detection`
+/// * `buffered_text` - The accumulated text for this speech segment
+/// * `speech_final_state` - Shared state for speech final tracking
+/// * `silence_tracker` - Tracker to reset on completion
+/// * `vad_state` - VAD state containing audio buffer to clear on completion
+/// * `method_prefix` - Optional prefix for detection method (e.g., "vad_" for VAD-triggered)
+/// * `skipped_fallback_method` - Method name to use when SmartTurnResult::Skipped
+#[cfg(feature = "stt-vad")]
+async fn handle_smart_turn_result(
+    smart_turn_result: SmartTurnResult,
+    buffered_text: String,
+    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+    silence_tracker: Arc<SilenceTracker>,
+    vad_state: Arc<VADState>,
+    method_prefix: &str,
+    skipped_fallback_method: &str,
+) {
+    // Track whether to clear audio buffer (Complete and Skipped do, Incomplete does not)
+    let should_clear_audio_buffer = match smart_turn_result {
+        SmartTurnResult::Complete(detection_method) => {
+            // Apply prefix if provided
+            let final_method = if method_prefix.is_empty() {
+                detection_method
+            } else {
+                match detection_method {
+                    "smart_turn_confirmed" => "vad_smart_turn_confirmed",
+                    "smart_turn_error_fallback" => "vad_smart_turn_error_fallback",
+                    "smart_turn_timeout_fallback" => "vad_inference_timeout_fallback",
+                    "timeout_no_detector" => "vad_silence_only",
+                    other => other,
+                }
+            };
+
+            info!(
+                "Smart Turn confirmed turn complete via '{}' - firing speech_final",
+                final_method
+            );
+
+            fire_speech_final(buffered_text, speech_final_state, final_method).await;
+            true
+        }
+        SmartTurnResult::Incomplete => {
+            info!("Smart Turn says turn incomplete - resetting VAD state for next attempt");
+            {
+                let state = speech_final_state.write();
+                state.vad_turn_end_detected.store(false, Ordering::Release);
+            }
+            false
+        }
+        SmartTurnResult::Skipped => {
+            info!(
+                "Smart Turn skipped (insufficient audio) - firing speech_final via {}",
+                skipped_fallback_method
+            );
+
+            fire_speech_final(buffered_text, speech_final_state, skipped_fallback_method).await;
+            true
+        }
+    };
+
+    // Reset silence tracker (always) and optionally clear audio buffer
+    silence_tracker.reset();
+    if should_clear_audio_buffer {
+        vad_state.clear_audio_buffer();
+        debug!("Reset silence tracker and cleared audio buffer after speech_final");
+    }
+}
+
+/// Create a VAD-triggered turn detection task.
+///
+/// This task is spawned when VAD detects sufficient silence (TurnEnd event).
+/// It runs the Smart Turn model on the accumulated audio buffer to confirm
+/// whether the speaker has finished their turn.
+///
+/// # Arguments
+/// * `config` - STT processing configuration (used for inference timeout)
+/// * `audio_samples` - Accumulated audio samples for turn detection
+/// * `buffered_text` - The accumulated text for this speech segment
+/// * `speech_final_state` - Shared state for speech final tracking
+/// * `turn_detector` - Optional turn detector for Smart Turn analysis
+/// * `silence_tracker` - Tracker to reset on completion
+/// * `vad_state` - VAD state containing audio buffer to clear on completion
+#[cfg(feature = "stt-vad")]
+pub fn create_vad_turn_detection_task(
+    config: &STTProcessingConfig,
+    audio_samples: Vec<i16>,
+    buffered_text: String,
+    speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
+    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+    silence_tracker: Arc<SilenceTracker>,
+    vad_state: Arc<VADState>,
+) -> JoinHandle<()> {
+    let inference_timeout_ms = config.turn_detection_inference_timeout_ms;
+
+    tokio::spawn(async move {
+        let should_continue = {
+            let state = speech_final_state.read();
+            state.waiting_for_speech_final.load(Ordering::Acquire)
+                && state.vad_turn_end_detected.load(Ordering::Acquire)
+        };
+
+        if !should_continue {
+            debug!("VAD turn detection cancelled - speech resumed or already handled");
+            return;
+        }
+
+        // Use the shared run_smart_turn_detection function
+        let smart_turn_result =
+            run_smart_turn_detection(inference_timeout_ms, &audio_samples, turn_detector).await;
+
+        // Use consolidated handler - "vad_" prefix for VAD-triggered, "vad_silence_only" for skipped
+        handle_smart_turn_result(
+            smart_turn_result,
+            buffered_text,
+            speech_final_state,
+            silence_tracker,
+            vad_state,
+            "vad_",             // Prefix for VAD-triggered events
+            "vad_silence_only", // Fallback method when skipped
+        )
+        .await;
+    })
+}
+
 /// Create a smart fallback task that uses the Smart Turn model after a timeout.
 ///
-/// This task implements a 2800ms fallback timer that:
-/// 1. Waits for `SMART_TURN_FALLBACK_MS` after an STT "final" result
+/// This task implements a configurable fallback timer that:
+/// 1. Waits for `stt_speech_final_wait_ms` after an STT "final" result
 /// 2. If still waiting for speech_final and text unchanged, runs Smart Turn
 /// 3. If Smart Turn confirms end-of-speech, forces speech_final
 /// 4. If Smart Turn says incomplete, resets and waits for more input
@@ -331,17 +415,18 @@ pub fn create_smart_fallback_task(
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     turn_detector: Arc<RwLock<TurnDetector>>,
     silence_tracker: Arc<SilenceTracker>,
-    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    vad_state: Arc<VADState>,
 ) -> JoinHandle<()> {
     let inference_timeout_ms = config.turn_detection_inference_timeout_ms;
+    let smart_fallback_ms = config.stt_speech_final_wait_ms;
 
     tokio::spawn(async move {
-        // PHASE 1: Wait for smart fallback timeout (2800ms)
+        // PHASE 1: Wait for smart fallback timeout
         info!(
             "Smart fallback timer started: waiting {}ms for speech_final or new is_final",
-            SMART_TURN_FALLBACK_MS
+            smart_fallback_ms
         );
-        tokio::time::sleep(Duration::from_millis(SMART_TURN_FALLBACK_MS)).await;
+        tokio::time::sleep(Duration::from_millis(smart_fallback_ms)).await;
 
         // Check if we should still proceed
         let should_continue = {
@@ -357,7 +442,7 @@ pub fn create_smart_fallback_task(
         // PHASE 2: Timer expired - check if text buffer has changed
         info!(
             "Smart fallback timer expired after {}ms - checking if text changed",
-            SMART_TURN_FALLBACK_MS
+            smart_fallback_ms
         );
 
         let current_text = {
@@ -375,29 +460,16 @@ pub fn create_smart_fallback_task(
         // PHASE 3: Text unchanged after timeout - get audio samples and run Smart Turn
         info!(
             "Smart fallback: No new text after {}ms - executing Smart Turn detection",
-            SMART_TURN_FALLBACK_MS
+            smart_fallback_ms
         );
         let audio_samples = {
-            let buffer = vad_audio_buffer.read();
+            let buffer = vad_state.audio_buffer.read();
             buffer.clone()
         };
 
         if audio_samples.is_empty() {
             debug!("Smart fallback: Audio buffer is empty - using timeout fallback");
-            // Fall through to timeout-only speech_final
-            let result = STTResult {
-                transcript: String::new(),
-                is_final: true,
-                is_speech_final: false,
-                confidence: 1.0,
-            };
-            fire_speech_final(
-                result,
-                buffered_text,
-                speech_final_state,
-                "timeout_empty_buffer",
-            )
-            .await;
+            fire_speech_final(buffered_text, speech_final_state, "timeout_empty_buffer").await;
             return;
         }
 
@@ -405,66 +477,16 @@ pub fn create_smart_fallback_task(
             run_smart_turn_detection(inference_timeout_ms, &audio_samples, Some(turn_detector))
                 .await;
 
-        match smart_turn_result {
-            SmartTurnResult::Complete(detection_method) => {
-                info!(
-                    "Smart fallback: Smart Turn confirmed turn complete via '{}' - firing speech_final",
-                    detection_method
-                );
-                let result = STTResult {
-                    transcript: String::new(),
-                    is_final: true,
-                    is_speech_final: false,
-                    confidence: 1.0,
-                };
-                STTResultProcessor::fire_speech_final(
-                    result,
-                    buffered_text,
-                    speech_final_state,
-                    detection_method,
-                )
-                .await;
-
-                // Reset silence tracker and clear audio buffer
-                silence_tracker.reset();
-                {
-                    let mut buffer = vad_audio_buffer.write();
-                    buffer.clear();
-                }
-                debug!(
-                    "Smart fallback: Reset silence tracker and cleared audio buffer after speech_final"
-                );
-            }
-            SmartTurnResult::Incomplete => {
-                // Smart Turn says incomplete - reset VAD state and wait for more input
-                info!(
-                    "Smart fallback: Smart Turn says turn incomplete - resetting VAD state for next attempt"
-                );
-                {
-                    let state = speech_final_state.write();
-                    state.vad_turn_end_detected.store(false, Ordering::Release);
-                }
-                silence_tracker.reset();
-            }
-            SmartTurnResult::Skipped => {
-                // Could not run Smart Turn (e.g., buffer too short) - use timeout fallback
-                info!(
-                    "Smart fallback: Smart Turn skipped (insufficient audio) - firing speech_final via timeout_fallback"
-                );
-                let result = STTResult {
-                    transcript: String::new(),
-                    is_final: true,
-                    is_speech_final: false,
-                    confidence: 1.0,
-                };
-                fire_speech_final(
-                    result,
-                    buffered_text,
-                    speech_final_state,
-                    "timeout_fallback",
-                )
-                .await;
-            }
-        }
+        // Use consolidated handler - no prefix for smart fallback, "timeout_fallback" for skipped
+        handle_smart_turn_result(
+            smart_turn_result,
+            buffered_text,
+            speech_final_state,
+            silence_tracker,
+            vad_state,
+            "",                 // No prefix for smart fallback path
+            "timeout_fallback", // Fallback method when skipped
+        )
+        .await;
     })
 }

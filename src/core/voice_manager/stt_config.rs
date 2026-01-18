@@ -109,4 +109,16 @@ impl STTProcessingConfig {
         self.speech_final_hard_timeout_ms = timeout_ms;
         self
     }
+
+    /// Set the turn detection inference timeout.
+    pub fn set_turn_detection_inference_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.turn_detection_inference_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Set the duplicate window to prevent duplicate speech_final events.
+    pub fn set_duplicate_window_ms(mut self, window_ms: usize) -> Self {
+        self.duplicate_window_ms = window_ms;
+        self
+    }
 }
