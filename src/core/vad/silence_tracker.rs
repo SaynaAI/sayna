@@ -98,8 +98,10 @@ impl Default for SilenceTrackerConfig {
     fn default() -> Self {
         Self {
             threshold: 0.5,
-            silence_duration_ms: 300,
-            min_speech_duration_ms: 100,
+            // PipeCat recommends stop_secs=0.2 (200ms) for optimal Smart-Turn performance
+            silence_duration_ms: 200,
+            // Increased from 100ms to 250ms to filter out brief filler sounds
+            min_speech_duration_ms: 250,
             frame_duration_ms: 32.0, // 512 samples at 16kHz
         }
     }
@@ -393,8 +395,9 @@ mod tests {
     fn test_default_config() {
         let config = SilenceTrackerConfig::default();
         assert_eq!(config.threshold, 0.5);
-        assert_eq!(config.silence_duration_ms, 300);
-        assert_eq!(config.min_speech_duration_ms, 100);
+        // Updated to PipeCat-recommended values
+        assert_eq!(config.silence_duration_ms, 200); // stop_secs=0.2
+        assert_eq!(config.min_speech_duration_ms, 250); // Increased to filter filler sounds
         assert_eq!(config.frame_duration_ms, 32.0);
     }
 

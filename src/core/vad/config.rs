@@ -154,8 +154,13 @@ impl Default for SileroVADConfig {
         Self {
             threshold: 0.5, // Default Silero-VAD recommendation
             sample_rate: VADSampleRate::Rate16kHz,
-            silence_duration_ms: 300, // PLAN requirement: 300ms configurable
-            min_speech_duration_ms: 100, // Minimum 100ms of speech before checking silence
+            // PipeCat recommends stop_secs=0.2 (200ms) for optimal Smart-Turn performance.
+            // This matches the training data and allows Smart-Turn to properly evaluate
+            // whether the speaker has finished based on prosody cues.
+            silence_duration_ms: 200,
+            // Increased from 100ms to 250ms to filter out brief filler sounds like "um", "mmm"
+            // that shouldn't trigger turn detection without meaningful speech content.
+            min_speech_duration_ms: 250,
             model_path: None,
             model_url: Some(
                 "https://huggingface.co/onnx-community/silero-vad/resolve/main/onnx/model.onnx"
@@ -357,8 +362,9 @@ mod tests {
         let config = SileroVADConfig::default();
         assert_eq!(config.threshold, 0.5);
         assert_eq!(config.sample_rate, VADSampleRate::Rate16kHz);
-        assert_eq!(config.silence_duration_ms, 300);
-        assert_eq!(config.min_speech_duration_ms, 100);
+        // Updated to PipeCat-recommended values
+        assert_eq!(config.silence_duration_ms, 200); // stop_secs=0.2
+        assert_eq!(config.min_speech_duration_ms, 250); // Increased to filter filler sounds
         assert_eq!(config.num_threads, Some(1));
         assert!(config.model_url.is_some());
         assert!(config.model_path.is_none());

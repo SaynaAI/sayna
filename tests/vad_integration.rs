@@ -368,8 +368,9 @@ mod vad_model_tests {
         let config = SileroVADConfig::default();
         assert_eq!(config.threshold, 0.5);
         assert_eq!(config.sample_rate, VADSampleRate::Rate16kHz);
-        assert_eq!(config.silence_duration_ms, 300);
-        assert_eq!(config.min_speech_duration_ms, 100);
+        // Updated to PipeCat-recommended values
+        assert_eq!(config.silence_duration_ms, 200); // stop_secs=0.2
+        assert_eq!(config.min_speech_duration_ms, 250); // Increased to filter filler sounds
     }
 
     /// Test that VAD can be created with default config

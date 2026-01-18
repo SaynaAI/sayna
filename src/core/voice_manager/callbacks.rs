@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::core::{
     stt::{STTError, STTResult},
@@ -10,6 +11,7 @@ use crate::core::{
 };
 
 use super::state::InterruptionState;
+use super::utils;
 
 /// Callback type for STT results
 pub type STTCallback =
@@ -46,8 +48,48 @@ pub struct VoiceManagerTTSCallback {
 impl AudioCallback for VoiceManagerTTSCallback {
     fn on_audio(&self, audio_data: AudioData) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let callback = self.audio_callback.clone();
+        let interruption_state = self.interruption_state.clone();
 
         Box::pin(async move {
+            // Update interruption state if available
+            if let Some(int_state) = &interruption_state {
+                // Check if this is new audio after completion
+                if int_state.is_completed.load(Ordering::Acquire) {
+                    // New audio starting after completion
+                    int_state.is_completed.store(false, Ordering::SeqCst);
+
+                    // Reset the non_interruptible_until_ms to current time if we're in non-interruptible mode
+                    if !int_state.allow_interruption.load(Ordering::Acquire) {
+                        let now_ms = utils::get_current_time_ms();
+                        int_state
+                            .non_interruptible_until_ms
+                            .store(now_ms, Ordering::Release);
+                    }
+                }
+
+                // Calculate audio duration and update non_interruptible_until_ms
+                if !int_state.allow_interruption.load(Ordering::Acquire) {
+                    // Calculate actual audio duration from audio data
+                    // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
+                    // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
+                    let bytes_per_sample = 2;
+                    let channels = 1;
+                    let sample_rate = int_state.current_sample_rate.load(Ordering::Acquire);
+
+                    let chunk_duration_seconds = audio_data.data.len() as f32
+                        / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
+
+                    let chunk_duration_ms = (chunk_duration_seconds * 1000.0) as usize;
+
+                    // Add duration to non_interruptible_until_ms
+                    let current_until =
+                        int_state.non_interruptible_until_ms.load(Ordering::Acquire);
+                    int_state
+                        .non_interruptible_until_ms
+                        .store(current_until + chunk_duration_ms, Ordering::Release);
+                }
+            }
+
             // Call user callback if registered
             if let Some(callback) = callback {
                 callback(audio_data).await;

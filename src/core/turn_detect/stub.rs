@@ -26,21 +26,18 @@ impl TurnDetector {
     }
 
     /// Always returns `0.0`, indicating no end-of-turn confidence.
-    pub async fn predict_end_of_turn(&self, _user_input: &str) -> Result<f32> {
+    ///
+    /// # Arguments
+    /// * `audio` - Raw audio samples as i16 PCM (ignored in stub)
+    pub async fn predict_end_of_turn(&self, _audio: &[i16]) -> Result<f32> {
         Ok(0.0)
     }
 
     /// Always returns `false`, indicating the turn is not complete.
-    pub async fn is_turn_complete(&self, _user_input: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Ignores streaming text and returns `false` without waiting.
-    pub async fn process_streaming_text(
-        &self,
-        _partial_text: &str,
-        _check_interval_ms: u64,
-    ) -> Result<bool> {
+    ///
+    /// # Arguments
+    /// * `audio` - Raw audio samples as i16 PCM (ignored in stub)
+    pub async fn is_turn_complete(&self, _audio: &[i16]) -> Result<bool> {
         Ok(false)
     }
 
@@ -54,6 +51,16 @@ impl TurnDetector {
 
     pub fn get_config(&self) -> &TurnDetectorConfig {
         &self.config
+    }
+
+    /// Get the expected sample rate for audio input.
+    pub fn sample_rate(&self) -> u32 {
+        self.config.sample_rate
+    }
+
+    /// Get the maximum audio duration in seconds.
+    pub fn max_audio_duration_seconds(&self) -> u8 {
+        self.config.max_audio_duration_seconds
     }
 }
 
@@ -80,11 +87,6 @@ impl TurnDetectorBuilder {
         self
     }
 
-    pub fn max_sequence_length(mut self, length: usize) -> Self {
-        self.config.max_sequence_length = length;
-        self
-    }
-
     pub fn model_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.model_path = Some(path.into());
         self
@@ -95,16 +97,6 @@ impl TurnDetectorBuilder {
         self
     }
 
-    pub fn tokenizer_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.tokenizer_path = Some(path.into());
-        self
-    }
-
-    pub fn tokenizer_url(mut self, url: impl Into<String>) -> Self {
-        self.config.tokenizer_url = Some(url.into());
-        self
-    }
-
     pub fn use_quantized(mut self, quantized: bool) -> Self {
         self.config.use_quantized = quantized;
         self
@@ -112,6 +104,16 @@ impl TurnDetectorBuilder {
 
     pub fn num_threads(mut self, threads: usize) -> Self {
         self.config.num_threads = Some(threads);
+        self
+    }
+
+    pub fn sample_rate(mut self, rate: u32) -> Self {
+        self.config.sample_rate = rate;
+        self
+    }
+
+    pub fn cache_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.cache_path = Some(path.into());
         self
     }
 

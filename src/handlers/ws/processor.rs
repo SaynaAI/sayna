@@ -11,7 +11,7 @@ use crate::state::AppState;
 use super::{
     audio_handler::{handle_clear_message, handle_speak_message},
     command_handler::{handle_send_message, handle_sip_transfer},
-    config_handler::handle_config_message,
+    config_handler::{handle_config_message, handle_update_config_message},
     messages::{IncomingMessage, MessageRoute},
     state::ConnectionState,
 };
@@ -68,6 +68,9 @@ pub async fn handle_incoming_message(
         } => handle_send_message(message, role, topic, debug, state, message_tx).await,
         IncomingMessage::SIPTransfer { transfer_to } => {
             handle_sip_transfer(transfer_to, state, message_tx, app_state).await
+        }
+        IncomingMessage::UpdateConfig { vad, turn_detect } => {
+            handle_update_config_message(vad, turn_detect, message_tx, app_state).await
         }
     }
 }

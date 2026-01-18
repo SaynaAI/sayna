@@ -14,6 +14,29 @@ use crate::{
     livekit::LiveKitConfig,
 };
 
+/// VAD configuration update for runtime adjustments
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct VADConfigUpdate {
+    /// Silence duration threshold in milliseconds to trigger turn detection.
+    /// When silence exceeds this duration, the smart-turn model is queried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 300))]
+    pub silence_duration_ms: Option<u64>,
+}
+
+/// Turn detection configuration update for runtime adjustments
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TurnDetectConfigUpdate {
+    /// Turn completion probability threshold (0.0 to 1.0).
+    /// When the smart-turn model returns a probability >= this threshold,
+    /// the turn is considered complete and speech_final is emitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 0.5))]
+    pub threshold: Option<f32>,
+}
+
 /// Default value for audio enabled flag (true)
 pub fn default_audio_enabled() -> Option<bool> {
     Some(true)

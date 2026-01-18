@@ -4,8 +4,8 @@
 //! This module hosts the logic that powers the `sayna init` CLI command. The
 //! command downloads and caches models required by optional features:
 //!
-//! - **stt-vad**: Turn detection model, tokenizer, and Silero-VAD model for
-//!   voice activity detection with integrated turn detection
+//! - **stt-vad**: Smart-turn model and Silero-VAD model for voice activity
+//!   detection with integrated turn detection
 //!
 //! Typical usage from the CLI:
 //!
@@ -31,7 +31,7 @@ use anyhow::anyhow;
 #[cfg(feature = "stt-vad")]
 use crate::config::ServerConfig;
 #[cfg(feature = "stt-vad")]
-use crate::core::turn_detect::{TurnDetectorConfig, assets as turn_assets};
+use crate::core::turn_detect::{MODEL_FILENAME, TurnDetectorConfig, assets as turn_assets};
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SileroVADConfig, assets as vad_assets};
 #[cfg(feature = "stt-vad")]
@@ -63,11 +63,12 @@ pub async fn run() -> Result<()> {
             ..Default::default()
         };
         match turn_assets::download_assets(&turn_config).await {
-            Ok(_) => tracing::info!("Turn detection model downloaded successfully."),
+            Ok(_) => tracing::info!("Smart-turn model downloaded successfully."),
             Err(e) => {
-                tracing::error!("Failed to download turn detection model: {}", e);
+                tracing::error!("Failed to download smart-turn model: {}", e);
                 tracing::error!(
-                    "You can manually download from: https://huggingface.co/livekit/turn-detector/resolve/main/model_quantized.onnx"
+                    "You can manually download from: https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/{}",
+                    MODEL_FILENAME
                 );
                 tracing::error!("And place it at: {:?}", cache_path.join("turn_detect"));
                 return Err(e);
@@ -113,21 +114,14 @@ async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
 
     #[cfg(feature = "stt-vad")]
     {
-        let model_path = cache_path.join("turn_detect/model_quantized.onnx");
-        let tokenizer_path = cache_path.join("turn_detect/tokenizer.json");
+        let model_path = cache_path.join(format!("turn_detect/{}", MODEL_FILENAME));
         if !model_path.exists() {
             anyhow::bail!(
-                "Turn detection model missing at {:?}. Download may have failed.",
+                "Smart-turn model missing at {:?}. Download may have failed.",
                 model_path
             );
         }
-        if !tokenizer_path.exists() {
-            anyhow::bail!(
-                "Turn detection tokenizer missing at {:?}. Download may have failed.",
-                tokenizer_path
-            );
-        }
-        tracing::info!("  Turn detection: OK");
+        tracing::info!("  Smart-turn: OK");
     }
 
     #[cfg(feature = "stt-vad")]

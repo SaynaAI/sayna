@@ -4,10 +4,11 @@ use crate::core::stt::{STTConfig, STTResult};
 use crate::core::tts::TTSConfig;
 use crate::core::voice_manager::state::SpeechFinalState;
 use crate::core::voice_manager::stt_result::STTResultProcessor;
+use crate::core::voice_manager::utils::get_current_time_ms;
 use crate::core::voice_manager::{VoiceManager, VoiceManagerConfig};
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 /// Helper macro to create VoiceManager with feature-gated VAD parameter
@@ -151,7 +152,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Hello".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Should return original result immediately
@@ -182,7 +183,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Test message".to_string(), true, false, 0.8);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Should return the original result immediately
@@ -213,7 +214,7 @@ async fn test_speech_final_timing_control() {
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor = STTResultProcessor::default();
         let _processed1 = processor
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         // Verify timer was started
@@ -228,7 +229,7 @@ async fn test_speech_final_timing_control() {
         let result2 = STTResult::new("final result".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should return the original speech_final result
@@ -260,7 +261,7 @@ async fn test_speech_final_timing_control() {
         let result = STTResult::new("Direct speech final".to_string(), true, true, 0.85);
         let processor = STTResultProcessor::default();
         let processed = processor
-            .process_result(result, speech_final_state.clone(), None)
+            .process_result(result, speech_final_state.clone())
             .await;
 
         assert!(processed.is_some());
@@ -289,7 +290,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1.clone(), speech_final_state.clone(), None)
+            .process_result(result1.clone(), speech_final_state.clone())
             .await;
 
         assert!(processed1.is_some());
@@ -305,10 +306,7 @@ async fn test_duplicate_speech_final_prevention() {
         // 2. Simulate timer firing (mark as fired)
         {
             let mut state = speech_final_state.write();
-            let fire_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let fire_time_ms = get_current_time_ms();
             state
                 .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
@@ -322,7 +320,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("Hello world".to_string(), true, true, 0.95);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should be None (ignored) because timer already fired
@@ -337,7 +335,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("First".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
 
         assert!(processed1.is_some());
@@ -345,11 +343,7 @@ async fn test_duplicate_speech_final_prevention() {
         // Mark timer as fired (simulate timer expiry)
         {
             let mut state = speech_final_state.write();
-            let old_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize
-                - 1000; // 1 second ago
+            let old_time_ms = get_current_time_ms() - 1000; // 1 second ago
             state
                 .turn_detection_last_fired_ms
                 .store(old_time_ms, Ordering::Release);
@@ -363,7 +357,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("Second".to_string(), true, false, 0.9);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
 
         // Should still return the result but NOT start a new timer
@@ -386,17 +380,14 @@ async fn test_duplicate_speech_final_prevention() {
         let result1 = STTResult::new("First segment".to_string(), true, false, 0.9);
         let processor1 = STTResultProcessor::default();
         let processed1 = processor1
-            .process_result(result1, speech_final_state.clone(), None)
+            .process_result(result1, speech_final_state.clone())
             .await;
         assert!(processed1.is_some());
 
         // Mark timer as fired (with recent timestamp)
         {
             let mut state = speech_final_state.write();
-            let fire_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let fire_time_ms = get_current_time_ms();
             state
                 .turn_detection_last_fired_ms
                 .store(fire_time_ms, Ordering::Release);
@@ -410,7 +401,7 @@ async fn test_duplicate_speech_final_prevention() {
         let result2 = STTResult::new("First segment".to_string(), true, true, 0.9);
         let processor2 = STTResultProcessor::default();
         let processed2 = processor2
-            .process_result(result2, speech_final_state.clone(), None)
+            .process_result(result2, speech_final_state.clone())
             .await;
         assert!(processed2.is_none()); // Ignored due to timer fired recently with same text
 
@@ -428,7 +419,7 @@ async fn test_duplicate_speech_final_prevention() {
         let new_result = STTResult::new("New segment".to_string(), true, false, 0.9);
         let processor_new = STTResultProcessor::default();
         let processed_new = processor_new
-            .process_result(new_result, speech_final_state.clone(), None)
+            .process_result(new_result, speech_final_state.clone())
             .await;
 
         assert!(processed_new.is_some());
@@ -444,358 +435,241 @@ async fn test_duplicate_speech_final_prevention() {
     }
 }
 
-#[tokio::test]
-async fn test_hard_timeout_fallback_without_turn_detector() {
-    // Test that hard timeout fires when no turn detector is available
-    // This is the regression test for the bug where utterances could hang indefinitely
-
-    use crate::core::voice_manager::stt_result::STTProcessingConfig;
-
-    let config = STTProcessingConfig::new(
-        50,  // stt_speech_final_wait_ms
-        50,  // turn_detection_inference_timeout_ms
-        200, // speech_final_hard_timeout_ms - 200ms hard timeout for faster testing
-        100, // duplicate_window_ms
-    );
-
-    let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
-
-    // Track callback invocations
-    let callback_fired = Arc::new(AtomicBool::new(false));
-    let callback_fired_clone = callback_fired.clone();
-
+// Hard timeout tests
+mod hard_timeout_tests {
+    use super::*;
     use crate::core::voice_manager::callbacks::STTCallback;
+    use crate::core::voice_manager::stt_config::STTProcessingConfig;
     use std::future::Future;
     use std::pin::Pin;
+    use tokio::time::Duration;
 
-    let callback: STTCallback = Arc::new(move |result: STTResult| {
-        let fired = callback_fired_clone.clone();
-        Box::pin(async move {
-            if result.is_speech_final {
-                fired.store(true, Ordering::SeqCst);
-            }
-        }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
+    #[tokio::test]
+    async fn test_hard_timeout_fires_when_no_speech_final() {
+        let config = STTProcessingConfig::new(
+            50,  // stt_speech_final_wait_ms
+            50,  // turn_detection_inference_timeout_ms
+            200, // speech_final_hard_timeout_ms - 200ms hard timeout
+            100, // duplicate_window_ms
+        );
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
+        let processor = STTResultProcessor::new(config);
 
-    // Send is_final result without speech_final (simulating Deepgram behavior)
-    let result = STTResult::new("Hello world".to_string(), true, false, 0.95);
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
 
-    // Process with NO turn detector
-    let processed = processor
-        .process_result(result, speech_final_state.clone(), None)
-        .await;
+        let callback: STTCallback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                if result.is_speech_final {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
 
-    // Should return the result immediately
-    assert!(processed.is_some());
-    assert_eq!(processed.unwrap().transcript, "Hello world");
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-    // State should indicate we're waiting for speech_final
-    {
-        let state = speech_final_state.read();
-        assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
-        assert!(state.hard_timeout_handle.is_some());
+        let result = STTResult {
+            transcript: "Hello world".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
+
+        let processed = processor.process_result(result, state.clone()).await;
+        assert!(processed.is_some());
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(
+            callback_count.load(Ordering::SeqCst),
+            1,
+            "Hard timeout should have fired speech_final callback"
+        );
+
+        let final_state = state.read();
+        assert!(!final_state.waiting_for_speech_final.load(Ordering::Acquire));
+        assert_eq!(final_state.segment_start_ms.load(Ordering::Acquire), 0);
+        assert_eq!(
+            final_state.hard_timeout_deadline_ms.load(Ordering::Acquire),
+            0
+        );
     }
 
-    // Wait for hard timeout to fire
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-    // Hard timeout should have fired the callback
-    assert!(
-        callback_fired.load(Ordering::SeqCst),
-        "Hard timeout should force speech_final after 200ms"
-    );
-
-    // State should be reset
-    {
-        let state = speech_final_state.read();
-        assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
-        assert!(state.text_buffer.is_empty());
-        assert!(state.hard_timeout_handle.is_none());
-    }
-}
-
-#[tokio::test]
-#[ignore = "Requires turn detector model files to be downloaded"]
-async fn test_hard_timeout_with_turn_detector_failure() {
-    // Test that hard timeout fires even if turn detector fails
-
-    use crate::core::turn_detect::TurnDetector;
-    use crate::core::voice_manager::stt_result::STTProcessingConfig;
-    use tokio::sync::RwLock;
-
-    let config = STTProcessingConfig::new(
-        50,  // stt_speech_final_wait_ms
-        50,  // turn_detection_inference_timeout_ms
-        200, // speech_final_hard_timeout_ms
-        100, // duplicate_window_ms
-    );
-
-    let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
-
-    // Create a turn detector with temporary cache directory
-    use crate::core::turn_detect::TurnDetectorConfig;
-    let temp_dir = std::env::temp_dir().join("sayna_test_turn_detect");
-    let turn_config = TurnDetectorConfig {
-        cache_path: Some(temp_dir),
-        ..Default::default()
-    };
-
-    let turn_detector = Arc::new(RwLock::new(
-        TurnDetector::with_config(turn_config)
-            .await
-            .expect("Failed to create turn detector"),
-    ));
-
-    let callback_fired = Arc::new(AtomicBool::new(false));
-    let callback_fired_clone = callback_fired.clone();
-
-    use crate::core::voice_manager::callbacks::STTCallback;
-    use std::future::Future;
-    use std::pin::Pin;
-
-    let callback: STTCallback = Arc::new(move |result: STTResult| {
-        let fired = callback_fired_clone.clone();
-        Box::pin(async move {
-            if result.is_speech_final {
-                fired.store(true, Ordering::SeqCst);
-            }
-        }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
-
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
-
-    // Send is_final result
-    let result = STTResult::new("Test utterance".to_string(), true, false, 0.95);
-
-    // Process with turn detector that may fail or return false
-    let processed = processor
-        .process_result(result, speech_final_state.clone(), Some(turn_detector))
-        .await;
-
-    assert!(processed.is_some());
-
-    // Wait for hard timeout to fire (even if turn detector fails)
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-    // Hard timeout should still fire regardless of turn detector behavior
-    assert!(
-        callback_fired.load(Ordering::SeqCst),
-        "Hard timeout should fire even if turn detector fails"
-    );
-}
-
-#[tokio::test]
-async fn test_cancellation_cleanup_on_real_speech_final() {
-    // Test that both turn_detection_handle and hard_timeout_handle are properly
-    // aborted and cleared when real speech_final arrives
-
-    use crate::core::voice_manager::stt_result::STTProcessingConfig;
-
-    let config = STTProcessingConfig::new(
-        1000, // stt_speech_final_wait_ms - Long enough to not interfere
-        100,  // turn_detection_inference_timeout_ms
-        5000, // speech_final_hard_timeout_ms - Long timeout
-        500,  // duplicate_window_ms
-    );
-
-    let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
-
-    use crate::core::voice_manager::callbacks::STTCallback;
-    use std::future::Future;
-    use std::pin::Pin;
-
-    let callback: STTCallback = Arc::new(move |_result: STTResult| {
-        Box::pin(async move {}) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
-
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
-
-    // Send is_final to start both timers
-    let result1 = STTResult::new("Hello world".to_string(), true, false, 0.9);
-    let processed1 = processor
-        .process_result(result1, speech_final_state.clone(), None)
-        .await;
-
-    assert!(processed1.is_some());
-
-    // Verify both handles were created
-    {
-        let state = speech_final_state.read();
-        assert!(
-            state.turn_detection_handle.is_some(),
-            "Turn detection handle should be created"
+    #[tokio::test]
+    async fn test_hard_timeout_cancelled_by_real_speech_final() {
+        let config = STTProcessingConfig::new(
+            50,  // stt_speech_final_wait_ms
+            50,  // turn_detection_inference_timeout_ms
+            500, // speech_final_hard_timeout_ms - Long timeout
+            100, // duplicate_window_ms
         );
-        assert!(
-            state.hard_timeout_handle.is_some(),
-            "Hard timeout handle should be created"
+
+        let processor = STTResultProcessor::new(config);
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+
+        let callback: STTCallback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                if result.is_speech_final {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
+
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
+
+        let is_final_result = STTResult {
+            transcript: "Hello".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
+
+        processor
+            .process_result(is_final_result, state.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let speech_final_result = STTResult {
+            transcript: "Hello world".to_string(),
+            is_final: true,
+            is_speech_final: true,
+            confidence: 0.95,
+        };
+
+        processor
+            .process_result(speech_final_result, state.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            callback_count.load(Ordering::SeqCst),
+            1,
+            "Only real speech_final should fire, not hard timeout"
         );
-        assert!(state.waiting_for_speech_final.load(Ordering::Acquire));
     }
 
-    // Wait a bit
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Send real speech_final before any timeout fires
-    let result2 = STTResult::new("Hello world complete".to_string(), true, true, 0.95);
-    let processed2 = processor
-        .process_result(result2, speech_final_state.clone(), None)
-        .await;
-
-    assert!(processed2.is_some());
-
-    // Verify both handles were cleaned up
-    {
-        let state = speech_final_state.read();
-        assert!(
-            state.turn_detection_handle.is_none(),
-            "Turn detection handle should be cancelled"
+    #[tokio::test]
+    async fn test_hard_timeout_not_restarted_by_new_is_final() {
+        let config = STTProcessingConfig::new(
+            300, // stt_speech_final_wait_ms - Long turn detection wait
+            50,  // turn_detection_inference_timeout_ms
+            200, // speech_final_hard_timeout_ms - Hard timeout fires first
+            100, // duplicate_window_ms
         );
-        assert!(
-            state.hard_timeout_handle.is_none(),
-            "Hard timeout handle should be cancelled"
+
+        let processor = STTResultProcessor::new(config);
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+
+        let callback: STTCallback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                if result.is_speech_final {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
+
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
+
+        let result1 = STTResult {
+            transcript: "Hello".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
+
+        processor.process_result(result1, state.clone()).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let result2 = STTResult {
+            transcript: " world".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
+
+        processor.process_result(result2, state.clone()).await;
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            callback_count.load(Ordering::SeqCst),
+            1,
+            "Hard timeout should fire once based on first is_final timestamp"
         );
-        assert!(!state.waiting_for_speech_final.load(Ordering::Acquire));
-        assert_eq!(state.segment_start_ms.load(Ordering::Acquire), 0);
-        assert_eq!(state.hard_timeout_deadline_ms.load(Ordering::Acquire), 0);
     }
-}
 
-#[tokio::test]
-async fn test_continuous_speech_hard_timeout_not_restarted() {
-    // Test that hard timeout is NOT restarted when new is_final results arrive
-    // during the same speech segment (person still talking)
+    #[tokio::test]
+    async fn test_segment_timing_reset_after_speech_final() {
+        let config = STTProcessingConfig::default();
+        let processor = STTResultProcessor::new(config);
 
-    use crate::core::voice_manager::stt_result::STTProcessingConfig;
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
 
-    let config = STTProcessingConfig::new(
-        300, // stt_speech_final_wait_ms - Longer than hard timeout
-        50,  // turn_detection_inference_timeout_ms
-        200, // speech_final_hard_timeout_ms - Hard timeout fires first
-        100, // duplicate_window_ms
-    );
+        let callback: STTCallback = Arc::new(move |result: STTResult| {
+            let count = callback_count_clone.clone();
+            Box::pin(async move {
+                if result.is_speech_final {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
 
-    let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
+        let state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
 
-    let callback_count = Arc::new(AtomicUsize::new(0));
-    let callback_count_clone = callback_count.clone();
+        let result = STTResult {
+            transcript: "First utterance".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
 
-    use crate::core::voice_manager::callbacks::STTCallback;
-    use std::future::Future;
-    use std::pin::Pin;
+        processor.process_result(result, state.clone()).await;
 
-    let callback: STTCallback = Arc::new(move |result: STTResult| {
-        let count = callback_count_clone.clone();
-        Box::pin(async move {
-            if result.is_speech_final {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-        }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
+        {
+            let s = state.read();
+            assert_ne!(s.segment_start_ms.load(Ordering::Acquire), 0);
+            assert_ne!(s.hard_timeout_deadline_ms.load(Ordering::Acquire), 0);
+        }
 
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
+        let speech_final = STTResult {
+            transcript: "First utterance complete".to_string(),
+            is_final: true,
+            is_speech_final: true,
+            confidence: 0.95,
+        };
 
-    // Send first is_final at t=0
-    let result1 = STTResult::new("Hello".to_string(), true, false, 0.95);
-    processor
-        .process_result(result1, speech_final_state.clone(), None)
-        .await;
+        processor.process_result(speech_final, state.clone()).await;
 
-    // Record the initial deadline
-    let initial_deadline = {
-        let state = speech_final_state.read();
-        state.hard_timeout_deadline_ms.load(Ordering::Acquire)
-    };
+        {
+            let s = state.read();
+            assert_eq!(s.segment_start_ms.load(Ordering::Acquire), 0);
+            assert_eq!(s.hard_timeout_deadline_ms.load(Ordering::Acquire), 0);
+        }
 
-    assert_ne!(initial_deadline, 0, "Hard timeout deadline should be set");
+        let result2 = STTResult {
+            transcript: "Second utterance".to_string(),
+            is_final: true,
+            is_speech_final: false,
+            confidence: 0.95,
+        };
 
-    // Wait 100ms and send another is_final (person still talking)
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    let result2 = STTResult::new(" world".to_string(), true, false, 0.95);
-    processor
-        .process_result(result2, speech_final_state.clone(), None)
-        .await;
+        processor.process_result(result2, state.clone()).await;
 
-    // Verify deadline hasn't changed (hard timeout not restarted)
-    let second_deadline = {
-        let state = speech_final_state.read();
-        state.hard_timeout_deadline_ms.load(Ordering::Acquire)
-    };
-
-    assert_eq!(
-        initial_deadline, second_deadline,
-        "Hard timeout deadline should NOT be restarted by new is_final"
-    );
-
-    // Wait for hard timeout to fire (should fire at t=200ms from first is_final)
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-
-    // Hard timeout should fire exactly once
-    assert_eq!(
-        callback_count.load(Ordering::SeqCst),
-        1,
-        "Hard timeout should fire once based on first is_final timestamp"
-    );
-}
-
-#[tokio::test]
-async fn test_hard_timeout_observability() {
-    // Test that hard timeout fires and enables observability
-    // This is crucial for SREs to track fallback occurrences through logs
-    //
-    // Expected behavior:
-    // - When hard timeout fires, it emits: tracing::warn!("Hard timeout fired after {}ms...")
-    // - This log is at WARN level so it's easily alertable in production
-    // - The log includes timing information for debugging
-    //
-    // See implementation at src/core/voice_manager/stt_result.rs:258-261
-
-    use crate::core::voice_manager::stt_result::STTProcessingConfig;
-
-    let config = STTProcessingConfig::new(
-        50,  // stt_speech_final_wait_ms
-        50,  // turn_detection_inference_timeout_ms
-        200, // speech_final_hard_timeout_ms
-        100, // duplicate_window_ms
-    );
-
-    let processor = crate::core::voice_manager::stt_result::STTResultProcessor::new(config);
-
-    let callback_fired = Arc::new(AtomicBool::new(false));
-    let callback_fired_clone = callback_fired.clone();
-
-    use crate::core::voice_manager::callbacks::STTCallback;
-    use std::future::Future;
-    use std::pin::Pin;
-
-    let callback: STTCallback = Arc::new(move |result: STTResult| {
-        let fired = callback_fired_clone.clone();
-        Box::pin(async move {
-            if result.is_speech_final {
-                fired.store(true, Ordering::SeqCst);
-            }
-        }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
-
-    let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState::with_callback(callback)));
-
-    // Send is_final result
-    let result = STTResult::new("Test message".to_string(), true, false, 0.95);
-    processor
-        .process_result(result, speech_final_state.clone(), None)
-        .await;
-
-    // Wait for hard timeout to fire (this emits a warning log for observability)
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-    // Verify the callback was fired
-    assert!(
-        callback_fired.load(Ordering::SeqCst),
-        "Hard timeout should fire and emit warning log for SRE monitoring"
-    );
-
-    // Note: The actual log verification happens in production monitoring.
-    // The implementation emits: tracing::warn!("Hard timeout fired after {}ms - forcing speech_final...")
-    // This allows SREs to create alerts on fallback frequency.
+        {
+            let s = state.read();
+            assert_ne!(s.segment_start_ms.load(Ordering::Acquire), 0);
+            assert_ne!(s.hard_timeout_deadline_ms.load(Ordering::Acquire), 0);
+        }
+    }
 }

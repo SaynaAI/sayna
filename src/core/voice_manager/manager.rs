@@ -9,10 +9,11 @@ use tokio::sync::{Notify, RwLock};
 use tokio::time::Duration;
 use tracing::debug;
 
-use crate::core::cache::store::CacheStore;
-use crate::core::vad::{SilenceTracker, SilenceTrackerConfig};
 #[cfg(feature = "stt-vad")]
-use crate::core::vad::{SileroVAD, VADEvent};
+use super::vad_processor::VADState;
+use crate::core::cache::store::CacheStore;
+#[cfg(feature = "stt-vad")]
+use crate::core::vad::{SilenceTracker, SilenceTrackerConfig, SileroVAD, VADEvent};
 use crate::core::{
     create_stt_provider, create_tts_provider,
     stt::{
@@ -25,14 +26,22 @@ use crate::core::{
 
 use super::{
     callbacks::{
-        AudioClearCallback, STTCallback, STTErrorCallback, TTSAudioCallback, TTSCompleteCallback,
-        TTSErrorCallback, VoiceManagerTTSCallback,
+        AudioClearCallback, TTSAudioCallback, TTSCompleteCallback, TTSErrorCallback,
+        VoiceManagerTTSCallback,
     },
     config::VoiceManagerConfig,
     errors::{VoiceManagerError, VoiceManagerResult},
     state::{InterruptionState, SpeechFinalState},
-    stt_result::{STTProcessingConfig, STTResultProcessor},
+    stt_config::STTProcessingConfig,
+    stt_result::STTResultProcessor,
+    utils,
 };
+
+// Buffer size constants for VAD processing
+#[cfg(feature = "stt-vad")]
+const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8; // 8 seconds at 16kHz for turn detection
+#[cfg(feature = "stt-vad")]
+const VAD_FRAME_BUFFER_CAPACITY: usize = 512; // 512 samples for frame processing
 
 /// VoiceManager provides a unified interface for managing STT and TTS providers
 /// Optimized for extreme low-latency with lock-free atomics and pre-allocated buffers
@@ -41,8 +50,6 @@ pub struct VoiceManager {
     stt: Arc<RwLock<Box<dyn BaseSTT>>>,
 
     // Callbacks - using parking_lot RwLock for faster synchronization
-    stt_callback: Arc<SyncRwLock<Option<STTCallback>>>,
-    stt_error_callback: Arc<SyncRwLock<Option<STTErrorCallback>>>,
     tts_audio_callback: Arc<SyncRwLock<Option<TTSAudioCallback>>>,
     tts_error_callback: Arc<SyncRwLock<Option<TTSErrorCallback>>>,
     audio_clear_callback: Arc<SyncRwLock<Option<AudioClearCallback>>>,
@@ -51,9 +58,6 @@ pub struct VoiceManager {
     // Speech final timing control - using parking_lot for faster access
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
 
-    // Turn detection for better end-of-speech detection
-    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-
     // STT result processor for timing control and VAD integration
     stt_result_processor: Arc<STTResultProcessor>,
 
@@ -61,11 +65,18 @@ pub struct VoiceManager {
     #[cfg(feature = "stt-vad")]
     vad: Option<Arc<RwLock<SileroVAD>>>,
 
-    // Silence tracker for VAD output
+    // Silence tracker for VAD output (feature-gated)
+    #[cfg(feature = "stt-vad")]
     silence_tracker: Arc<SilenceTracker>,
 
-    // Buffer for accumulating audio samples for VAD processing
-    vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    // VAD state encapsulating buffers and per-instance warning flag.
+    //
+    // Contains:
+    // - audio_buffer: Accumulates ALL samples during an utterance for turn detection
+    // - frame_buffer: Temporary buffer for VAD frame processing
+    // - buffer_limit_warned: Per-instance flag for logging buffer limit warning once
+    #[cfg(feature = "stt-vad")]
+    vad_state: Arc<VADState>,
 
     // Interruption control - mostly lock-free with atomics
     interruption_state: Arc<InterruptionState>,
@@ -77,12 +88,25 @@ pub struct VoiceManager {
     clear_notify: Arc<Notify>,
 }
 
+/// Components returned from initialization.
+///
+/// This struct encapsulates all components created during VoiceManager initialization,
+/// providing a unified interface for both VAD and non-VAD paths.
+struct VoiceManagerComponents {
+    stt_result_processor: Arc<STTResultProcessor>,
+    #[cfg(feature = "stt-vad")]
+    silence_tracker: Arc<SilenceTracker>,
+    #[cfg(feature = "stt-vad")]
+    vad_state: Arc<VADState>,
+}
+
 impl VoiceManager {
     /// Create a new VoiceManager with the given configuration
     ///
     /// # Arguments
     /// * `config` - Configuration for both STT and TTS providers
     /// * `turn_detector` - Optional turn detector for end-of-speech detection
+    /// * `vad` - Optional VAD instance (only when `stt-vad` feature is enabled)
     ///
     /// # Returns
     /// * `VoiceManagerResult<Self>` - A new VoiceManager instance or error
@@ -135,96 +159,49 @@ impl VoiceManager {
         Self::new_internal(config, turn_detector)
     }
 
-    /// Internal constructor that handles both feature-gated and non-feature-gated versions
-    #[cfg(feature = "stt-vad")]
-    fn new_internal(
-        config: VoiceManagerConfig,
-        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-        vad: Option<Arc<RwLock<SileroVAD>>>,
-    ) -> VoiceManagerResult<Self> {
-        let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
-            .map_err(VoiceManagerError::TTSError)?;
-        let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
-            .map_err(VoiceManagerError::STTError)?;
+    /// Create STTProcessingConfig from VoiceManagerConfig.
+    ///
+    /// This unified helper creates the config for both VAD and non-VAD paths,
+    /// avoiding duplication of the builder pattern chain.
+    fn create_stt_processing_config(config: &VoiceManagerConfig) -> STTProcessingConfig {
+        #[cfg(feature = "stt-vad")]
+        {
+            let vad_config = &config.vad_config.silero_config;
+            STTProcessingConfig::with_vad(vad_config.silence_duration_ms)
+                .set_stt_speech_final_wait_ms(config.speech_final_config.stt_speech_final_wait_ms)
+                .set_hard_timeout_ms(config.speech_final_config.speech_final_hard_timeout_ms)
+                .set_turn_detection_inference_timeout_ms(
+                    config
+                        .speech_final_config
+                        .turn_detection_inference_timeout_ms,
+                )
+                .set_duplicate_window_ms(config.speech_final_config.duplicate_window_ms)
+        }
 
-        // Pre-allocate string buffers with reasonable capacity
-        const TEXT_BUFFER_CAPACITY: usize = 1024;
-        let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
-
-        // Initialize silence tracker with config from VAD config
-        let vad_config = &config.vad_config.silero_config;
-        let silence_tracker_config = SilenceTrackerConfig::from_sample_rate(
-            vad_config.sample_rate.as_hz(),
-            vad_config.threshold,
-            vad_config.silence_duration_ms,
-            vad_config.min_speech_duration_ms,
-        );
-        let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
-
-        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
-        const VAD_BUFFER_CAPACITY: usize = 16000;
-        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
-
-        // Create STT processor with VAD enabled (feature is compiled in)
-        let processing_config = STTProcessingConfig::with_vad(vad_config.silence_duration_ms)
-            .set_stt_speech_final_wait_ms(config.speech_final_config.stt_speech_final_wait_ms)
-            .set_hard_timeout_ms(config.speech_final_config.speech_final_hard_timeout_ms);
-        let stt_result_processor = Arc::new(STTResultProcessor::new(processing_config));
-
-        Ok(Self {
-            tts: Arc::new(RwLock::new(tts)),
-            stt: Arc::new(RwLock::new(stt)),
-            stt_callback: Arc::new(SyncRwLock::new(None)),
-            stt_error_callback: Arc::new(SyncRwLock::new(None)),
-            tts_audio_callback: Arc::new(SyncRwLock::new(None)),
-            tts_error_callback: Arc::new(SyncRwLock::new(None)),
-            audio_clear_callback: Arc::new(SyncRwLock::new(None)),
-            tts_complete_callback: Arc::new(SyncRwLock::new(None)),
-            speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
-                text_buffer,
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-                // VAD-based silence tracking state
-                vad_turn_end_detected: AtomicBool::new(false),
-                vad_turn_detection_handle: None,
-            })),
-            turn_detector,
-            stt_result_processor,
-            vad,
-            silence_tracker,
-            vad_audio_buffer,
-            interruption_state: Arc::new(InterruptionState {
-                allow_interruption: AtomicBool::new(true),
-                non_interruptible_until_ms: AtomicUsize::new(0),
-                current_sample_rate: AtomicU32::new(24000),
-                is_completed: AtomicBool::new(true), // Start as completed
-            }),
-            config,
-            clear_notify: Arc::new(Notify::new()),
-        })
+        #[cfg(not(feature = "stt-vad"))]
+        {
+            STTProcessingConfig::new(
+                config.speech_final_config.stt_speech_final_wait_ms,
+                config
+                    .speech_final_config
+                    .turn_detection_inference_timeout_ms,
+                config.speech_final_config.speech_final_hard_timeout_ms,
+                config.speech_final_config.duplicate_window_ms,
+            )
+        }
     }
 
-    /// Internal constructor that handles both feature-gated and non-feature-gated versions
-    #[cfg(not(feature = "stt-vad"))]
-    fn new_internal(
-        config: VoiceManagerConfig,
+    /// Initialize all STT processing components.
+    ///
+    /// This unified method handles initialization for both VAD and non-VAD paths:
+    /// - Creates STTProcessingConfig from VoiceManagerConfig
+    /// - Creates STTResultProcessor with appropriate components
+    /// - When `stt-vad` is enabled: also creates SilenceTracker and VADState
+    #[cfg(feature = "stt-vad")]
+    fn initialize_components(
+        config: &VoiceManagerConfig,
         turn_detector: Option<Arc<RwLock<TurnDetector>>>,
-    ) -> VoiceManagerResult<Self> {
-        let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
-            .map_err(VoiceManagerError::TTSError)?;
-        let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
-            .map_err(VoiceManagerError::STTError)?;
-
-        // Pre-allocate string buffers with reasonable capacity
-        const TEXT_BUFFER_CAPACITY: usize = 1024;
-        let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
-
+    ) -> VoiceManagerComponents {
         // Initialize silence tracker with config from VAD config
         let vad_config = &config.vad_config.silero_config;
         let silence_tracker_config = SilenceTrackerConfig::from_sample_rate(
@@ -235,26 +212,65 @@ impl VoiceManager {
         );
         let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
 
-        // Initialize VAD audio buffer with reasonable capacity (1 second of audio at 16kHz)
-        const VAD_BUFFER_CAPACITY: usize = 16000;
-        let vad_audio_buffer = Arc::new(SyncRwLock::new(Vec::with_capacity(VAD_BUFFER_CAPACITY)));
+        // Initialize VAD state with pre-allocated buffers
+        let vad_state = Arc::new(VADState::new(
+            VAD_AUDIO_BUFFER_CAPACITY,
+            VAD_FRAME_BUFFER_CAPACITY,
+        ));
 
-        // Create STT processor with timeout-based approach (no VAD feature)
-        let processing_config = STTProcessingConfig::new(
-            config.speech_final_config.stt_speech_final_wait_ms,
-            config
-                .speech_final_config
-                .turn_detection_inference_timeout_ms,
-            config.speech_final_config.speech_final_hard_timeout_ms,
-            config.speech_final_config.duplicate_window_ms,
-        );
-        let stt_result_processor = Arc::new(STTResultProcessor::new(processing_config));
+        // Create STT processor with VAD components
+        let processing_config = Self::create_stt_processing_config(config);
+        let stt_result_processor = Arc::new(STTResultProcessor::with_vad_components(
+            processing_config,
+            turn_detector,
+            silence_tracker.clone(),
+            vad_state.clone(),
+        ));
+
+        VoiceManagerComponents {
+            stt_result_processor,
+            silence_tracker,
+            vad_state,
+        }
+    }
+
+    /// Initialize all STT processing components (non-VAD path).
+    ///
+    /// Uses timeout-based approach for speech final detection.
+    #[cfg(not(feature = "stt-vad"))]
+    fn initialize_components(config: &VoiceManagerConfig) -> VoiceManagerComponents {
+        let processing_config = Self::create_stt_processing_config(config);
+        VoiceManagerComponents {
+            stt_result_processor: Arc::new(STTResultProcessor::new(processing_config)),
+        }
+    }
+
+    /// Internal constructor - unified implementation with internal cfg blocks
+    fn new_internal(
+        config: VoiceManagerConfig,
+        #[cfg(feature = "stt-vad")] turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        #[cfg(not(feature = "stt-vad"))] _turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        #[cfg(feature = "stt-vad")] vad: Option<Arc<RwLock<SileroVAD>>>,
+    ) -> VoiceManagerResult<Self> {
+        let tts = create_tts_provider(&config.tts_config.provider, config.tts_config.clone())
+            .map_err(VoiceManagerError::TTSError)?;
+        let stt = create_stt_provider(&config.stt_config.provider, config.stt_config.clone())
+            .map_err(VoiceManagerError::STTError)?;
+
+        // Pre-allocate string buffers with reasonable capacity
+        const TEXT_BUFFER_CAPACITY: usize = 1024;
+        let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
+        // Initialize STT result processor and VAD components using unified method
+        #[cfg(feature = "stt-vad")]
+        let components = Self::initialize_components(&config, turn_detector);
+
+        #[cfg(not(feature = "stt-vad"))]
+        let components = Self::initialize_components(&config);
 
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
             stt: Arc::new(RwLock::new(stt)),
-            stt_callback: Arc::new(SyncRwLock::new(None)),
-            stt_error_callback: Arc::new(SyncRwLock::new(None)),
             tts_audio_callback: Arc::new(SyncRwLock::new(None)),
             tts_error_callback: Arc::new(SyncRwLock::new(None)),
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
@@ -273,10 +289,13 @@ impl VoiceManager {
                 vad_turn_end_detected: AtomicBool::new(false),
                 vad_turn_detection_handle: None,
             })),
-            turn_detector,
-            stt_result_processor,
-            silence_tracker,
-            vad_audio_buffer,
+            stt_result_processor: components.stt_result_processor,
+            #[cfg(feature = "stt-vad")]
+            vad,
+            #[cfg(feature = "stt-vad")]
+            silence_tracker: components.silence_tracker,
+            #[cfg(feature = "stt-vad")]
+            vad_state: components.vad_state,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -306,6 +325,31 @@ impl VoiceManager {
                 "TTS provider does not support cache".to_string(),
             ))
         }
+    }
+
+    /// Update the TTS callback with current stored callbacks
+    ///
+    /// This helper method centralizes the creation and registration of
+    /// `VoiceManagerTTSCallback` to avoid code duplication across `start()`,
+    /// `on_tts_audio()`, `on_tts_error()`, and `on_tts_complete()`.
+    async fn update_tts_callback(&self) -> VoiceManagerResult<()> {
+        let audio_callback = self.tts_audio_callback.read().clone();
+        let error_callback = self.tts_error_callback.read().clone();
+        let complete_callback = self.tts_complete_callback.read().clone();
+        let interruption_state = self.interruption_state.clone();
+
+        let tts_callback = Arc::new(VoiceManagerTTSCallback {
+            audio_callback,
+            error_callback,
+            interruption_state: Some(interruption_state),
+            complete_callback,
+        });
+
+        let mut tts = self.tts.write().await;
+        tts.on_audio(tts_callback)
+            .map_err(VoiceManagerError::TTSError)?;
+
+        Ok(())
     }
 
     /// Start the VoiceManager by connecting to both STT and TTS providers
@@ -339,19 +383,8 @@ impl VoiceManager {
             tts.connect().await.map_err(VoiceManagerError::TTSError)?;
         }
 
-        // Set up internal TTS callback - using parking_lot for faster access
-        {
-            let mut tts = self.tts.write().await;
-            let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: self.tts_audio_callback.read().clone(),
-                error_callback: self.tts_error_callback.read().clone(),
-                interruption_state: Some(self.interruption_state.clone()),
-                complete_callback: self.tts_complete_callback.read().clone(),
-            });
-
-            tts.on_audio(tts_callback)
-                .map_err(VoiceManagerError::TTSError)?;
-        }
+        // Set up internal TTS callback
+        self.update_tts_callback().await?;
 
         Ok(())
     }
@@ -375,41 +408,22 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn stop(&self) -> VoiceManagerResult<()> {
-        // Reset VAD state
+        // Reset VAD state (feature-gated)
         #[cfg(feature = "stt-vad")]
-        if let Some(vad) = &self.vad {
-            vad.write().await.reset().await;
-        }
-        self.silence_tracker.reset();
         {
-            let mut buffer = self.vad_audio_buffer.write();
-            buffer.clear();
+            if let Some(vad) = &self.vad {
+                vad.write().await.reset().await;
+            }
+            self.silence_tracker.reset();
+            self.vad_state.reset();
         }
 
-        // Cancel any pending speech final timer
+        // Cancel any pending speech final timer and reset state
         {
             let mut state = self.speech_final_state.write();
-            if let Some(handle) = state.turn_detection_handle.take() {
-                handle.abort();
-            }
-            // Cancel hard timeout handle
-            if let Some(handle) = state.hard_timeout_handle.take() {
-                handle.abort();
-            }
-            // Reset VAD state in speech final state
-            state.reset_vad_state();
-            // Reset speech final state - reuse allocated capacity
-            state.text_buffer.clear();
-            state
-                .waiting_for_speech_final
-                .store(false, Ordering::Release);
+            state.reset_for_next_segment();
+            // Clear user callback - specific to stopping the manager
             state.user_callback = None;
-            state
-                .turn_detection_last_fired_ms
-                .store(0, Ordering::Release);
-            state.last_forced_text.clear();
-            state.segment_start_ms.store(0, Ordering::Release);
-            state.hard_timeout_deadline_ms.store(0, Ordering::Release);
         }
 
         // Disconnect STT provider
@@ -492,7 +506,7 @@ impl VoiceManager {
         // VAD is always active under stt-vad feature - no runtime config switch
         #[cfg(feature = "stt-vad")]
         if let Some(vad) = &self.vad {
-            self.process_audio_with_vad(&audio, vad.clone()).await?;
+            self.process_audio_with_vad(&audio, vad).await?;
         }
 
         // Send audio to STT provider
@@ -505,54 +519,26 @@ impl VoiceManager {
 
     /// Process audio through Silero-VAD for silence detection
     ///
-    /// This method converts raw PCM bytes to i16 samples, accumulates them
-    /// in a buffer, and processes complete frames through the VAD model.
-    /// VAD events are fed to the SilenceTracker which triggers speech_final
+    /// This method delegates audio processing to `vad_processor::process_audio_chunk`
+    /// which handles byte-to-sample conversion, frame buffering, and VAD inference.
+    /// VAD events are then processed via `handle_vad_event` to trigger speech_final
     /// when silence exceeds the configured threshold.
     #[cfg(feature = "stt-vad")]
     async fn process_audio_with_vad(
         &self,
         audio: &[u8],
-        vad: Arc<RwLock<SileroVAD>>,
+        vad: &Arc<RwLock<SileroVAD>>,
     ) -> VoiceManagerResult<()> {
-        // Convert bytes to i16 samples (assuming 16-bit PCM little-endian)
-        let samples: Vec<i16> = audio
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
+        use super::vad_processor;
 
-        // Get VAD frame size
-        let frame_size = {
-            let vad_guard = vad.read().await;
-            vad_guard.frame_size()
-        };
+        // Delegate audio processing to vad_processor
+        let events =
+            vad_processor::process_audio_chunk(audio, vad, &self.vad_state, &self.silence_tracker)
+                .await?;
 
-        // Extract complete frames from buffer synchronously to avoid holding lock across await
-        let frames_to_process: Vec<Vec<i16>> = {
-            let mut buffer = self.vad_audio_buffer.write();
-            buffer.extend_from_slice(&samples);
-
-            let mut frames = Vec::new();
-            while buffer.len() >= frame_size {
-                let frame: Vec<i16> = buffer.drain(..frame_size).collect();
-                frames.push(frame);
-            }
-            frames
-        }; // Buffer lock released here
-
-        // Process frames through VAD (without holding buffer lock)
-        for frame in frames_to_process {
-            let speech_prob = {
-                let vad_guard = vad.write().await;
-                vad_guard.process_audio(&frame).await.map_err(|e| {
-                    VoiceManagerError::InitializationError(format!("VAD processing error: {}", e))
-                })?
-            };
-
-            // Feed to silence tracker
-            if let Some(event) = self.silence_tracker.process(speech_prob) {
-                self.handle_vad_event(event);
-            }
+        // Handle each VAD event
+        for event in events {
+            self.handle_vad_event(event);
         }
 
         Ok(())
@@ -566,13 +552,8 @@ impl VoiceManager {
     #[cfg(feature = "stt-vad")]
     fn handle_vad_event(&self, event: VADEvent) {
         // Delegate to STTResultProcessor for centralized turn detection logic
-        self.stt_result_processor.process_vad_event(
-            event,
-            self.speech_final_state.clone(),
-            self.turn_detector.clone(),
-            self.silence_tracker.clone(),
-            self.vad_audio_buffer.clone(),
-        );
+        self.stt_result_processor
+            .process_vad_event(event, self.speech_final_state.clone());
     }
 
     /// Send text to the TTS provider for synthesis
@@ -643,10 +624,7 @@ impl VoiceManager {
             }
 
             // Get current timestamp in milliseconds
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as usize;
+            let now = utils::get_current_time_ms();
 
             // Initialize non_interruptible_until_ms to current time
             // The actual duration will be calculated as TTS chunks arrive
@@ -768,13 +746,7 @@ impl VoiceManager {
     {
         let callback = Arc::new(callback);
 
-        // Store the callback for later use - using parking_lot for faster access
-        {
-            let mut stt_callback = self.stt_callback.write();
-            *stt_callback = Some(callback.clone());
-        }
-
-        // Also store in speech final state for timer access
+        // Store in speech final state for timer access
         {
             let mut state = self.speech_final_state.write();
             state.user_callback = Some(callback.clone());
@@ -783,7 +755,6 @@ impl VoiceManager {
         // Pre-clone Arc references outside the callback to reduce per-invocation overhead
         let speech_final_state_clone = self.speech_final_state.clone();
         let interruption_state_clone = self.interruption_state.clone();
-        let turn_detector_clone = self.turn_detector.clone();
 
         // Use stored STT processor instead of creating a new one
         // This ensures VAD and timeout-based detection share the same processor state
@@ -794,7 +765,6 @@ impl VoiceManager {
             let callback = callback.clone();
             let speech_final_state = speech_final_state_clone.clone();
             let interruption_state = interruption_state_clone.clone();
-            let turn_detector = turn_detector_clone.clone();
             let stt_processor = stt_processor_clone.clone();
 
             Box::pin(async move {
@@ -806,7 +776,7 @@ impl VoiceManager {
 
                 // Process result with timing control - now non-blocking for result delivery
                 let processed_result = stt_processor
-                    .process_result(result, speech_final_state, turn_detector)
+                    .process_result(result, speech_final_state)
                     .await;
 
                 if let Some(processed_result) = processed_result {
@@ -865,12 +835,6 @@ impl VoiceManager {
     {
         let callback = Arc::new(callback);
 
-        // Store the callback for later use
-        {
-            let mut stt_error_callback = self.stt_error_callback.write();
-            *stt_error_callback = Some(callback.clone());
-        }
-
         // Create wrapper callback for the provider
         let wrapper_callback: ProviderSTTErrorCallback = Arc::new(move |error| {
             let callback = callback.clone();
@@ -919,81 +883,14 @@ impl VoiceManager {
     where
         F: Fn(AudioData) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
-        let user_callback = Arc::new(callback);
-        let interruption_state_clone = self.interruption_state.clone();
-
-        // Create wrapper that checks clearing state and updates interruption timing
-        let wrapper_callback = Arc::new(move |audio_data: AudioData| {
-            let user_cb = user_callback.clone();
-            let int_state = interruption_state_clone.clone();
-
-            Box::pin(async move {
-                // Check if this is new audio after completion
-                if int_state.is_completed.load(Ordering::Acquire) {
-                    // New audio starting after completion
-                    int_state.is_completed.store(false, Ordering::SeqCst);
-
-                    // Reset the non_interruptible_until_ms to current time if we're in non-interruptible mode
-                    if !int_state.allow_interruption.load(Ordering::Acquire) {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as usize;
-                        int_state
-                            .non_interruptible_until_ms
-                            .store(now_ms, Ordering::Release);
-                    }
-                }
-
-                // Calculate audio duration and update non_interruptible_until_ms
-                if !int_state.allow_interruption.load(Ordering::Acquire) {
-                    // Calculate actual audio duration from audio data
-                    // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
-                    // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
-                    let bytes_per_sample = 2;
-                    let channels = 1;
-                    let sample_rate = int_state.current_sample_rate.load(Ordering::Acquire);
-
-                    let chunk_duration_seconds = audio_data.data.len() as f32
-                        / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
-
-                    let chunk_duration_ms = (chunk_duration_seconds * 1000.0) as usize;
-
-                    // Add duration to non_interruptible_until_ms
-                    let current_until =
-                        int_state.non_interruptible_until_ms.load(Ordering::Acquire);
-                    int_state
-                        .non_interruptible_until_ms
-                        .store(current_until + chunk_duration_ms, Ordering::Release);
-                }
-
-                // Call the user's callback
-                user_cb(audio_data).await;
-            }) as Pin<Box<dyn Future<Output = ()> + Send>>
-        });
-
-        // Store callback and release lock before await
-        let audio_callback = {
-            let mut tts_audio_callback = self.tts_audio_callback.write();
-            *tts_audio_callback = Some(wrapper_callback.clone());
-            tts_audio_callback.clone()
-        };
-
-        // Update the internal TTS callback
+        // Store user callback
         {
-            let mut tts = self.tts.write().await;
-            let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback,
-                error_callback: self.tts_error_callback.read().clone(),
-                interruption_state: Some(self.interruption_state.clone()),
-                complete_callback: self.tts_complete_callback.read().clone(),
-            });
-
-            tts.on_audio(tts_callback)
-                .map_err(VoiceManagerError::TTSError)?;
+            let mut tts_audio_callback = self.tts_audio_callback.write();
+            *tts_audio_callback = Some(Arc::new(callback));
         }
 
-        Ok(())
+        // Update the internal TTS callback
+        self.update_tts_callback().await
     }
 
     /// Register a callback for TTS errors
@@ -1007,28 +904,14 @@ impl VoiceManager {
     where
         F: Fn(TTSError) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
-        // Store callback and then release lock before await
-        let error_callback = {
+        // Store callback
+        {
             let mut tts_error_callback = self.tts_error_callback.write();
             *tts_error_callback = Some(Arc::new(callback));
-            tts_error_callback.clone()
-        };
-
-        // Update the internal TTS callback
-        {
-            let mut tts = self.tts.write().await;
-            let tts_callback = Arc::new(VoiceManagerTTSCallback {
-                audio_callback: self.tts_audio_callback.read().clone(),
-                error_callback,
-                interruption_state: Some(self.interruption_state.clone()),
-                complete_callback: self.tts_complete_callback.read().clone(),
-            });
-
-            tts.on_audio(tts_callback)
-                .map_err(VoiceManagerError::TTSError)?;
         }
 
-        Ok(())
+        // Update the internal TTS callback
+        self.update_tts_callback().await
     }
 
     /// Register a callback for audio clear operations
@@ -1113,25 +996,12 @@ impl VoiceManager {
         F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
         // Store the callback
-        *self.tts_complete_callback.write() = Some(Arc::new(callback));
+        {
+            *self.tts_complete_callback.write() = Some(Arc::new(callback));
+        }
 
-        // Update the TTS provider's callback to include completion callback
-        let mut tts = self.tts.write().await;
-        let audio_callback = self.tts_audio_callback.read().clone();
-        let error_callback = self.tts_error_callback.read().clone();
-        let complete_callback = self.tts_complete_callback.read().clone();
-
-        let callback = Arc::new(VoiceManagerTTSCallback {
-            audio_callback,
-            error_callback,
-            interruption_state: Some(self.interruption_state.clone()),
-            complete_callback,
-        });
-
-        tts.on_audio(callback)
-            .map_err(VoiceManagerError::TTSError)?;
-
-        Ok(())
+        // Update the internal TTS callback
+        self.update_tts_callback().await
     }
 
     /// Get the current configuration
