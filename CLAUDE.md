@@ -108,7 +108,7 @@ Audio In -> VAD -> SilenceTracker -> TurnEnd Event -> Smart-Turn -> speech_final
 ```
 
 1. Audio frames are processed through Silero-VAD ONNX model
-2. When configurable silence threshold (default: 300ms) is detected, the smart-turn model is triggered
+2. When configurable silence threshold (default: 200ms per PipeCat recommendation) is detected, the smart-turn model is triggered
 3. The smart-turn model analyzes the accumulated audio to confirm if the turn is complete
 4. If confirmed, an artificial `speech_final` event is emitted
 5. If smart-turn returns false (turn incomplete), the system resets and waits for the next silence detection
@@ -116,11 +116,17 @@ Audio In -> VAD -> SilenceTracker -> TurnEnd Event -> Smart-Turn -> speech_final
 **Smart-Turn Model:**
 - Model: [pipecat-ai/smart-turn-v3](https://huggingface.co/pipecat-ai/smart-turn-v3)
 - Version: `smart-turn-v3.2-cpu.onnx` (quantized int8)
-- Input: Up to 8 seconds of 16kHz mono PCM audio
+- Input: Up to 8 seconds of 16kHz mono PCM audio (minimum 0.5 seconds required)
 - Input Format: Mel spectrogram (1, 80, 800) via Whisper-style preprocessing
 - Output: Probability that the speaker has finished their turn (0.0-1.0)
 - Architecture: Whisper Tiny encoder + linear classifier (~8M parameters)
 - Performance: Feature extraction ~10-30ms + model inference ~12-20ms = ~50ms total (release build)
+
+**Filler Sound Handling:**
+- Smart-Turn v2/v3 is explicitly trained on filler words ("um", "mmm", "ehhh")
+- The model recognizes these as "user still thinking" patterns
+- Audio buffer is preserved across speech pauses for full context analysis
+- Minimum 0.5 seconds of audio required before turn detection runs
 
 **Mel Spectrogram Parameters (Whisper Standard):**
 - Sample Rate: 16000 Hz
@@ -133,11 +139,11 @@ Audio In -> VAD -> SilenceTracker -> TurnEnd Event -> Smart-Turn -> speech_final
 ```yaml
 vad:
   threshold: 0.5              # Speech probability threshold for VAD (0.0-1.0)
-  silence_duration_ms: 300    # Silence duration to trigger turn detection
-  min_speech_duration_ms: 100 # Minimum speech before checking silence
+  silence_duration_ms: 200    # Silence duration to trigger turn detection (PipeCat: stop_secs=0.2)
+  min_speech_duration_ms: 250 # Minimum speech before checking silence (filters filler sounds)
 
 turn_detect:
-  threshold: 0.5              # Turn completion probability threshold (0.0-1.0)
+  threshold: 0.6              # Turn completion probability threshold (0.0-1.0), increased for robustness
   num_threads: 4              # ONNX inference threads (default: 4)
   # Advanced options (rarely need changing):
   # model_path: /path/to/model.onnx  # Override model location
@@ -152,7 +158,7 @@ turn_detect:
 {
   "type": "config",
   "vad": {
-    "silence_duration_ms": 300
+    "silence_duration_ms": 200
   }
 }
 ```

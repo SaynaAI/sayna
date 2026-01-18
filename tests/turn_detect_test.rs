@@ -1476,7 +1476,8 @@ mod config_tests {
     #[test]
     fn test_config_defaults() {
         let config = TurnDetectorConfig::default();
-        assert_eq!(config.threshold, 0.5);
+        // Increased from 0.5 to 0.6 for better filler sound handling
+        assert_eq!(config.threshold, 0.6);
         assert_eq!(config.sample_rate, 16000);
         assert_eq!(config.max_audio_duration_seconds, 8);
         assert_eq!(config.mel_bins, 80);

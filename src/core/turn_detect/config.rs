@@ -37,7 +37,11 @@ pub struct TurnDetectorConfig {
 impl Default for TurnDetectorConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.5,
+            // Increased from 0.5 to 0.6 to reduce false positives on filler sounds
+            // like "um", "mmm", "ehhh". The model explicitly trained on these sounds
+            // and should recognize them as "user still thinking", but a higher threshold
+            // provides additional safety margin.
+            threshold: 0.6,
             sample_rate: 16000,
             max_audio_duration_seconds: 8,
             mel_bins: DEFAULT_MEL_BINS,

@@ -159,10 +159,11 @@ impl Default for STTProcessingConfig {
             // Field value ignored under stt-vad (VAD always active when compiled)
             use_vad_silence_detection: false,
             stt_speech_final_wait_ms: 2000, // Wait 2s for real speech_final from STT
-            vad_silence_duration_ms: 300,   // 300ms silence threshold for VAD
+            // PipeCat recommends stop_secs=0.2 (200ms) for optimal Smart-Turn performance
+            vad_silence_duration_ms: 200,
             turn_detection_inference_timeout_ms: 100, // 100ms max for model inference
-            speech_final_hard_timeout_ms: 5000, // 5s hard upper bound for any utterance
-            duplicate_window_ms: 500,       // 500ms duplicate prevention window
+            speech_final_hard_timeout_ms: 5000,       // 5s hard upper bound for any utterance
+            duplicate_window_ms: 500,                 // 500ms duplicate prevention window
         }
     }
 }
@@ -332,20 +333,48 @@ impl STTResultProcessor {
 
         match event {
             VADEvent::SpeechStart => {
-                debug!("VAD: Speech started - resetting VAD state and clearing audio buffer");
-                let mut state = speech_final_state.write();
-                state.reset_vad_state();
-                // Clear audio buffer for new utterance
-                let mut buffer = vad_audio_buffer.write();
-                buffer.clear();
+                // IMPORTANT: Per PipeCat best practices, we should NOT clear the audio buffer
+                // if we're in the middle of a turn (waiting_for_speech_final is true).
+                // "If additional speech is detected from the user before Smart Turn has finished
+                // executing, re-run Smart Turn on the entire turn recording, including the new
+                // audio, rather than just the new segment."
+                //
+                // We only clear the buffer for a truly new utterance (after a confirmed speech_final
+                // or when no turn detection is in progress).
+                let state = speech_final_state.read();
+                let is_mid_turn = state.waiting_for_speech_final.load(Ordering::Acquire);
+                drop(state);
+
+                if is_mid_turn {
+                    // Mid-turn speech start - just reset VAD state but KEEP the audio buffer
+                    // so Smart-Turn can analyze the full context including this new speech
+                    debug!(
+                        "VAD: Speech started mid-turn - resetting VAD state but preserving audio buffer for context"
+                    );
+                    let mut state = speech_final_state.write();
+                    state.reset_vad_state();
+                } else {
+                    // New utterance starting - clear both VAD state and audio buffer
+                    debug!(
+                        "VAD: New speech started - resetting VAD state and clearing audio buffer"
+                    );
+                    let mut state = speech_final_state.write();
+                    state.reset_vad_state();
+                    let mut buffer = vad_audio_buffer.write();
+                    buffer.clear();
+                }
             }
 
             VADEvent::SpeechResumed => {
                 // User resumed speaking before turn end threshold
-                // Cancel any pending VAD turn detection
-                debug!("VAD: Speech resumed - cancelling pending VAD turn detection");
+                // Cancel any pending VAD turn detection but KEEP the audio buffer
+                // so we maintain full context for the next turn detection attempt
+                debug!(
+                    "VAD: Speech resumed - cancelling pending VAD turn detection but preserving audio buffer"
+                );
                 let mut state = speech_final_state.write();
                 state.reset_vad_state();
+                // Note: Audio buffer is intentionally NOT cleared here - PipeCat best practice
             }
 
             VADEvent::SilenceDetected => {
@@ -397,6 +426,20 @@ impl STTResultProcessor {
             let audio_buffer = vad_audio_buffer.read();
             if audio_buffer.is_empty() {
                 debug!("VAD: TurnEnd received but audio buffer is empty - skipping");
+                return;
+            }
+
+            // IMPORTANT: Smart-Turn is "not designed to run on very short audio segments"
+            // (per PipeCat docs). Require at least 0.5 seconds of audio (8000 samples at 16kHz)
+            // to ensure meaningful prosody analysis. Short segments like brief "mmm" sounds
+            // don't provide enough context for accurate turn detection.
+            const MIN_AUDIO_SAMPLES: usize = 8000; // 0.5 seconds at 16kHz
+            if audio_buffer.len() < MIN_AUDIO_SAMPLES {
+                debug!(
+                    "VAD: TurnEnd received but audio buffer too short ({} samples < {} min) - skipping",
+                    audio_buffer.len(),
+                    MIN_AUDIO_SAMPLES
+                );
                 return;
             }
 
