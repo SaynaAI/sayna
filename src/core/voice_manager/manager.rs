@@ -31,7 +31,8 @@ use super::{
     config::VoiceManagerConfig,
     errors::{VoiceManagerError, VoiceManagerResult},
     state::{InterruptionState, SpeechFinalState},
-    stt_result::{STTProcessingConfig, STTResultProcessor},
+    stt_config::STTProcessingConfig,
+    stt_result::STTResultProcessor,
 };
 
 /// VoiceManager provides a unified interface for managing STT and TTS providers

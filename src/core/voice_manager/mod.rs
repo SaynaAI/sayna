@@ -299,7 +299,11 @@ pub mod config;
 pub mod errors;
 pub mod manager;
 pub mod state;
+pub mod stt_config;
 pub mod stt_result;
+mod turn_detection_tasks;
+#[cfg(feature = "stt-vad")]
+mod vad_processor;
 
 #[cfg(test)]
 mod tests;
@@ -312,4 +316,5 @@ pub use config::{SpeechFinalConfig, VoiceManagerConfig};
 pub use errors::{VoiceManagerError, VoiceManagerResult};
 pub use manager::VoiceManager;
 pub use state::SpeechFinalState;
-pub use stt_result::{STTProcessingConfig, STTResultProcessor};
+pub use stt_config::STTProcessingConfig;
+pub use stt_result::STTResultProcessor;
