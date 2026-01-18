@@ -23,11 +23,52 @@ use super::turn_detection_tasks;
 #[derive(Clone)]
 pub struct STTResultProcessor {
     config: STTProcessingConfig,
+
+    /// Optional turn detector for smart-turn fallback (feature-gated: `stt-vad`)
+    #[cfg(feature = "stt-vad")]
+    turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+
+    /// Optional silence tracker for smart-turn fallback (feature-gated: `stt-vad`)
+    #[cfg(feature = "stt-vad")]
+    silence_tracker: Option<Arc<SilenceTracker>>,
+
+    /// Optional audio buffer for smart-turn fallback (feature-gated: `stt-vad`)
+    #[cfg(feature = "stt-vad")]
+    vad_audio_buffer: Option<Arc<SyncRwLock<Vec<i16>>>>,
 }
 
 impl STTResultProcessor {
+    /// Create a new STTResultProcessor with just configuration (no VAD components).
+    #[cfg(not(feature = "stt-vad"))]
     pub fn new(config: STTProcessingConfig) -> Self {
         Self { config }
+    }
+
+    /// Create a new STTResultProcessor with just configuration (no VAD components).
+    #[cfg(feature = "stt-vad")]
+    pub fn new(config: STTProcessingConfig) -> Self {
+        Self {
+            config,
+            turn_detector: None,
+            silence_tracker: None,
+            vad_audio_buffer: None,
+        }
+    }
+
+    /// Create a new STTResultProcessor with VAD components for smart-turn fallback.
+    #[cfg(feature = "stt-vad")]
+    pub fn with_vad_components(
+        config: STTProcessingConfig,
+        turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        silence_tracker: Arc<SilenceTracker>,
+        vad_audio_buffer: Arc<SyncRwLock<Vec<i16>>>,
+    ) -> Self {
+        Self {
+            config,
+            turn_detector,
+            silence_tracker: Some(silence_tracker),
+            vad_audio_buffer: Some(vad_audio_buffer),
+        }
     }
 
     /// Process an STT result, handling turn detection and speech_final events.
@@ -113,14 +154,18 @@ impl STTResultProcessor {
         result: STTResult,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     ) {
+        use tracing::info;
+
         // Update text buffer and cancel any existing task (person still talking)
         let (buffered_text, is_new_segment) = {
             let mut state = speech_final_state.write();
 
-            // CRITICAL: Cancel old task when new is_final arrives (person still talking)
+            // CRITICAL: Cancel old task when new is_final arrives - this implements the "timer reset"
+            // The new is_final indicates the person is still talking, so we cancel the old timer
+            // and start a fresh 2800ms timer below
             if let Some(old_handle) = state.turn_detection_handle.take() {
-                debug!(
-                    "New is_final arrived - cancelling previous turn detection (person still talking)"
+                info!(
+                    "Smart fallback timer reset: new is_final arrived, cancelling previous timer and starting fresh"
                 );
                 old_handle.abort();
             }
@@ -134,6 +179,33 @@ impl STTResultProcessor {
         };
 
         // Create and store NEW detection task handle
+        // When stt-vad is enabled and components are available, use smart fallback
+        #[cfg(feature = "stt-vad")]
+        let detection_handle = {
+            if let (Some(turn_detector), Some(silence_tracker), Some(vad_audio_buffer)) = (
+                &self.turn_detector,
+                &self.silence_tracker,
+                &self.vad_audio_buffer,
+            ) {
+                turn_detection_tasks::create_smart_fallback_task(
+                    &self.config,
+                    buffered_text.clone(),
+                    speech_final_state.clone(),
+                    turn_detector.clone(),
+                    silence_tracker.clone(),
+                    vad_audio_buffer.clone(),
+                )
+            } else {
+                turn_detection_tasks::create_detection_task(
+                    &self.config,
+                    result,
+                    buffered_text.clone(),
+                    speech_final_state.clone(),
+                )
+            }
+        };
+
+        #[cfg(not(feature = "stt-vad"))]
         let detection_handle = turn_detection_tasks::create_detection_task(
             &self.config,
             result,

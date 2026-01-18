@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tokio::time::Duration;
 use tracing::{debug, info};
 
 use crate::core::stt::STTResult;
@@ -18,6 +17,7 @@ use crate::core::vad::{SilenceTracker, VADEvent};
 use super::state::SpeechFinalState;
 use super::stt_config::STTProcessingConfig;
 use super::stt_result::STTResultProcessor;
+use super::turn_detection_tasks::{SmartTurnResult, run_smart_turn_detection};
 
 /// Process a VAD event for silence detection.
 ///
@@ -172,70 +172,78 @@ fn spawn_vad_turn_detection_audio(
             return;
         }
 
-        let detection_method = if let Some(detector) = turn_detector {
-            let sample_count = audio_samples.len();
-            let turn_result =
-                tokio::time::timeout(Duration::from_millis(inference_timeout_ms), async {
-                    let detector_guard = detector.read().await;
-                    detector_guard.is_turn_complete(&audio_samples).await
-                })
+        // Use the shared run_smart_turn_detection function
+        let smart_turn_result =
+            run_smart_turn_detection(inference_timeout_ms, &audio_samples, turn_detector).await;
+
+        match smart_turn_result {
+            SmartTurnResult::Complete(detection_method) => {
+                // Prefix detection method with "vad_" to indicate VAD-triggered
+                let vad_method = match detection_method {
+                    "smart_turn_confirmed" => "vad_smart_turn_confirmed",
+                    "smart_turn_error_fallback" => "vad_smart_turn_error_fallback",
+                    "smart_turn_timeout_fallback" => "vad_inference_timeout_fallback",
+                    "timeout_no_detector" => "vad_silence_only",
+                    other => other,
+                };
+
+                let result = STTResult {
+                    transcript: String::new(),
+                    is_final: true,
+                    is_speech_final: true,
+                    confidence: 1.0,
+                };
+
+                STTResultProcessor::fire_speech_final(
+                    result,
+                    buffered_text,
+                    speech_final_state,
+                    vad_method,
+                )
                 .await;
 
-            match turn_result {
-                Ok(Ok(true)) => {
-                    info!(
-                        "VAD+SmartTurn: Turn complete confirmed for {} audio samples",
-                        sample_count
-                    );
-                    "vad_smart_turn_confirmed"
+                silence_tracker.reset();
+                {
+                    let mut buffer = vad_audio_buffer.write();
+                    buffer.clear();
                 }
-                Ok(Ok(false)) => {
-                    info!("VAD: Smart-turn says incomplete - waiting for more input");
-                    {
-                        let state = speech_final_state.write();
-                        state.vad_turn_end_detected.store(false, Ordering::Release);
-                    }
-                    silence_tracker.reset();
-                    return;
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("VAD smart-turn detection error: {:?} - firing anyway", e);
-                    "vad_smart_turn_error_fallback"
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "VAD smart-turn detection timeout after {}ms - firing anyway",
-                        inference_timeout_ms
-                    );
-                    "vad_inference_timeout_fallback"
-                }
+                info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
             }
-        } else {
-            info!("VAD: No turn detector - firing based on silence alone");
-            "vad_silence_only"
-        };
+            SmartTurnResult::Incomplete => {
+                info!("VAD: Smart-turn says incomplete - waiting for more input");
+                {
+                    let state = speech_final_state.write();
+                    state.vad_turn_end_detected.store(false, Ordering::Release);
+                }
+                silence_tracker.reset();
+            }
+            SmartTurnResult::Skipped => {
+                // Should not happen for VAD path since we already check buffer length
+                // in handle_vad_turn_end, but handle gracefully
+                info!("VAD: Smart-turn skipped (buffer too short) - firing based on silence alone");
+                let result = STTResult {
+                    transcript: String::new(),
+                    is_final: true,
+                    is_speech_final: true,
+                    confidence: 1.0,
+                };
 
-        let result = STTResult {
-            transcript: String::new(),
-            is_final: true,
-            is_speech_final: true,
-            confidence: 1.0,
-        };
+                STTResultProcessor::fire_speech_final(
+                    result,
+                    buffered_text,
+                    speech_final_state,
+                    "vad_silence_only",
+                )
+                .await;
 
-        STTResultProcessor::fire_speech_final(
-            result,
-            buffered_text,
-            speech_final_state,
-            detection_method,
-        )
-        .await;
-
-        silence_tracker.reset();
-        {
-            let mut buffer = vad_audio_buffer.write();
-            buffer.clear();
+                silence_tracker.reset();
+                {
+                    let mut buffer = vad_audio_buffer.write();
+                    buffer.clear();
+                }
+                info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
+            }
         }
-        info!("VAD: Reset silence tracker and cleared audio buffer after speech_final");
     })
 }
 

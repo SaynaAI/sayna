@@ -196,10 +196,16 @@ impl VoiceManager {
         )));
 
         // Create STT processor with VAD enabled (feature is compiled in)
+        // Pass VAD components for smart-turn fallback timer
         let processing_config = STTProcessingConfig::with_vad(vad_config.silence_duration_ms)
             .set_stt_speech_final_wait_ms(config.speech_final_config.stt_speech_final_wait_ms)
             .set_hard_timeout_ms(config.speech_final_config.speech_final_hard_timeout_ms);
-        let stt_result_processor = Arc::new(STTResultProcessor::new(processing_config));
+        let stt_result_processor = Arc::new(STTResultProcessor::with_vad_components(
+            processing_config,
+            turn_detector.clone(),
+            silence_tracker.clone(),
+            vad_audio_buffer.clone(),
+        ));
 
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
