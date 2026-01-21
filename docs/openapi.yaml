@@ -326,33 +326,7 @@ paths:
       tags:
       - sip
       summary: Handler for POST /sip/call endpoint
-      description: |-
-        Initiates an outbound SIP call through LiveKit.
-        The call is connected to the specified room as a SIP participant.
-
-        # Arguments
-        * `state` - Shared application state containing LiveKit handlers and config
-        * `auth` - Authentication context for room metadata authorization
-        * `request` - Call request with phone numbers and room details
-
-        # Returns
-        * `Response` - JSON response with call status or error
-
-        # Errors
-        * 400 Bad Request - Invalid phone number format or empty fields
-        * 403 Forbidden - Room exists with different auth_id (cross-tenant)
-        * 404 Not Found - Room exists with different auth_id (masked as 404)
-        * 500 Internal Server Error - LiveKit not configured, outbound address missing, or call failed
-
-        # Flow
-        1. Validate non-empty room name and participant identifiers
-        2. Validate phone number formats
-        3. Check SIP config exists and contains outbound_address
-        4. Check LiveKit SIP handler is available
-        5. Check room access via metadata auth_id (if room exists)
-        6. Create outbound call (trunk is created/reused automatically)
-        7. Ensure room metadata contains auth_id for tenant isolation
-        8. Return success response with call identifiers
+      description: Initiates an outbound SIP call through LiveKit. The optional `sip` object in the request body allows overriding global SIP configuration on a per-request basis. Request body values take priority over global config, enabling different SIP providers or credentials for specific calls.
       operationId: sip_call
       requestBody:
         content:
@@ -784,6 +758,33 @@ components:
             type: string
             enum:
             - sip_transfer
+      - type: object
+        description: |-
+          Update runtime configuration for VAD and turn detection.
+
+          This message allows dynamic adjustment of VAD and turn detection parameters
+          during an active WebSocket session. Only parameters that are provided will
+          be updated; omitted parameters retain their current values.
+
+          **Note**: These settings affect the shared turn detector and may impact
+          other active sessions using the same server instance.
+        required:
+        - type
+        properties:
+          turn_detect:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/TurnDetectConfigUpdate'
+              description: Turn detection configuration updates (probability threshold)
+          type:
+            type: string
+            enum:
+            - update_config
+          vad:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/VADConfigUpdate'
+              description: VAD configuration updates (silence threshold, etc.)
       description: WebSocket message types for incoming messages
     ListRoomsResponse:
       type: object
@@ -1412,9 +1413,28 @@ components:
           "participant_name": "John Doe",
           "participant_identity": "caller-456",
           "from_phone_number": "+15105550123",
-          "to_phone_number": "+15551234567"
+          "to_phone_number": "+15551234567",
+          "sip": {
+            "outbound_address": "sip.provider.com",
+            "auth_username": "user123",
+            "auth_password": "secret"
+          }
         }
         ```
+
+        # SIP Configuration Priority
+
+        The `sip` object is optional. When provided, its fields take priority over global
+        server configuration values. This allows per-request customization of SIP settings.
+
+        **Priority order**: Request body `sip` config > Global server config
+
+        - `outbound_address`: Overrides `sip.outbound_address` from config
+        - `auth_username`: Overrides `sip.outbound_auth_username` from config
+        - `auth_password`: Overrides `sip.outbound_auth_password` from config
+
+        If neither the request body nor global config provides an `outbound_address`,
+        the call will fail with `OUTBOUND_ADDRESS_NOT_CONFIGURED` error.
       required:
       - room_name
       - participant_name
@@ -1441,6 +1461,14 @@ components:
           type: string
           description: The LiveKit room name to connect the call to
           example: call-room-123
+        sip:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SIPCallSipConfig'
+            description: |-
+              Optional per-request SIP configuration overrides.
+              When provided, these values take priority over the global server configuration.
+              This allows using different SIP providers or credentials for specific calls.
         to_phone_number:
           type: string
           description: |-
@@ -1490,6 +1518,51 @@ components:
           type: string
           description: Status of the call request ("initiated")
           example: initiated
+    SIPCallSipConfig:
+      type: object
+      description: |-
+        Per-request SIP configuration overrides
+
+        Allows overriding the global SIP configuration on a per-request basis.
+        When specified, these values take priority over the global server configuration.
+
+        # Priority
+        Request body values > Global config values
+
+        # Example
+        ```json
+        {
+          "outbound_address": "sip.example.com:5060",
+          "auth_username": "user123",
+          "auth_password": "secret456"
+        }
+        ```
+      properties:
+        auth_password:
+          type:
+          - string
+          - 'null'
+          description: |-
+            SIP authentication password override.
+            When provided, overrides the global `sip.outbound_auth_password` config.
+          example: secure_password_456
+        auth_username:
+          type:
+          - string
+          - 'null'
+          description: |-
+            SIP authentication username override.
+            When provided, overrides the global `sip.outbound_auth_username` config.
+          example: sip_user_123
+        outbound_address:
+          type:
+          - string
+          - 'null'
+          description: |-
+            SIP server address override for outbound calls.
+            When provided, overrides the global `sip.outbound_address` config.
+            Format: hostname or hostname:port (e.g., "sip.example.com" or "sip.example.com:5060")
+          example: sip.provider.com:5060
     SIPTransferErrorResponse:
       type: object
       description: |-
@@ -1838,6 +1911,20 @@ components:
           type: string
           description: The generated JWT token for LiveKit
           example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+    TurnDetectConfigUpdate:
+      type: object
+      description: Turn detection configuration update for runtime adjustments
+      properties:
+        threshold:
+          type:
+          - number
+          - 'null'
+          format: float
+          description: |-
+            Turn completion probability threshold (0.0 to 1.0).
+            When the smart-turn model returns a probability >= this threshold,
+            the turn is considered complete and speech_final is emitted.
+          example: 0.5
     UnifiedMessage:
       type: object
       description: Unified message structure for all incoming messages from various sources
@@ -1871,6 +1958,20 @@ components:
         topic:
           type: string
           description: Topic/channel for the message
+    VADConfigUpdate:
+      type: object
+      description: VAD configuration update for runtime adjustments
+      properties:
+        silence_duration_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Silence duration threshold in milliseconds to trigger turn detection.
+            When silence exceeds this duration, the smart-turn model is queried.
+          example: 300
+          minimum: 0
     Voice:
       type: object
       required:

@@ -20,6 +20,45 @@ use crate::livekit::LiveKitError;
 use crate::state::AppState;
 use crate::utils::validate_phone_number;
 
+/// Per-request SIP configuration overrides
+///
+/// Allows overriding the global SIP configuration on a per-request basis.
+/// When specified, these values take priority over the global server configuration.
+///
+/// # Priority
+/// Request body values > Global config values
+///
+/// # Example
+/// ```json
+/// {
+///   "outbound_address": "sip.example.com:5060",
+///   "auth_username": "user123",
+///   "auth_password": "secret456"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SIPCallSipConfig {
+    /// SIP server address override for outbound calls.
+    /// When provided, overrides the global `sip.outbound_address` config.
+    /// Format: hostname or hostname:port (e.g., "sip.example.com" or "sip.example.com:5060")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "sip.provider.com:5060"))]
+    pub outbound_address: Option<String>,
+
+    /// SIP authentication username override.
+    /// When provided, overrides the global `sip.outbound_auth_username` config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "sip_user_123"))]
+    pub auth_username: Option<String>,
+
+    /// SIP authentication password override.
+    /// When provided, overrides the global `sip.outbound_auth_password` config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "secure_password_456"))]
+    pub auth_password: Option<String>,
+}
+
 /// Request body for initiating an outbound SIP call
 ///
 /// # Example
@@ -29,9 +68,28 @@ use crate::utils::validate_phone_number;
 ///   "participant_name": "John Doe",
 ///   "participant_identity": "caller-456",
 ///   "from_phone_number": "+15105550123",
-///   "to_phone_number": "+15551234567"
+///   "to_phone_number": "+15551234567",
+///   "sip": {
+///     "outbound_address": "sip.provider.com",
+///     "auth_username": "user123",
+///     "auth_password": "secret"
+///   }
 /// }
 /// ```
+///
+/// # SIP Configuration Priority
+///
+/// The `sip` object is optional. When provided, its fields take priority over global
+/// server configuration values. This allows per-request customization of SIP settings.
+///
+/// **Priority order**: Request body `sip` config > Global server config
+///
+/// - `outbound_address`: Overrides `sip.outbound_address` from config
+/// - `auth_username`: Overrides `sip.outbound_auth_username` from config
+/// - `auth_password`: Overrides `sip.outbound_auth_password` from config
+///
+/// If neither the request body nor global config provides an `outbound_address`,
+/// the call will fail with `OUTBOUND_ADDRESS_NOT_CONFIGURED` error.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SIPCallRequest {
@@ -58,6 +116,12 @@ pub struct SIPCallRequest {
     /// or extensions (1234).
     #[cfg_attr(feature = "openapi", schema(example = "+15551234567"))]
     pub to_phone_number: String,
+
+    /// Optional per-request SIP configuration overrides.
+    /// When provided, these values take priority over the global server configuration.
+    /// This allows using different SIP providers or credentials for specific calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip: Option<SIPCallSipConfig>,
 }
 
 /// Response for a successful SIP call initiation
@@ -161,10 +225,21 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
 /// Initiates an outbound SIP call through LiveKit.
 /// The call is connected to the specified room as a SIP participant.
 ///
+/// # SIP Configuration
+///
+/// SIP settings can be provided in the request body `sip` object or configured globally
+/// in the server configuration. Request body values take priority over global config:
+///
+/// - `sip.outbound_address` > `config.sip.outbound_address`
+/// - `sip.auth_username` > `config.sip.outbound_auth_username`
+/// - `sip.auth_password` > `config.sip.outbound_auth_password`
+///
+/// This allows using different SIP providers or credentials for specific calls.
+///
 /// # Arguments
 /// * `state` - Shared application state containing LiveKit handlers and config
 /// * `auth` - Authentication context for room metadata authorization
-/// * `request` - Call request with phone numbers and room details
+/// * `request` - Call request with phone numbers, room details, and optional SIP config
 ///
 /// # Returns
 /// * `Response` - JSON response with call status or error
@@ -178,17 +253,19 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
 /// # Flow
 /// 1. Validate non-empty room name and participant identifiers
 /// 2. Validate phone number formats
-/// 3. Check SIP config exists and contains outbound_address
-/// 4. Check LiveKit SIP handler is available
-/// 5. Check room access via metadata auth_id (if room exists)
-/// 6. Create outbound call (trunk is created/reused automatically)
-/// 7. Ensure room metadata contains auth_id for tenant isolation
-/// 8. Return success response with call identifiers
+/// 3. Resolve SIP config (request body overrides global config for outbound_address, auth)
+/// 4. Verify outbound_address is configured (from request or global config)
+/// 5. Check LiveKit SIP handler is available
+/// 6. Check room access via metadata auth_id (if room exists)
+/// 7. Create outbound call (trunk is created/reused automatically)
+/// 8. Ensure room metadata contains auth_id for tenant isolation
+/// 9. Return success response with call identifiers
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         path = "/sip/call",
+        description = "Initiates an outbound SIP call through LiveKit. The optional `sip` object in the request body allows overriding global SIP configuration on a per-request basis. Request body values take priority over global config, enabling different SIP providers or credentials for specific calls.",
         request_body = SIPCallRequest,
         responses(
             (status = 200, description = "Call initiated successfully", body = SIPCallResponse),
@@ -281,17 +358,22 @@ pub async fn sip_call(
         }
     };
 
-    // Step 4: Check SIP config exists and contains outbound_address
+    // Step 4: Extract SIP config with priority: request body > global config
     // Also extract optional auth credentials for trunk creation
-    let (outbound_address, auth_username, auth_password) = match &state.config.sip {
-        Some(sip_config) => match &sip_config.outbound_address {
-            Some(addr) => (
-                addr.clone(),
-                sip_config.outbound_auth_username.clone(),
-                sip_config.outbound_auth_password.clone(),
-            ),
+    let global_sip = state.config.sip.as_ref();
+    let request_sip = request.sip.as_ref();
+
+    // Resolve outbound_address: request.sip.outbound_address > global.sip.outbound_address
+    let (outbound_address, outbound_source) = match request_sip
+        .and_then(|s| s.outbound_address.as_ref())
+    {
+        Some(addr) => (addr.clone(), "request"),
+        None => match global_sip.and_then(|s| s.outbound_address.as_ref()) {
+            Some(addr) => (addr.clone(), "global"),
             None => {
-                warn!("SIP call failed: outbound_address not configured in SIP config");
+                warn!(
+                    "SIP call failed: outbound_address not configured in request or global config"
+                );
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Outbound address not configured",
@@ -299,15 +381,17 @@ pub async fn sip_call(
                 );
             }
         },
-        None => {
-            warn!("SIP call failed: SIP config not present");
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "SIP configuration not available",
-                SIPCallErrorCode::OutboundAddressNotConfigured,
-            );
-        }
     };
+
+    // Resolve auth_username: request.sip.auth_username > global.sip.outbound_auth_username
+    let auth_username = request_sip
+        .and_then(|s| s.auth_username.clone())
+        .or_else(|| global_sip.and_then(|s| s.outbound_auth_username.clone()));
+
+    // Resolve auth_password: request.sip.auth_password > global.sip.outbound_auth_password
+    let auth_password = request_sip
+        .and_then(|s| s.auth_password.clone())
+        .or_else(|| global_sip.and_then(|s| s.outbound_auth_password.clone()));
 
     // Step 5: Check LiveKit SIP handler is available
     let sip_handler = match &state.livekit_sip_handler {
@@ -386,6 +470,7 @@ pub async fn sip_call(
         from_phone_number = %validated_from_phone,
         participant_identity = %request.participant_identity,
         outbound_address = %outbound_address,
+        outbound_address_source = %outbound_source,
         auth_configured = auth_username.is_some(),
         "Initiating outbound SIP call"
     );
@@ -500,6 +585,80 @@ mod tests {
         assert_eq!(request.participant_identity, "test-identity");
         assert_eq!(request.from_phone_number, "+15105550123");
         assert_eq!(request.to_phone_number, "+15551234567");
+        assert!(request.sip.is_none());
+    }
+
+    #[test]
+    fn test_sip_call_request_with_sip_config() {
+        let json = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-identity",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567",
+            "sip": {
+                "outbound_address": "sip.example.com:5060",
+                "auth_username": "user123",
+                "auth_password": "pass456"
+            }
+        }"#;
+
+        let request: SIPCallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.room_name, "test-room");
+        assert!(request.sip.is_some());
+
+        let sip_config = request.sip.unwrap();
+        assert_eq!(
+            sip_config.outbound_address,
+            Some("sip.example.com:5060".to_string())
+        );
+        assert_eq!(sip_config.auth_username, Some("user123".to_string()));
+        assert_eq!(sip_config.auth_password, Some("pass456".to_string()));
+    }
+
+    #[test]
+    fn test_sip_call_request_with_partial_sip_config() {
+        let json = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-identity",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567",
+            "sip": {
+                "outbound_address": "sip.example.com"
+            }
+        }"#;
+
+        let request: SIPCallRequest = serde_json::from_str(json).unwrap();
+        assert!(request.sip.is_some());
+
+        let sip_config = request.sip.unwrap();
+        assert_eq!(
+            sip_config.outbound_address,
+            Some("sip.example.com".to_string())
+        );
+        assert!(sip_config.auth_username.is_none());
+        assert!(sip_config.auth_password.is_none());
+    }
+
+    #[test]
+    fn test_sip_call_request_with_empty_sip_config() {
+        let json = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-identity",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567",
+            "sip": {}
+        }"#;
+
+        let request: SIPCallRequest = serde_json::from_str(json).unwrap();
+        assert!(request.sip.is_some());
+
+        let sip_config = request.sip.unwrap();
+        assert!(sip_config.outbound_address.is_none());
+        assert!(sip_config.auth_username.is_none());
+        assert!(sip_config.auth_password.is_none());
     }
 
     #[test]
@@ -576,5 +735,183 @@ mod tests {
 
         let result: Result<SIPCallRequest, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // SIPCallSipConfig deserialization tests
+    // =========================================================================
+
+    #[test]
+    fn test_sip_config_deserialization_all_fields() {
+        let json = r#"{
+            "outbound_address": "sip.provider.com:5060",
+            "auth_username": "user123",
+            "auth_password": "pass456"
+        }"#;
+
+        let config: SIPCallSipConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.outbound_address,
+            Some("sip.provider.com:5060".to_string())
+        );
+        assert_eq!(config.auth_username, Some("user123".to_string()));
+        assert_eq!(config.auth_password, Some("pass456".to_string()));
+    }
+
+    #[test]
+    fn test_sip_config_deserialization_partial_outbound_only() {
+        let json = r#"{
+            "outbound_address": "sip.example.com"
+        }"#;
+
+        let config: SIPCallSipConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.outbound_address, Some("sip.example.com".to_string()));
+        assert!(config.auth_username.is_none());
+        assert!(config.auth_password.is_none());
+    }
+
+    #[test]
+    fn test_sip_config_deserialization_partial_auth_only() {
+        let json = r#"{
+            "auth_username": "user123",
+            "auth_password": "pass456"
+        }"#;
+
+        let config: SIPCallSipConfig = serde_json::from_str(json).unwrap();
+        assert!(config.outbound_address.is_none());
+        assert_eq!(config.auth_username, Some("user123".to_string()));
+        assert_eq!(config.auth_password, Some("pass456".to_string()));
+    }
+
+    #[test]
+    fn test_sip_config_deserialization_empty_object() {
+        // Empty sip object is valid - all fields are optional
+        let json = r#"{}"#;
+
+        let config: SIPCallSipConfig = serde_json::from_str(json).unwrap();
+        assert!(config.outbound_address.is_none());
+        assert!(config.auth_username.is_none());
+        assert!(config.auth_password.is_none());
+    }
+
+    #[test]
+    fn test_sip_config_deserialization_username_only() {
+        // Only username, no password - valid for some SIP providers
+        let json = r#"{
+            "auth_username": "user_only"
+        }"#;
+
+        let config: SIPCallSipConfig = serde_json::from_str(json).unwrap();
+        assert!(config.outbound_address.is_none());
+        assert_eq!(config.auth_username, Some("user_only".to_string()));
+        assert!(config.auth_password.is_none());
+    }
+
+    // =========================================================================
+    // SIPCallRequest backward compatibility tests
+    // =========================================================================
+
+    #[test]
+    fn test_sip_call_request_backward_compatibility_no_sip_field() {
+        // Verify that requests without the sip field continue to work
+        // This ensures backward compatibility with existing API clients
+        let json = r#"{
+            "room_name": "legacy-room",
+            "participant_name": "Legacy User",
+            "participant_identity": "legacy-id",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567"
+        }"#;
+
+        let request: SIPCallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.room_name, "legacy-room");
+        assert!(
+            request.sip.is_none(),
+            "sip field should be None for backward compatibility"
+        );
+    }
+
+    // =========================================================================
+    // Config priority behavior documentation tests
+    // =========================================================================
+
+    /// Tests demonstrating the expected config priority behavior:
+    ///
+    /// # Priority Order
+    /// 1. Request body `sip` config values (highest priority)
+    /// 2. Global server config values (fallback)
+    ///
+    /// # Resolution Logic
+    /// For each SIP config field (outbound_address, auth_username, auth_password):
+    /// - If request.sip.{field} is Some, use that value
+    /// - Else if global_config.sip.{field} is Some, use that value
+    /// - Else the field is not configured (may result in error for required fields)
+    #[test]
+    fn test_config_priority_documentation() {
+        // This test documents the expected priority behavior through assertions
+        // The actual priority logic is in the sip_call handler
+
+        // Scenario 1: Request provides all SIP config - should use request values
+        let request_with_full_sip = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-id",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567",
+            "sip": {
+                "outbound_address": "request.sip.com:5060",
+                "auth_username": "request_user",
+                "auth_password": "request_pass"
+            }
+        }"#;
+        let req: SIPCallRequest = serde_json::from_str(request_with_full_sip).unwrap();
+        let sip = req.sip.unwrap();
+        assert_eq!(
+            sip.outbound_address,
+            Some("request.sip.com:5060".to_string())
+        );
+        assert_eq!(sip.auth_username, Some("request_user".to_string()));
+        assert_eq!(sip.auth_password, Some("request_pass".to_string()));
+
+        // Scenario 2: Request provides partial SIP config - should use request for provided,
+        // and fall back to global for missing (tested at runtime in handler)
+        let request_with_partial_sip = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-id",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567",
+            "sip": {
+                "outbound_address": "request.sip.com:5060"
+            }
+        }"#;
+        let req: SIPCallRequest = serde_json::from_str(request_with_partial_sip).unwrap();
+        let sip = req.sip.unwrap();
+        assert_eq!(
+            sip.outbound_address,
+            Some("request.sip.com:5060".to_string())
+        );
+        assert!(
+            sip.auth_username.is_none(),
+            "auth_username should fall back to global config at runtime"
+        );
+        assert!(
+            sip.auth_password.is_none(),
+            "auth_password should fall back to global config at runtime"
+        );
+
+        // Scenario 3: No SIP config in request - should use global config (tested at runtime)
+        let request_without_sip = r#"{
+            "room_name": "test-room",
+            "participant_name": "Test User",
+            "participant_identity": "test-id",
+            "from_phone_number": "+15105550123",
+            "to_phone_number": "+15551234567"
+        }"#;
+        let req: SIPCallRequest = serde_json::from_str(request_without_sip).unwrap();
+        assert!(
+            req.sip.is_none(),
+            "Without sip field, all config should come from global at runtime"
+        );
     }
 }
