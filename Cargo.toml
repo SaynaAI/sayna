@@ -1,6 +1,6 @@
 [package]
 name = "sayna"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 repository = "https://github.com/saynaai/sayna"
 license = "Apache-2.0"
