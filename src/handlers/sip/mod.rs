@@ -18,7 +18,7 @@ mod hooks;
 mod transfer;
 
 // Re-export handlers for clean API access
-pub use call::{SIPCallErrorResponse, SIPCallRequest, SIPCallResponse, sip_call};
+pub use call::{SIPCallErrorResponse, SIPCallRequest, SIPCallResponse, SIPCallSipConfig, sip_call};
 pub use hooks::{
     DeleteSipHooksRequest, SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
     delete_sip_hooks, list_sip_hooks, update_sip_hooks,
