@@ -214,6 +214,7 @@ pub(super) fn chunk_audio_vec(audio_data: Vec<u8>) -> Vec<Vec<u8>> {
 
 /// Determine if this event marks the end of speech.
 /// Called on every streaming response - inlined for performance.
+#[cfg(test)]
 #[inline]
 pub(super) fn determine_speech_final(event_type: SpeechEventType, is_final: bool) -> bool {
     match event_type {
@@ -376,14 +377,12 @@ pub(super) fn handle_streaming_response(
         let stt_result = STTResult::new(
             top_alt.transcript.clone(),
             result.is_final,
-            determine_speech_final(event_type, result.is_final),
             get_confidence(top_alt.confidence, result.is_final),
         );
 
         debug!(
             transcript = %stt_result.transcript,
             is_final = stt_result.is_final,
-            is_speech_final = stt_result.is_speech_final,
             confidence = stt_result.confidence,
             "Sending transcription result"
         );

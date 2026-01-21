@@ -92,14 +92,9 @@ impl STTResultProcessor {
             return None;
         }
 
-        let now_ms = get_current_time_ms();
-
-        // Handle real speech_final
-        if result.is_speech_final {
-            return self.handle_real_speech_final(result, speech_final_state, now_ms);
-        }
-
-        // Handle is_final (but not speech_final) - spawn turn detection in background
+        // Handle is_final - spawn turn detection in background
+        // Note: With VAD + Smart Turn architecture, speech_final is ONLY generated
+        // via the turn detection path, not from STT provider signals
         if result.is_final {
             self.handle_turn_detection(result.clone(), speech_final_state);
         }
@@ -162,8 +157,10 @@ impl STTResultProcessor {
     // ─────────────────────────────────────────────────────────────────────────────
 
     fn should_deliver_result(&self, result: &STTResult) -> bool {
-        // Skip empty final results that aren't speech_final
-        !(result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final)
+        // Skip empty final results - these are typically endpoint markers with no useful content
+        // Note: With VAD + Smart Turn architecture, meaningful speech_final events are
+        // generated via the turn detection path, not from STT provider signals
+        !(result.transcript.trim().is_empty() && result.is_final)
     }
 
     fn handle_turn_detection(
@@ -261,42 +258,6 @@ impl STTResultProcessor {
             );
             state.hard_timeout_handle = Some(hard_timeout_handle);
         }
-    }
-
-    fn handle_real_speech_final(
-        &self,
-        result: STTResult,
-        speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
-        now_ms: usize,
-    ) -> Option<STTResult> {
-        let mut state = speech_final_state.write();
-
-        // Check for duplicate within the configured window
-        if self.is_duplicate_speech_final(&state, &result.transcript, now_ms) {
-            debug!(
-                "Ignoring duplicate real speech_final - turn detection fired {}ms ago",
-                now_ms.saturating_sub(state.turn_detection_last_fired_ms.load(Ordering::Acquire))
-            );
-            return None;
-        }
-
-        // Cancel pending detection tasks and reset state for next speech segment
-        state.reset_for_next_segment();
-
-        Some(result)
-    }
-
-    fn is_duplicate_speech_final(
-        &self,
-        state: &SpeechFinalState,
-        transcript: &str,
-        now_ms: usize,
-    ) -> bool {
-        let last_fired_ms = state.turn_detection_last_fired_ms.load(Ordering::Acquire);
-
-        last_fired_ms > 0
-            && now_ms.saturating_sub(last_fired_ms) < self.config.duplicate_window_ms
-            && state.last_forced_text == transcript
     }
 
     // ─────────────────────────────────────────────────────────────────────────────

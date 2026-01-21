@@ -179,7 +179,7 @@ pub enum OutgoingMessage {
         transcript: String,
         /// Whether this is the final version of the transcript
         is_final: bool,
-        /// Whether speech has ended
+        /// Whether the speaker has finished speaking (turn detection via VAD + Smart Turn)
         is_speech_final: bool,
         /// Confidence score (0.0 to 1.0)
         confidence: f32,

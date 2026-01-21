@@ -583,7 +583,6 @@ mod message_helper_tests {
         let result = msg.to_stt_result().unwrap();
         assert_eq!(result.transcript, "Hello world");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert_eq!(result.confidence, 1.0);
     }
 
@@ -598,7 +597,6 @@ mod message_helper_tests {
         let result = msg.to_stt_result().unwrap();
         assert_eq!(result.transcript, "Hel");
         assert!(!result.is_final);
-        assert!(!result.is_speech_final);
         assert_eq!(result.confidence, 0.0);
     }
 
@@ -702,7 +700,6 @@ mod transcript_tests {
         let result = transcript.to_stt_result();
         assert_eq!(result.transcript, "Hello world");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert_eq!(result.confidence, 1.0);
     }
 
@@ -1137,7 +1134,6 @@ mod edge_case_tests {
         let result = transcript.to_stt_result();
         assert_eq!(result.transcript, "");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert_eq!(result.confidence, 1.0);
     }
 

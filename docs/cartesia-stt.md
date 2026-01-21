@@ -133,8 +133,10 @@ Cartesia STT responses are converted to Sayna's unified `STTResult` format:
 |-------|-------------|
 | `transcript` | The transcribed text |
 | `is_final` | `true` when transcript won't change |
-| `is_speech_final` | `true` when speaker has finished (same as is_final for Cartesia) |
+| `is_speech_final` | `true` when the speaker's turn is complete (determined by VAD + Smart Turn, not the STT provider) |
 | `confidence` | `1.0` for final results, `0.0` for interim (Cartesia doesn't provide confidence) |
+
+**Note:** The `is_speech_final` flag is **not set by Cartesia STT**. It is determined exclusively by Sayna's VAD + Smart Turn detection system (when the `stt-vad` feature is enabled). This provides consistent turn detection across all STT providers.
 
 ### Cartesia Message Types
 

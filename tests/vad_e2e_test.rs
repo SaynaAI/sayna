@@ -142,21 +142,19 @@ fn test_vad_silence_triggers_turn_detection() {
     );
 }
 
-/// Test that VAD-based speech_final includes correct properties
+/// Test that VAD-based turn detection result includes correct properties
 #[test]
-fn test_vad_speech_final_result_format() {
-    // Create a speech_final result as the VAD system would emit
+fn test_vad_turn_detection_result_format() {
+    // Create a turn detection result as the VAD + Smart Turn system would emit
     let result = STTResult {
-        transcript: String::new(), // VAD speech_final has empty transcript
+        transcript: String::new(), // Turn detection result has empty transcript
         is_final: true,
-        is_speech_final: true,
         confidence: 1.0,
     };
 
     // Verify result structure matches expected format
     assert!(result.transcript.is_empty());
     assert!(result.is_final);
-    assert!(result.is_speech_final);
     assert_eq!(result.confidence, 1.0);
 }
 

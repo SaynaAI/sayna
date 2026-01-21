@@ -272,7 +272,6 @@ impl ElevenLabsSTT {
                                 let stt_result = STTResult::new(
                                     partial.text,
                                     false, // is_final = false (interim)
-                                    false, // is_speech_final = false
                                     0.0,   // No confidence for partials
                                 );
 
@@ -286,7 +285,6 @@ impl ElevenLabsSTT {
                             let stt_result = STTResult::new(
                                 committed.text,
                                 true, // is_final = true
-                                true, // is_speech_final = true
                                 1.0,  // High confidence for committed
                             );
 
@@ -302,7 +300,6 @@ impl ElevenLabsSTT {
                             let stt_result = STTResult::new(
                                 committed.text,
                                 true, // is_final = true
-                                true, // is_speech_final = true
                                 confidence.clamp(0.0, 1.0),
                             );
 

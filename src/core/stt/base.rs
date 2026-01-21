@@ -9,19 +9,16 @@ pub struct STTResult {
     pub transcript: String,
     /// Whether this is a final transcription result (not an interim result)
     pub is_final: bool,
-    /// Whether this marks the end of a speech segment
-    pub is_speech_final: bool,
     /// Confidence score of the transcription (0.0 to 1.0)
     pub confidence: f32,
 }
 
 impl STTResult {
     /// Creates a new STTResult
-    pub fn new(transcript: String, is_final: bool, is_speech_final: bool, confidence: f32) -> Self {
+    pub fn new(transcript: String, is_final: bool, confidence: f32) -> Self {
         Self {
             transcript,
             is_final,
-            is_speech_final,
             confidence: confidence.clamp(0.0, 1.0), // Ensure confidence is within valid range
         }
     }
@@ -275,7 +272,6 @@ mod tests {
                 let result = STTResult::new(
                     format!("Transcribed {} bytes of audio", audio_data.len()),
                     true,
-                    true,
                     0.95,
                 );
                 callback(result).await;
@@ -381,19 +377,18 @@ mod tests {
 
     #[test]
     fn test_stt_result_creation() {
-        let result = STTResult::new("Hello world".to_string(), true, true, 0.95);
+        let result = STTResult::new("Hello world".to_string(), true, 0.95);
         assert_eq!(result.transcript, "Hello world");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert_eq!(result.confidence, 0.95);
     }
 
     #[test]
     fn test_stt_result_confidence_clamping() {
-        let result = STTResult::new("Test".to_string(), true, false, 1.5);
+        let result = STTResult::new("Test".to_string(), true, 1.5);
         assert_eq!(result.confidence, 1.0);
 
-        let result = STTResult::new("Test".to_string(), true, false, -0.5);
+        let result = STTResult::new("Test".to_string(), true, -0.5);
         assert_eq!(result.confidence, 0.0);
     }
 
@@ -409,7 +404,7 @@ mod tests {
     #[test]
     fn test_stt_stats_update() {
         let mut stats = STTStats::default();
-        let result = STTResult::new("Test".to_string(), true, false, 0.8);
+        let result = STTResult::new("Test".to_string(), true, 0.8);
 
         stats.update_with_result(&result);
 

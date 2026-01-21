@@ -9,9 +9,9 @@
 //!
 //! - **Unified Management**: Coordinate STT and TTS providers through a single interface
 //! - **Real-time Processing**: Optimized for low-latency voice processing
-//! - **Speech Final Timing Control**: Multi-tier fallback mechanism for delayed `is_speech_final` signals:
-//!   - Primary: Wait for STT provider's `speech_final` signal (default: 2s)
-//!   - Secondary: ML-based turn detection as intelligent fallback (default: 100ms inference timeout)
+//! - **Speech Final Timing Control**: Multi-tier fallback mechanism for turn detection:
+//!   - Primary: VAD + Smart Turn detection for accurate end-of-speech detection
+//!   - Secondary: Timeout-based fallback (default: 2s) when VAD not available
 //!   - Tertiary: Hard timeout guarantee (default: 5s) - ensures no utterance waits indefinitely
 //!   - All timeouts are configurable through `SpeechFinalConfig`
 //! - **Error Handling**: Comprehensive error handling with proper error propagation

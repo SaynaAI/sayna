@@ -167,7 +167,7 @@ Google STT responses are converted to Sayna's unified `STTResult` format:
 |-------|-------------|
 | `transcript` | The transcribed text |
 | `is_final` | `true` when transcript won't change for this segment |
-| `is_speech_final` | `true` when speaker has finished (utterance end detected) |
+| `is_speech_final` | `true` when the speaker's turn is complete (determined by VAD + Smart Turn, not the STT provider) |
 | `confidence` | Recognition confidence score (0.0 to 1.0) |
 
 ### Speech Events
@@ -176,7 +176,7 @@ The Google provider maps Speech-to-Text v2 events to Sayna's unified format:
 
 - **Interim Results**: `is_final=false`, transcript may change
 - **Final Results**: `is_final=true`, transcript is stable
-- **End of Utterance**: `is_speech_final=true`, maps to `END_OF_SINGLE_UTTERANCE` event
+- **Speech Final**: The `is_speech_final` flag is **not set by Google STT**. It is determined exclusively by Sayna's VAD + Smart Turn detection system (when the `stt-vad` feature is enabled). This provides consistent turn detection across all STT providers.
 
 ## Recognizers
 

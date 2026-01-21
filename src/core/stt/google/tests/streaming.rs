@@ -230,7 +230,6 @@ fn test_handle_streaming_response_with_results() {
     let result = rx.try_recv().unwrap();
     assert_eq!(result.transcript, "Hello world");
     assert!(result.is_final);
-    assert!(result.is_speech_final);
     assert_eq!(result.confidence, 0.95);
 }
 
@@ -522,7 +521,6 @@ fn test_handle_streaming_response_interim_result() {
     let result = rx.try_recv().unwrap();
     assert_eq!(result.transcript, "Hello");
     assert!(!result.is_final);
-    assert!(!result.is_speech_final);
     assert_eq!(result.confidence, 0.0);
 }
 
@@ -553,7 +551,6 @@ fn test_handle_streaming_response_with_end_of_utterance() {
     let result = rx.try_recv().unwrap();
     assert_eq!(result.transcript, "Hello world");
     assert!(result.is_final);
-    assert!(result.is_speech_final);
     assert_eq!(result.confidence, 0.95);
 }
 
@@ -583,7 +580,6 @@ fn test_handle_streaming_response_speech_activity_end_with_final() {
 
     let result = rx.try_recv().unwrap();
     assert!(result.is_final);
-    assert!(result.is_speech_final);
 }
 
 #[test]
@@ -887,13 +883,13 @@ fn test_build_config_request_decoding_config() {
 
 #[test]
 fn test_stt_result_confidence_boundary_values() {
-    let result = STTResult::new("test".to_string(), true, true, 0.0);
+    let result = STTResult::new("test".to_string(), true, 0.0);
     assert_eq!(result.confidence, 0.0);
 
-    let result = STTResult::new("test".to_string(), true, true, 1.0);
+    let result = STTResult::new("test".to_string(), true, 1.0);
     assert_eq!(result.confidence, 1.0);
 
-    let result = STTResult::new("test".to_string(), true, true, 0.5);
+    let result = STTResult::new("test".to_string(), true, 0.5);
     assert_eq!(result.confidence, 0.5);
 }
 
