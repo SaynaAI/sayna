@@ -97,7 +97,6 @@ impl CartesiaTranscript {
     /// |----------------|-----------------|-------|
     /// | `text` | `transcript` | Direct mapping |
     /// | `is_final` | `is_final` | Direct mapping |
-    /// | `is_final` | `is_speech_final` | Set to `true` when `is_final=true` |
     /// | - | `confidence` | `1.0` for final, `0.0` for interim |
     ///
     /// Note: Cartesia does not provide confidence scores.
@@ -105,7 +104,6 @@ impl CartesiaTranscript {
         STTResult::new(
             self.text.clone(),
             self.is_final,
-            self.is_final, // is_speech_final matches is_final
             if self.is_final { 1.0 } else { 0.0 },
         )
     }
@@ -443,7 +441,6 @@ mod tests {
 
         assert_eq!(result.transcript, "Hello world");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert_eq!(result.confidence, 1.0);
     }
 
@@ -459,7 +456,6 @@ mod tests {
 
         assert_eq!(result.transcript, "Hel");
         assert!(!result.is_final);
-        assert!(!result.is_speech_final);
         assert_eq!(result.confidence, 0.0);
     }
 

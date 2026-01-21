@@ -299,7 +299,7 @@ fn test_outgoing_message_serialization() {
     let stt_msg = OutgoingMessage::STTResult {
         transcript: "Hello world".to_string(),
         is_final: true,
-        is_speech_final: true,
+        is_speech_final: false,
         confidence: 0.95,
     };
 
@@ -307,6 +307,7 @@ fn test_outgoing_message_serialization() {
     assert!(json.contains("\"type\":\"stt_result\""));
     assert!(json.contains("Hello world"));
     assert!(json.contains("0.95"));
+    assert!(json.contains("\"is_speech_final\":false"));
 
     // Test error message
     let error_msg = OutgoingMessage::Error {

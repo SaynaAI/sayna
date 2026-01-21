@@ -596,7 +596,7 @@ These are messages Sayna sends to your application.
 | `type` | string | Always `"stt_result"` |
 | `transcript` | string | Transcribed text |
 | `is_final` | boolean | `true` if this is the final version of the transcript (no more updates for this phrase) |
-| `is_speech_final` | boolean | `true` if the speaker has stopped speaking (turn detection) |
+| `is_speech_final` | boolean | `true` if the speaker has stopped speaking (turn detection via VAD + Smart Turn) |
 | `confidence` | number | Confidence score from 0.0 to 1.0 (higher is more confident) |
 
 **Understanding Transcript Finality:**
@@ -618,12 +618,21 @@ These are messages Sayna sends to your application.
 {"transcript": "Hello, how are you?", "is_final": true, "is_speech_final": true, "confidence": 0.94}
 ```
 
-The `is_speech_final` flag indicates the speaker has finished their thought (detected via silence or turn-detection model). This is useful for knowing when to respond in conversational AI.
+**How `is_speech_final` Works:**
+
+The `is_speech_final` flag is determined exclusively by the VAD + Smart Turn detection system (when the `stt-vad` feature is enabled), not by STT providers. The detection works as follows:
+
+1. **Silero-VAD** monitors incoming audio for speech activity
+2. When silence is detected for the configured duration (default: 200ms), the **Smart Turn model** is triggered
+3. The Smart Turn model analyzes the accumulated audio to determine if the speaker has completed their turn
+4. If the model confirms turn completion (probability >= threshold), `is_speech_final=true` is emitted
+
+This two-stage approach (VAD + Smart Turn) provides both speed (fast silence detection) and accuracy (semantic turn completion). The `is_speech_final` flag indicates the speaker has finished their thought, which is useful for knowing when to respond in conversational AI.
 
 **Frequency:**
 - Interim results arrive frequently during speech (every 100-500ms depending on provider)
 - Final results arrive when provider finalizes transcription
-- Speech final results arrive when turn detection determines speech has ended
+- Speech final results arrive when VAD + Smart Turn detection determines the speaker's turn has ended
 
 **Use Cases:**
 ```javascript
@@ -1373,7 +1382,7 @@ Sayna's WebSocket API supports multiple integration patterns. Choose based on yo
 3. Receive "ready" message
 4. Start streaming microphone audio → Sayna
 5. Receive STT results
-6. When user finishes speaking (is_speech_final), generate response
+6. When user finishes speaking (is_speech_final from VAD + Smart Turn), generate response
 7. Send "speak" command with response text
 8. Receive TTS audio chunks
 9. Play audio to speaker
@@ -1577,12 +1586,13 @@ If compiled with `noise-filter` feature (disabled by default), Sayna applies Dee
 
 **VAD + Turn Detection:**
 
-If compiled with `stt-vad` feature (disabled by default), Sayna uses Silero-VAD for voice activity detection combined with an ONNX turn detection model:
+If compiled with `stt-vad` feature (disabled by default), Sayna uses Silero-VAD for voice activity detection combined with an ONNX Smart Turn detection model:
 - Silero-VAD monitors audio for continuous silence
-- When silence exceeds threshold (default 300ms), the turn detection model is triggered
-- Turn detection model confirms if the speaker has completed their turn
-- Sets `is_speech_final=true` when speaker stops talking
-- More accurate than silence-only or text-only detection
+- When silence exceeds threshold (default 200ms), the Smart Turn detection model is triggered
+- Smart Turn model analyzes the accumulated audio to confirm if the speaker has completed their turn
+- Sets `is_speech_final=true` when the speaker's turn is complete
+- This is the **exclusive source** of `is_speech_final` - STT providers do not set this flag
+- More accurate than silence-only or text-only detection due to semantic understanding
 - Helps conversational AI know when to respond
 - VAD and turn detection are always bundled together under the `stt-vad` feature
 
@@ -2091,7 +2101,7 @@ if (message.type === "stt_result") {
     finalTranscripts.push(message.transcript);
     liveTranscript = "";
 
-    // Respond when speech ends
+    // Respond when speech ends (detected by VAD + Smart Turn)
     if (message.is_speech_final) {
       generateResponse(finalTranscripts.join(" "));
     }

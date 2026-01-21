@@ -52,7 +52,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 
 | Feature | Default | Effect |
 | --- | --- | --- |
-| `stt-vad` | Disabled | Enables Silero-VAD voice activity detection with integrated ONNX-based turn detection. Improves `is_speech_final` timing in STT responses by detecting silence and confirming turn completion. |
+| `stt-vad` | Disabled | Enables Silero-VAD voice activity detection with integrated ONNX-based Smart Turn detection. This is the **exclusive source** of `is_speech_final` in STT responses. VAD detects silence and Smart Turn confirms turn completion. |
 | `noise-filter` | Disabled | Activates DeepFilterNet-based denoising before STT ingestion and LiveKit playback. Disable for lower CPU usage. |
 | `openapi` | Disabled | Compiles utoipa annotations and exposes the CLI generator (`cargo run --features openapi -- openapi`). |
 
@@ -630,26 +630,33 @@ Send raw audio bytes that match `sample_rate`, `channels`, and `encoding` suppli
 | `type` | string | `stt_result`. |
 | `transcript` | string | Recognized text. |
 | `is_final` | boolean | `true` when no more updates are expected for the utterance. |
-| `is_speech_final` | boolean | Indicates end-of-turn detection (improved by the `stt-vad` feature which includes VAD and turn detection). |
+| `is_speech_final` | boolean | `true` when the speaker's turn is complete. Determined exclusively by VAD + Smart Turn detection (when `stt-vad` feature is enabled), not by STT providers. |
 | `confidence` | number | Provider-supplied confidence score. |
+
+**Speech Final Detection**
+
+The `is_speech_final` flag is set exclusively by Sayna's VAD + Smart Turn detection system (when the `stt-vad` feature is enabled). STT providers do not set this flag. The detection process:
+
+1. **Silero-VAD** monitors audio for silence
+2. When silence exceeds the configured threshold (default 200ms), **Smart Turn** is triggered
+3. Smart Turn analyzes accumulated audio to confirm turn completion
+4. If confirmed, `is_speech_final=true` is emitted
 
 **Speech Final Timing Behavior**
 
-Sayna implements a three-tier fallback system to ensure every utterance receives a `speech_final` event:
+When `stt-vad` is enabled, Sayna implements a fallback system to ensure every utterance receives a `speech_final` event:
 
-1. **Primary path (0-2s)**: Wait for the STT provider to send `is_speech_final=true`. Most providers detect natural pauses and emit this automatically.
+1. **Primary path (VAD + Smart Turn)**: Silero-VAD detects silence, then Smart Turn confirms turn completion. This is the normal path for speech final detection.
 
-2. **Turn detection fallback (2s)**: If no `speech_final` arrives after 2 seconds of silence, the ONNX turn detector (when enabled) analyzes the buffered text. If it confirms the turn is complete, `speech_final` is fired.
-
-3. **Hard timeout guarantee (5s)**: If neither the STT provider nor turn detector fires within 5 seconds of the first `is_final` result, the system **automatically forces** a `speech_final` event. This prevents utterances from hanging indefinitely.
+2. **Hard timeout guarantee (5s)**: If the Smart Turn detector doesn't fire within 5 seconds of the first `is_final` result, the system **automatically forces** a `speech_final` event. This prevents utterances from hanging indefinitely.
 
 The hard timeout is measured from the **first** `is_final` result in a speech segment and is **not restarted** by subsequent `is_final` results (continuous speech). This ensures that even long utterances are bounded by the 5-second maximum wait time.
 
 **Observability**: When the hard timeout fires, a `WARN`-level log is emitted:
 ```
-Hard timeout fired after Xms - forcing speech_final (no real speech_final or turn detection confirmation received)
+Hard timeout fired after Xms - forcing speech_final (no turn detection confirmation received)
 ```
-This allows SREs to monitor fallback frequency and tune provider configurations or turn detection thresholds.
+This allows SREs to monitor fallback frequency and tune VAD or Smart Turn thresholds.
 
 ##### `message`
 
@@ -703,6 +710,6 @@ Synthesized audio is streamed as binary frames using the format returned by the 
 - Reuse the same `tts_config` when possible; the VoiceManager hashes the configuration and caches rendered audio to eliminate provider round-trips.
 - If you disable `audio` in the `config` message, you can still use LiveKit data relaying and the `/livekit/token` flow for text-only experiences.
 - The `noise-filter` feature improves transcription quality but increases CPU usage; disable it for ultra-low-latency or resource-constrained deployments.
-- The `stt-vad` feature enables integrated VAD and turn detection for improved end-of-turn timing.
+- The `stt-vad` feature enables integrated VAD and Smart Turn detection, which is the exclusive source of `is_speech_final` in STT responses.
 - Use integration tests in `tests/` (for example `tests/ws_tests.rs`) as references when extending message formats or LiveKit behavior.
 - Generate refreshed machine-readable docs with `cargo run --features openapi -- openapi -o docs/openapi.yaml` whenever request/response structures change.

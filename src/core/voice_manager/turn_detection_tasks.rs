@@ -183,7 +183,6 @@ pub async fn fire_speech_final(
         let forced_result = STTResult {
             transcript: String::new(),
             is_final: true,
-            is_speech_final: true,
             confidence: 1.0,
         };
 

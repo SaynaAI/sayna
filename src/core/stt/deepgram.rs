@@ -239,7 +239,6 @@ impl DeepgramSTT {
                                     let stt_result = STTResult::new(
                                         alternative.transcript.clone(),
                                         response.is_final.unwrap_or(false),
-                                        response.speech_final.unwrap_or(false),
                                         alternative.confidence,
                                     );
 
@@ -826,7 +825,6 @@ mod tests {
         assert_eq!(received_result.transcript, "Hello world");
         assert_eq!(received_result.confidence, 0.98);
         assert!(received_result.is_final);
-        assert!(received_result.is_speech_final);
     }
 
     #[tokio::test]

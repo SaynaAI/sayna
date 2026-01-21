@@ -390,10 +390,14 @@ async fn register_stt_callback(
         .on_stt_result(move |result: STTResult| {
             let message_tx = message_tx_clone.clone();
             Box::pin(async move {
+                // VAD + Smart Turn path produces results with empty transcript and is_final=true
+                // These indicate the speaker has finished their turn
+                let is_speech_final =
+                    result.is_final && result.transcript.is_empty() && result.confidence >= 1.0;
                 let msg = OutgoingMessage::STTResult {
                     transcript: result.transcript,
                     is_final: result.is_final,
-                    is_speech_final: result.is_speech_final,
+                    is_speech_final,
                     confidence: result.confidence,
                 };
                 let _ = message_tx.send(MessageRoute::Outgoing(msg)).await;

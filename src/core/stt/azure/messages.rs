@@ -292,7 +292,6 @@ impl SpeechPhrase {
 
         Some(STTResult::new(
             transcript, true, // is_final
-            true, // is_speech_final
             confidence,
         ))
     }
@@ -337,7 +336,6 @@ impl SpeechHypothesis {
         STTResult::new(
             self.text.clone(),
             false, // is_final
-            false, // is_speech_final
             0.0,   // confidence not available for hypotheses
         )
     }
@@ -908,7 +906,6 @@ mod tests {
         let result = result.unwrap();
         assert_eq!(result.transcript, "Hello world.");
         assert!(result.is_final);
-        assert!(result.is_speech_final);
         assert!((result.confidence - 1.0).abs() < 0.001);
     }
 
@@ -967,7 +964,6 @@ mod tests {
         let result = hypothesis.to_stt_result();
         assert_eq!(result.transcript, "partial text");
         assert!(!result.is_final);
-        assert!(!result.is_speech_final);
         assert!((result.confidence - 0.0).abs() < 0.001);
     }
 

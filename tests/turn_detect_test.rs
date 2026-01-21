@@ -2132,7 +2132,7 @@ mod stt_result_processor_integration_tests {
             let received = callback_received_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     received.store(true, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2231,7 +2231,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2362,7 +2362,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2453,7 +2453,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2586,7 +2586,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2651,7 +2651,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2703,7 +2703,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2761,7 +2761,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2820,7 +2820,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
@@ -2975,7 +2975,7 @@ mod stt_result_processor_integration_tests {
         let callback: STTCallback = Arc::new(move |result: STTResult| {
             let count = callback_count_clone.clone();
             Box::pin(async move {
-                if result.is_speech_final {
+                if result.is_final && result.transcript.is_empty() {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>

@@ -739,7 +739,6 @@ mod websocket_handler_tests {
 
         assert_eq!(stt_result.transcript, "hello world");
         assert!(!stt_result.is_final);
-        assert!(!stt_result.is_speech_final);
     }
 
     #[tokio::test]
@@ -761,7 +760,6 @@ mod websocket_handler_tests {
 
         assert_eq!(stt_result.transcript, "hello world final");
         assert!(stt_result.is_final);
-        assert!(stt_result.is_speech_final);
         assert_eq!(stt_result.confidence, 1.0);
     }
 
@@ -847,7 +845,6 @@ mod websocket_handler_tests {
 
         assert_eq!(stt_result.transcript, "hello world");
         assert!(stt_result.is_final);
-        assert!(stt_result.is_speech_final);
         assert!(stt_result.confidence > 0.0 && stt_result.confidence <= 1.0);
     }
 

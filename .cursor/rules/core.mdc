@@ -34,7 +34,6 @@ The `BaseSTT` trait defines the interface for all STT providers:
 pub struct STTResult {
     pub transcript: String,      // The transcribed text
     pub is_final: bool,          // Whether this is a final result
-    pub is_speech_final: bool,   // Whether speech segment ended
     pub confidence: f32,         // Confidence score (0.0 to 1.0)
 }
 ```

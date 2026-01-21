@@ -978,7 +978,7 @@ components:
             description: Whether this is the final version of the transcript
           is_speech_final:
             type: boolean
-            description: Whether speech has ended
+            description: Whether the speaker's turn has ended (determined by VAD + Smart Turn detection)
           transcript:
             type: string
             description: Transcribed text
