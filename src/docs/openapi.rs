@@ -16,8 +16,8 @@ use crate::handlers::{
     },
     sip::{
         DeleteSipHooksRequest, SIPCallErrorResponse, SIPCallRequest, SIPCallResponse,
-        SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse, SipHookEntry,
-        SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
+        SIPCallSipConfig, SIPTransferErrorResponse, SIPTransferRequest, SIPTransferResponse,
+        SipHookEntry, SipHooksErrorResponse, SipHooksRequest, SipHooksResponse,
     },
     speak::SpeakRequest,
     voices::Voice,
@@ -90,6 +90,7 @@ use crate::handlers::{
         SIPCallRequest,
         SIPCallResponse,
         SIPCallErrorResponse,
+        SIPCallSipConfig,
         // WebSocket message types
         IncomingMessage,
         OutgoingMessage,
