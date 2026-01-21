@@ -9,7 +9,7 @@ target/
 # ── Project assets not needed for image builds ──────────────────
 dist/
 onnxruntime/
-docs/
+/docs/
 examples/
 results/
 tests/

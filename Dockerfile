@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG RUST_VERSION=1.88.0
-ARG CARGO_BUILD_FEATURES="--no-default-features --features stt-vad,noise-filter"
+ARG CARGO_BUILD_FEATURES="--all-features"
 ARG ONNX_VERSION=1.23.2
 
 # ==================== Chef Base ====================
@@ -26,22 +26,22 @@ ARG TARGETARCH
 # Using multiple mirror fallback strategies for ARM64 compatibility
 RUN rm -rf /var/lib/apt/lists/* \
     && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
-       elif [ -f /etc/apt/sources.list ]; then \
-         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
-       fi \
+    sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+    sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
+    fi \
     && apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::Check-Valid-Until=false \
     && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
-       clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
-       libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
-       libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
+    clang cmake pkg-config libssl-dev libzstd-dev ca-certificates curl git \
+    libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
+    libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Download ONNX Runtime (architecture-aware for multi-platform builds)
 RUN case "${TARGETARCH}" in \
-        amd64) ONNX_ARCH="x64" ;; \
-        arm64) ONNX_ARCH="aarch64" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    amd64) ONNX_ARCH="x64" ;; \
+    arm64) ONNX_ARCH="aarch64" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
     curl -L "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" -o onnxruntime.tgz && \
     tar -xzf onnxruntime.tgz && \
@@ -80,16 +80,16 @@ FROM debian:bookworm-slim AS runtime-deps
 # Using multiple mirror fallback strategies for ARM64 compatibility
 RUN rm -rf /var/lib/apt/lists/* \
     && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
-       elif [ -f /etc/apt/sources.list ]; then \
-         sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
-       fi \
+    sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+    sed -i 's|deb.debian.org/debian-security|security.debian.org/debian-security|g' /etc/apt/sources.list; \
+    fi \
     && apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::Check-Valid-Until=false \
     && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
-       ca-certificates libssl3 libstdc++6 \
-       libva2 libva-drm2 \
-       libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
-       libglib2.0-0 libgbm1 libdrm2 \
+    ca-certificates libssl3 libstdc++6 \
+    libva2 libva-drm2 \
+    libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
+    libglib2.0-0 libgbm1 libdrm2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
