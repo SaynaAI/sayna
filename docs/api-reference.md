@@ -368,7 +368,8 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 
 #### `POST /sip/call`
 - **Purpose**: Initiate an outbound SIP call through LiveKit. The call connects to a specified LiveKit room as a SIP participant.
-- **Note**: This endpoint requires the `sip.outbound_address` configuration to be set. Outbound trunks are automatically created or reused based on the `from_phone_number`.
+- **Note**: This endpoint requires either the global `sip.outbound_address` configuration or a per-request `sip.outbound_address` in the request body. Outbound trunks are automatically created or reused based on the `from_phone_number`.
+- **Per-Request SIP Config**: The optional `sip` object in the request body allows overriding global SIP configuration on a per-request basis. Request body values take priority over global config, enabling different SIP providers or credentials for specific calls.
 - **Tenant Isolation**: When `auth.id` is present:
   - If the room already exists, access requires `room.metadata.auth_id == auth.id`.
   - If the room doesn't exist, it will be created and `metadata.auth_id` will be set to the caller's `auth.id`.
@@ -382,6 +383,17 @@ All responses use JSON unless otherwise noted. Errors follow the shape `{ "error
 | `participant_identity` | string | Yes | Identity for the SIP participant in the room. |
 | `from_phone_number` | string | Yes | Phone number the call will originate from. Must be configured in your SIP provider. Supports international format (+1234567890). |
 | `to_phone_number` | string | Yes | Phone number to dial. Supports international format (+1234567890), national format (07123456789), or extensions (1234). |
+| `sip` | object | No | Optional per-request SIP configuration overrides. See `SIPCallSipConfig` below. |
+
+**`SIPCallSipConfig` object** (optional `sip` field):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `outbound_address` | string\|null | SIP server address override. Format: `hostname` or `hostname:port`. Overrides global `sip.outbound_address`. |
+| `auth_username` | string\|null | SIP authentication username override. Overrides global `sip.outbound_auth_username`. |
+| `auth_password` | string\|null | SIP authentication password override. Overrides global `sip.outbound_auth_password`. |
+
+**SIP Configuration Priority**: Request body `sip` config > Global server config
 
 - **Success** `200 OK`:
   ```json

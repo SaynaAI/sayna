@@ -508,7 +508,7 @@ This approach ensures efficient trunk management without requiring manual provis
 
 See [POST /sip/call](api-reference.md#post-sipcall) in the API reference for complete request/response documentation.
 
-**Quick Example**:
+**Quick Example** (using global SIP config):
 
 ```bash
 curl -X POST https://api.example.com/sip/call \
@@ -520,6 +520,26 @@ curl -X POST https://api.example.com/sip/call \
     "participant_identity": "caller-1",
     "from_phone_number": "+15105550123",
     "to_phone_number": "+15551234567"
+  }'
+```
+
+**Example with per-request SIP configuration overrides**:
+
+```bash
+curl -X POST https://api.example.com/sip/call \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "room_name": "my-call-room",
+    "participant_name": "Outbound Caller",
+    "participant_identity": "caller-1",
+    "from_phone_number": "+15105550123",
+    "to_phone_number": "+15551234567",
+    "sip": {
+      "outbound_address": "sip.provider.com:5060",
+      "auth_username": "user123",
+      "auth_password": "secret456"
+    }
   }'
 ```
 
@@ -582,6 +602,47 @@ SIP_OUTBOUND_AUTH_PASSWORD="your-sip-password"
 
 For more information on LiveKit's outbound trunk authentication, see:
 - [LiveKit Outbound Trunk Auth](https://docs.livekit.io/sip/outbound-trunk/#authentication)
+
+### Per-Request SIP Configuration Overrides
+
+In addition to global server configuration, Sayna supports per-request SIP configuration overrides via the optional `sip` object in the request body. This enables:
+
+- Using different SIP providers for specific calls
+- Providing call-specific authentication credentials
+- Overriding the outbound address on a per-call basis
+
+**Priority**: Request body `sip` config > Global server config
+
+**Available Override Fields**:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `outbound_address` | string\|null | SIP server address. Format: `hostname` or `hostname:port`. |
+| `auth_username` | string\|null | SIP authentication username. |
+| `auth_password` | string\|null | SIP authentication password. |
+
+**Use Cases**:
+
+1. **Multi-provider support**: Route calls through different SIP providers based on business logic
+2. **Per-customer credentials**: Use customer-specific SIP credentials for white-label deployments
+3. **Testing**: Override production SIP config with test endpoints during development
+
+**Example**:
+
+```json
+{
+  "room_name": "call-room-123",
+  "participant_name": "John Doe",
+  "participant_identity": "caller-456",
+  "from_phone_number": "+15105550123",
+  "to_phone_number": "+15551234567",
+  "sip": {
+    "outbound_address": "sip.alternate-provider.com:5060",
+    "auth_username": "alternate_user",
+    "auth_password": "alternate_secret"
+  }
+}
+```
 
 ### LiveKit SIP Documentation
 
