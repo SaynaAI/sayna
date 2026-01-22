@@ -230,7 +230,9 @@ impl VADModelManager {
 
     /// Run ONNX inference with the prepared input.
     fn run_inference(&mut self, input: &[f32]) -> Result<f32> {
-        let mut session = self.session.lock().unwrap();
+        let mut session = self.session.lock().map_err(|e| {
+            anyhow::anyhow!("VAD session mutex poisoned (likely panic during inference): {}", e)
+        })?;
 
         let input_len = input.len();
 

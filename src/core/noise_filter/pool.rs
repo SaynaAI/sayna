@@ -87,15 +87,15 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
 
             // Build config with cache path from environment
             let cache_path = get_cache_path();
-            // Note: atten_lim_db is set to 40.0 here (vs 100.0 default in NoiseFilterConfig).
-            // This is intentional: 40dB provides better speech naturalness for real-time
-            // voice processing, while 100dB (essentially unlimited) is more aggressive.
-            // The 40dB limit ensures ~1% of the original signal remains, preventing
-            // artifacts from over-suppression while still achieving significant noise reduction.
+            // Note: atten_lim_db is set to 15.0 for STT-optimized processing.
+            // 15dB = ~18% signal floor, preserving speech harmonics for accurate transcription.
+            // Higher values (40dB) cause over-attenuation and ~20% WER degradation for STT.
+            // Post-filter is disabled (0.0) as it causes additional over-attenuation.
+            // See: https://github.com/Rikorose/DeepFilterNet/issues/483
             let config = NoiseFilterConfig {
                 cache_path,
-                atten_lim_db: 40.0, // Limit to 40dB reduction for natural sound
-                post_filter_beta: 0.02, // Enable post-filter for additional noise floor subtraction
+                atten_lim_db: 15.0, // Conservative limit for STT quality (vs 40dB for aggressive filtering)
+                post_filter_beta: 0.0, // Disabled - causes over-attenuation harmful to STT
                 ..Default::default()
             };
 
@@ -110,7 +110,7 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
             };
 
             info!(
-                "DeepFilterNet ORT worker initialized with post-filter for optimal noise reduction"
+                "DeepFilterNet ORT worker initialized with STT-optimized settings (atten_lim=15dB, no post-filter)"
             );
 
             // The worker's main loop. It blocks efficiently until a task arrives.
@@ -397,12 +397,13 @@ impl StreamNoiseProcessor {
         };
 
         // Build config with cache path from environment
+        // STT-optimized: 15dB limit preserves speech, post-filter disabled
         let cache_path = get_cache_path();
         let config = NoiseFilterConfig {
             cache_path,
             sample_rate,
-            atten_lim_db: 40.0,
-            post_filter_beta: 0.02,
+            atten_lim_db: 15.0, // Conservative for STT quality
+            post_filter_beta: 0.0, // Disabled - causes over-attenuation
             ..Default::default()
         };
 

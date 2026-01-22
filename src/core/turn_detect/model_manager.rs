@@ -131,7 +131,12 @@ impl ModelManager {
         let inputs: Vec<(&str, Value)> = vec![(INPUT_TENSOR_NAME, input_value)];
 
         // Lock session and run inference
-        let mut session = self.session.lock().unwrap();
+        let mut session = self.session.lock().map_err(|e| {
+            anyhow::anyhow!(
+                "Turn detection session mutex poisoned (likely panic during inference): {}",
+                e
+            )
+        })?;
 
         // Get output name before running
         let output_name = session.outputs()[0].name().to_string();

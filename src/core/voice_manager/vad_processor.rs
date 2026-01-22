@@ -136,9 +136,11 @@ pub async fn process_audio_chunk(
     let mut events = Vec::new();
 
     // Process frames through VAD (without holding buffer lock)
+    // Note: Using read() instead of write() because SileroVAD::process_audio takes &self
+    // (interior mutability is provided by Arc<Mutex<VADModelManager>>)
     for frame in frames_to_process {
         let speech_prob = {
-            let vad_guard = vad.write().await;
+            let vad_guard = vad.read().await;
             vad_guard.process_audio(&frame).await.map_err(|e| {
                 VoiceManagerError::InitializationError(format!("VAD processing error: {}", e))
             })?
