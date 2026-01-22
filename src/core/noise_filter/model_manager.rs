@@ -164,21 +164,21 @@ impl ModelManager {
         const DF_DEC_EXPECTED_OUTPUTS: &[&str] = &["coefs"];
 
         // Encoder validation
-        debug!("Encoder inputs: {:?}", enc_session.inputs.len());
-        for (i, input) in enc_session.inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+        debug!("Encoder inputs: {:?}", enc_session.inputs().len());
+        for (i, input) in enc_session.inputs().iter().enumerate() {
+            debug!("  Input {}: name={}", i, input.name());
         }
-        debug!("Encoder outputs: {:?}", enc_session.outputs.len());
-        for (i, output) in enc_session.outputs.iter().enumerate() {
-            debug!("  Output {}: name={}", i, output.name);
+        debug!("Encoder outputs: {:?}", enc_session.outputs().len());
+        for (i, output) in enc_session.outputs().iter().enumerate() {
+            debug!("  Output {}: name={}", i, output.name());
         }
 
         Self::validate_io_names(
             "Encoder",
             &enc_session
-                .inputs
+                .inputs()
                 .iter()
-                .map(|i| i.name.as_str())
+                .map(|i| i.name())
                 .collect::<Vec<_>>(),
             ENC_EXPECTED_INPUTS,
             "inputs",
@@ -186,27 +186,27 @@ impl ModelManager {
         Self::validate_io_names(
             "Encoder",
             &enc_session
-                .outputs
+                .outputs()
                 .iter()
-                .map(|o| o.name.as_str())
+                .map(|o| o.name())
                 .collect::<Vec<_>>(),
             ENC_EXPECTED_OUTPUTS,
             "outputs",
         )?;
 
         // ERB decoder validation
-        debug!("ERB decoder inputs: {:?}", erb_dec_session.inputs.len());
-        for (i, input) in erb_dec_session.inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+        debug!("ERB decoder inputs: {:?}", erb_dec_session.inputs().len());
+        for (i, input) in erb_dec_session.inputs().iter().enumerate() {
+            debug!("  Input {}: name={}", i, input.name());
         }
-        debug!("ERB decoder outputs: {:?}", erb_dec_session.outputs.len());
+        debug!("ERB decoder outputs: {:?}", erb_dec_session.outputs().len());
 
         Self::validate_io_names(
             "ERB decoder",
             &erb_dec_session
-                .inputs
+                .inputs()
                 .iter()
-                .map(|i| i.name.as_str())
+                .map(|i| i.name())
                 .collect::<Vec<_>>(),
             ERB_DEC_EXPECTED_INPUTS,
             "inputs",
@@ -214,27 +214,27 @@ impl ModelManager {
         Self::validate_io_names(
             "ERB decoder",
             &erb_dec_session
-                .outputs
+                .outputs()
                 .iter()
-                .map(|o| o.name.as_str())
+                .map(|o| o.name())
                 .collect::<Vec<_>>(),
             ERB_DEC_EXPECTED_OUTPUTS,
             "outputs",
         )?;
 
         // DF decoder validation
-        debug!("DF decoder inputs: {:?}", df_dec_session.inputs.len());
-        for (i, input) in df_dec_session.inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+        debug!("DF decoder inputs: {:?}", df_dec_session.inputs().len());
+        for (i, input) in df_dec_session.inputs().iter().enumerate() {
+            debug!("  Input {}: name={}", i, input.name());
         }
-        debug!("DF decoder outputs: {:?}", df_dec_session.outputs.len());
+        debug!("DF decoder outputs: {:?}", df_dec_session.outputs().len());
 
         Self::validate_io_names(
             "DF decoder",
             &df_dec_session
-                .inputs
+                .inputs()
                 .iter()
-                .map(|i| i.name.as_str())
+                .map(|i| i.name())
                 .collect::<Vec<_>>(),
             DF_DEC_EXPECTED_INPUTS,
             "inputs",
@@ -242,9 +242,9 @@ impl ModelManager {
         Self::validate_io_names(
             "DF decoder",
             &df_dec_session
-                .outputs
+                .outputs()
                 .iter()
-                .map(|o| o.name.as_str())
+                .map(|o| o.name())
                 .collect::<Vec<_>>(),
             DF_DEC_EXPECTED_OUTPUTS,
             "outputs",
@@ -376,7 +376,11 @@ impl ModelManager {
         let mut session = self.enc_session.lock().unwrap();
 
         // Collect output names first to avoid borrow issues
-        let output_names: Vec<String> = session.outputs.iter().map(|o| o.name.clone()).collect();
+        let output_names: Vec<String> = session
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
 
         // Prepare inputs with shape [1, 1, S, features] where S=1 for streaming
         // DeepFilterNet expects: feat_erb [1, 1, 1, nb_erb] and feat_spec [1, 2, 1, nb_df]
@@ -491,14 +495,12 @@ impl ModelManager {
         let mut session = self.erb_dec_session.lock().unwrap();
 
         // Get output name before running
-        let output_name = session.outputs[0].name.clone();
+        let output_name = session.outputs()[0].name().to_string();
 
         // Build inputs using the ORIGINAL shapes from encoder outputs
         // ERB decoder takes: emb, e3, e2, e1, e0 (skip connections in reverse order)
-        let mut inputs: Vec<(&str, Value)> = vec![(
-            "emb",
-            Self::create_value_with_shape(&enc_outputs.emb)?,
-        )];
+        let mut inputs: Vec<(&str, Value)> =
+            vec![("emb", Self::create_value_with_shape(&enc_outputs.emb)?)];
 
         // Add skip connections in reverse order: e3, e2, e1, e0 (per upstream spec)
         if !enc_outputs.e[3].is_empty() {
@@ -540,13 +542,13 @@ impl ModelManager {
             1 => Ok(Value::from_array(([shape[0]], data.clone()))?.into()),
             2 => Ok(Value::from_array(([shape[0], shape[1]], data.clone()))?.into()),
             3 => Ok(Value::from_array(([shape[0], shape[1], shape[2]], data.clone()))?.into()),
-            4 => Ok(Value::from_array(
-                ([shape[0], shape[1], shape[2], shape[3]], data.clone()),
-            )?
-            .into()),
-            5 => Ok(Value::from_array(
-                ([shape[0], shape[1], shape[2], shape[3], shape[4]], data.clone()),
-            )?
+            4 => Ok(
+                Value::from_array(([shape[0], shape[1], shape[2], shape[3]], data.clone()))?.into(),
+            ),
+            5 => Ok(Value::from_array((
+                [shape[0], shape[1], shape[2], shape[3], shape[4]],
+                data.clone(),
+            ))?
             .into()),
             _ => anyhow::bail!(
                 "Unsupported tensor shape with {} dimensions: {:?}",
@@ -563,7 +565,7 @@ impl ModelManager {
         let mut session = self.df_dec_session.lock().unwrap();
 
         // Get output name before running
-        let output_name = session.outputs[0].name.clone();
+        let output_name = session.outputs()[0].name().to_string();
 
         let nb_df = self.df_params.nb_df;
         let df_order = self.df_params.df_order;

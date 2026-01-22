@@ -454,6 +454,8 @@ impl SIPApiClient {
             krisp_enabled: options.krisp_enabled,
             wait_until_answered: options.wait_until_answered,
             media_encryption: proto::SipMediaEncryption::SipMediaEncryptDisable as i32,
+            display_name: options.display_name.clone(),
+            destination: None,
         };
 
         // CreateSIPParticipant requires SIPGrants with call permission and VideoGrants

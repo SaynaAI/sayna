@@ -18,6 +18,7 @@ noise-filter = [
     "dep:num_cpus",
     "dep:ort",
     "dep:rubato",
+    "dep:audioadapter-buffers",
     "dep:realfft",
     "dep:tar",
     "dep:flate2",
@@ -44,7 +45,7 @@ bytes = "1.8"
 http-body-util = "0.1"
 
 # HTTP client
-reqwest = { version = "0.13.1", default-features = false, features = ["json", "native-tls-vendored", "stream", "http2"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls", "stream", "http2"] }
 hound = "3.5"
 
 # JWT authentication
@@ -98,8 +99,8 @@ livekit = "=0.7.29"
 livekit-api = "=0.4.12"
 livekit-protocol = "=0.6.0"
 # Need prost/pbjson-types for SIP API client, using same versions as livekit to avoid conflicts
-prost = "0.14.3"
-pbjson-types = "0.9.0"
+prost = "0.12.6"
+pbjson-types = "0.6.0"
 
 time = ">=0.3.35"
 # ndarray for DSP operations in noise-filter and stt-vad
@@ -108,6 +109,7 @@ num_cpus = { version = "1.17.0", optional = true }
 
 # DeepFilterNet ORT migration dependencies
 rubato = { version = "1.0.0", optional = true }
+audioadapter-buffers = { version = "2.0.0", optional = true }
 realfft = { version = "3.4", optional = true }
 tar = { version = "0.4", optional = true }
 flate2 = { version = "1.1", optional = true }
@@ -125,8 +127,8 @@ anyhow = "1.0"
 # Google Cloud STT
 google-api-proto = { version = "=1.710.0", features = ["google-cloud-speech-v2"] }
 google-cloud-auth = "1.2.0"
-tonic = { version = "0.14", features = ["channel"] }
-prost-types = "0.14"
+tonic = { version = "0.12", features = ["channel", "tls-roots", "prost"] }
+prost-types = "0.13"
 async-stream = "0.3"
 
 [dev-dependencies]

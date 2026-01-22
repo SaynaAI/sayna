@@ -57,17 +57,17 @@ impl ModelManager {
     }
 
     fn validate_model_io(session: &Session) -> Result<()> {
-        let inputs = &session.inputs;
-        let outputs = &session.outputs;
+        let inputs = session.inputs();
+        let outputs = session.outputs();
 
         debug!("Smart-turn model input count: {}", inputs.len());
         for (i, input) in inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+            debug!("  Input {}: name={}", i, input.name());
         }
 
         debug!("Smart-turn model output count: {}", outputs.len());
         for (i, output) in outputs.iter().enumerate() {
-            debug!("  Output {}: name={}", i, output.name);
+            debug!("  Output {}: name={}", i, output.name());
         }
 
         // Validate we have at least one input
@@ -76,12 +76,12 @@ impl ModelManager {
         }
 
         // Check for expected input name
-        let has_input_features = inputs.iter().any(|i| i.name == INPUT_TENSOR_NAME);
+        let has_input_features = inputs.iter().any(|i| i.name() == INPUT_TENSOR_NAME);
         if !has_input_features {
             warn!(
                 "Smart-turn model doesn't have expected input '{}'. Available inputs: {:?}",
                 INPUT_TENSOR_NAME,
-                inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+                inputs.iter().map(|i| i.name()).collect::<Vec<_>>()
             );
         }
 
@@ -134,7 +134,7 @@ impl ModelManager {
         let mut session = self.session.lock().unwrap();
 
         // Get output name before running
-        let output_name = session.outputs[0].name.clone();
+        let output_name = session.outputs()[0].name().to_string();
 
         let outputs = session.run(inputs).context("Smart-turn inference failed")?;
 

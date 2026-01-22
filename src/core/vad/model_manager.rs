@@ -147,17 +147,17 @@ impl VADModelManager {
 
     /// Validate that the model has the expected inputs and outputs.
     fn validate_model_io(session: &Session) -> Result<()> {
-        let inputs = &session.inputs;
-        let outputs = &session.outputs;
+        let inputs = session.inputs();
+        let outputs = session.outputs();
 
         debug!("Silero-VAD model input count: {}", inputs.len());
         for (i, input) in inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+            debug!("  Input {}: name={}", i, input.name());
         }
 
         debug!("Silero-VAD model output count: {}", outputs.len());
         for (i, output) in outputs.iter().enumerate() {
-            debug!("  Output {}: name={}", i, output.name);
+            debug!("  Output {}: name={}", i, output.name());
         }
 
         // Silero-VAD expects 3 inputs: input, state (or h, c), sr

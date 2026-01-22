@@ -11,7 +11,7 @@
 
 // Re-export from core module
 #[cfg(feature = "noise-filter")]
-pub use crate::core::noise_filter::pool::{reduce_noise_async, StreamNoiseProcessor};
+pub use crate::core::noise_filter::pool::{StreamNoiseProcessor, reduce_noise_async};
 
 // Stub implementations when noise-filter feature is disabled
 #[cfg(not(feature = "noise-filter"))]
@@ -49,4 +49,4 @@ mod stub {
 }
 
 #[cfg(not(feature = "noise-filter"))]
-pub use stub::{reduce_noise_async, StreamNoiseProcessor};
+pub use stub::{StreamNoiseProcessor, reduce_noise_async};

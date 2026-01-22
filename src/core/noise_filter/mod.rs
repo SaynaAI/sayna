@@ -39,7 +39,7 @@ pub use config::NoiseFilterConfig;
 
 // Re-export pool types for convenient access
 #[cfg(feature = "noise-filter")]
-pub use pool::{reduce_noise_async, StreamNoiseProcessor};
+pub use pool::{StreamNoiseProcessor, reduce_noise_async};
 
 #[cfg(feature = "noise-filter")]
 pub use assets::download_assets;
@@ -47,7 +47,9 @@ pub use assets::download_assets;
 #[cfg(feature = "noise-filter")]
 use anyhow::Result;
 #[cfg(feature = "noise-filter")]
-use rubato::{FastFixedIn, PolynomialDegree, Resampler};
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
+#[cfg(feature = "noise-filter")]
+use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
 #[cfg(feature = "noise-filter")]
 use std::path::PathBuf;
 #[cfg(feature = "noise-filter")]
@@ -67,9 +69,9 @@ pub struct NoiseFilter {
     /// Model sample rate (typically 48000).
     model_sr: u32,
     /// Resampler for upsampling input to model SR (None if same rate).
-    resampler_up: Option<FastFixedIn<f32>>,
+    resampler_up: Option<Async<f32>>,
     /// Resampler for downsampling model output to input SR (None if same rate).
-    resampler_down: Option<FastFixedIn<f32>>,
+    resampler_down: Option<Async<f32>>,
     /// Input buffer for accumulating samples until we have enough for one hop.
     input_buffer: Vec<f32>,
     /// Output buffer for resampled output samples.
@@ -107,21 +109,23 @@ impl NoiseFilter {
         // Create resamplers if input SR differs from model SR
         let (resampler_up, resampler_down) = if input_sr != model_sr {
             // Upsampler: input_sr -> model_sr
-            let up = FastFixedIn::<f32>::new(
+            let up = Async::<f32>::new_poly(
                 ratio,
                 1.0, // Max relative ratio deviation
                 PolynomialDegree::Septic,
                 input_hop_size,
                 1, // Single channel
+                FixedAsync::Input,
             )?;
 
             // Downsampler: model_sr -> input_sr
-            let down = FastFixedIn::<f32>::new(
+            let down = Async::<f32>::new_poly(
                 1.0 / ratio,
                 1.0,
                 PolynomialDegree::Septic,
                 model_hop_size,
                 1,
+                FixedAsync::Input,
             )?;
 
             (Some(up), Some(down))
@@ -211,8 +215,16 @@ impl NoiseFilter {
         // Resample to model SR if needed
         let model_input = if let Some(ref mut resampler) = self.resampler_up {
             let input_vec = vec![input.to_vec()];
-            let resampled = resampler.process(&input_vec, None)?;
-            resampled.into_iter().next().unwrap_or_default()
+            let input_frames = input.len();
+            let input_adapter = SequentialSliceOfVecs::new(&input_vec, 1, input_frames).unwrap();
+            let max_output = resampler.output_frames_max();
+            let mut output_vec = vec![vec![0.0f32; max_output]; 1];
+            let mut output_adapter =
+                SequentialSliceOfVecs::new_mut(&mut output_vec, 1, max_output).unwrap();
+            let (_, frames_written) =
+                resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
+            output_vec[0].truncate(frames_written);
+            output_vec.into_iter().next().unwrap_or_default()
         } else {
             input.to_vec()
         };
@@ -235,8 +247,16 @@ impl NoiseFilter {
         // Resample back to input SR if needed
         let output = if let Some(ref mut resampler) = self.resampler_down {
             let filtered_vec = vec![filtered];
-            let resampled = resampler.process(&filtered_vec, None)?;
-            resampled.into_iter().next().unwrap_or_default()
+            let input_frames = filtered_vec[0].len();
+            let input_adapter = SequentialSliceOfVecs::new(&filtered_vec, 1, input_frames).unwrap();
+            let max_output = resampler.output_frames_max();
+            let mut output_vec = vec![vec![0.0f32; max_output]; 1];
+            let mut output_adapter =
+                SequentialSliceOfVecs::new_mut(&mut output_vec, 1, max_output).unwrap();
+            let (_, frames_written) =
+                resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
+            output_vec[0].truncate(frames_written);
+            output_vec.into_iter().next().unwrap_or_default()
         } else {
             filtered
         };
@@ -263,8 +283,16 @@ impl NoiseFilter {
         // Resample back if needed
         let output = if let Some(ref mut resampler) = self.resampler_down {
             let filtered_vec = vec![filtered];
-            let resampled = resampler.process(&filtered_vec, None)?;
-            resampled.into_iter().next().unwrap_or_default()
+            let input_frames = filtered_vec[0].len();
+            let input_adapter = SequentialSliceOfVecs::new(&filtered_vec, 1, input_frames).unwrap();
+            let max_output = resampler.output_frames_max();
+            let mut output_vec = vec![vec![0.0f32; max_output]; 1];
+            let mut output_adapter =
+                SequentialSliceOfVecs::new_mut(&mut output_vec, 1, max_output).unwrap();
+            let (_, frames_written) =
+                resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
+            output_vec[0].truncate(frames_written);
+            output_vec.into_iter().next().unwrap_or_default()
         } else {
             filtered
         };

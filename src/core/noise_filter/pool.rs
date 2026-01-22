@@ -35,7 +35,7 @@ use bytes::Bytes;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::LazyLock;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::info;
 
 use super::{NoiseFilter, NoiseFilterConfig};
@@ -219,9 +219,10 @@ async fn get_sender() -> PooledWorkerSender {
     let sender = {
         // Lock the mutex asynchronously. The guard is Send and can be held across an await.
         let mut pool_rx = pool_rx_mutex.lock().await;
-        pool_rx.recv().await.expect(
-            "Worker pool channel closed unexpectedly. All worker threads may have died.",
-        )
+        pool_rx
+            .recv()
+            .await
+            .expect("Worker pool channel closed unexpectedly. All worker threads may have died.")
     };
 
     PooledWorkerSender {
@@ -369,8 +370,7 @@ impl StreamNoiseProcessor {
         // Wait for the worker to initialize
         ready_rx
             .await
-            .map_err(|_| "Worker thread failed to start")?
-            .map_err(|e| e)?;
+            .map_err(|_| "Worker thread failed to start")??;
 
         Ok(Self {
             task_tx,
@@ -500,9 +500,7 @@ pub struct StreamNoiseProcessorStub;
 
 #[cfg(not(feature = "noise-filter"))]
 impl StreamNoiseProcessorStub {
-    pub async fn new(
-        _sample_rate: u32,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new(_sample_rate: u32) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self)
     }
 
