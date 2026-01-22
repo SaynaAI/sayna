@@ -1568,12 +1568,15 @@ Browser Participant → LiveKit Room → Sayna
 
 **Noise Filtering:**
 
-If compiled with `noise-filter` feature (disabled by default), Sayna applies DeepFilterNet noise reduction:
+If compiled with `noise-filter` feature (disabled by default), Sayna applies DeepFilterNet3 noise suppression via ONNX Runtime (ORT):
+- Uses DeepFilterNet3 low-latency ONNX models from [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) for real-time noise suppression
+- Model files (`enc.onnx`, `erb_dec.onnx`, `df_dec.onnx`, `config.ini`) are automatically downloaded to `<cache_path>/noise_filter/` on first use
 - Reduces background noise, keyboard typing, fan noise
-- Preserves speech quality
-- CPU-intensive, runs on thread pool (non-blocking)
-- Conservative blending to avoid over-processing
-- Automatically applied to all audio (WebSocket + LiveKit)
+- Preserves speech quality with configurable attenuation limits
+- CPU-intensive, runs on thread pool (non-blocking) with configurable thread count
+- Automatically applied to all audio (WebSocket + LiveKit) before STT ingestion
+- Internally resamples audio to 48kHz for model processing (model parameters: fft_size=960, hop_size=480, nb_erb=32, nb_df=96), then back to original sample rate
+- Processing latency is approximately one hop_size (10ms at 48kHz) per frame
 
 **VAD + Turn Detection:**
 

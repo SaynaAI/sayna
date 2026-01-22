@@ -10,7 +10,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 - Bidirectional WebSocket endpoint (`/ws`) for low-latency audio streaming, TTS commands, LiveKit coordination, and control signals.
 - REST endpoints for health checks, voice discovery, one-shot TTS synthesis, and LiveKit token issuance.
 - Pluggable provider layer with Deepgram (STT + TTS), ElevenLabs (STT + TTS), Google (STT + TTS), and Microsoft Azure (STT) adapters; adding providers requires implementing the trait in `src/core/stt` or `src/core/tts`.
-- Optional DSP layers: Silero-VAD voice activity detection with ONNX-based turn detection (`stt-vad` feature) and DeepFilterNet noise suppression (`noise-filter` feature).
+- Optional DSP layers: Silero-VAD voice activity detection with ONNX-based turn detection (`stt-vad` feature) and DeepFilterNet3 noise suppression via ONNX Runtime (`noise-filter` feature).
 - Request pooling, adaptive retry logic, and binary audio caching so repeated prompts replay instantly while respecting provider rate limits.
 
 ## Core Architecture
@@ -31,7 +31,8 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | Provider layer | `src/core/stt/*`, `src/core/tts/*` | Trait-based adapters that normalize provider-specific options, handle retries, and expose metrics. |
 | WebSocket stack | `src/handlers/ws/*` | Parses messages, validates configs, orchestrates LiveKit setup, and streams audio/data. |
 | LiveKit integration | `src/livekit/*` | Token creation, room management, recording hooks, and participant filtering for mirrored audio. |
-| Noise & turn detection | `src/utils/noise_filter.rs`, `src/core/turn_detect/*` | Optional DSP stages for cleaner audio and better speech-final timing. |
+| Noise filter | `src/core/noise_filter/*`, `src/utils/noise_filter.rs` | DeepFilterNet3-based noise suppression via ONNX Runtime for cleaner audio. |
+| Turn detection | `src/core/turn_detect/*` | ONNX-based turn detection for better speech-final timing. |
 | Request & cache utilities | `src/utils/req_manager.rs`, `src/core/cache/*` | Shared HTTP/2 pools plus filesystem/in-memory caches for previously synthesized audio. |
 | Routing layer | `src/main.rs`, `src/routes/*`, `src/handlers/*` | Axum routers, REST handlers, and middleware wiring. |
 
@@ -53,7 +54,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `stt-vad` | Disabled | Enables Silero-VAD voice activity detection with integrated ONNX-based turn detection. Improves `is_speech_final` timing in STT responses by detecting silence and confirming turn completion. |
-| `noise-filter` | Disabled | Activates DeepFilterNet-based denoising before STT ingestion and LiveKit playback. Disable for lower CPU usage. |
+| `noise-filter` | Disabled | Activates DeepFilterNet3-based noise suppression via ONNX Runtime (ORT) before STT ingestion and LiveKit playback. Audio is automatically resampled to 48kHz internally for model processing (fft_size=960, hop_size=480, nb_erb=32, nb_df=96), then back to the original sample rate. Models (`enc.onnx`, `erb_dec.onnx`, `df_dec.onnx`, `config.ini`) are automatically downloaded from [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) to the cache directory on first use. Disable for lower CPU usage. |
 | `openapi` | Disabled | Compiles utoipa annotations and exposes the CLI generator (`cargo run --features openapi -- openapi`). |
 
 ### Configuration & Environment
