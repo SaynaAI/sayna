@@ -1,14 +1,24 @@
 //! Tests for VoiceManager
 
-use crate::core::stt::{STTConfig, STTResult};
+use crate::core::stt::STTConfig;
 use crate::core::tts::TTSConfig;
-use crate::core::voice_manager::state::SpeechFinalState;
-use crate::core::voice_manager::stt_result::STTResultProcessor;
-use crate::core::voice_manager::utils::get_current_time_ms;
 use crate::core::voice_manager::{VoiceManager, VoiceManagerConfig};
+
+#[cfg(not(feature = "stt-vad"))]
+use crate::core::stt::STTResult;
+#[cfg(not(feature = "stt-vad"))]
+use crate::core::voice_manager::state::SpeechFinalState;
+#[cfg(not(feature = "stt-vad"))]
+use crate::core::voice_manager::stt_result::STTResultProcessor;
+#[cfg(not(feature = "stt-vad"))]
+use crate::core::voice_manager::utils::get_current_time_ms;
+#[cfg(not(feature = "stt-vad"))]
 use parking_lot::RwLock as SyncRwLock;
-use std::sync::Arc;
+#[cfg(not(feature = "stt-vad"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(feature = "stt-vad"))]
+use std::sync::Arc;
+#[cfg(not(feature = "stt-vad"))]
 use tokio::sync::mpsc;
 
 /// Helper macro to create VoiceManager with feature-gated VAD parameter
