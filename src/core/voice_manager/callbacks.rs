@@ -69,24 +69,52 @@ impl AudioCallback for VoiceManagerTTSCallback {
 
                 // Calculate audio duration and update non_interruptible_until_ms
                 if !int_state.allow_interruption.load(Ordering::Acquire) {
-                    // Calculate actual audio duration from audio data
-                    // For PCM/linear16: bytes / (sample_rate * bytes_per_sample * channels)
-                    // Assuming 16-bit audio (2 bytes per sample) and mono (1 channel)
-                    let bytes_per_sample = 2;
-                    let channels = 1;
-                    let sample_rate = int_state.current_sample_rate.load(Ordering::Acquire);
+                    // Prefer provider-supplied duration_ms when available (handles all formats correctly)
+                    let chunk_duration_ms = if let Some(duration_ms) = audio_data.duration_ms {
+                        duration_ms as usize
+                    } else {
+                        // Fall back to computing duration for supported PCM formats only
+                        // Use integer math to avoid floating-point overhead and rounding drift
+                        // Use eq_ignore_ascii_case for allocation-free case-insensitive comparison
+                        // per rust.mdc "Minimize Allocations" guidance
+                        let format = &audio_data.format;
+                        if format.eq_ignore_ascii_case("linear16")
+                            || format.eq_ignore_ascii_case("pcm")
+                            || format.eq_ignore_ascii_case("pcm_16")
+                        {
+                            // For 16-bit mono PCM: duration_ms = (bytes * 1000) / (sample_rate * 2)
+                            // Using integer division: multiply first to avoid precision loss
+                            let sample_rate = int_state.current_sample_rate.load(Ordering::Acquire);
+                            let bytes_per_sample: u32 = 2;
+                            let channels: u32 = 1;
+                            let divisor = sample_rate * bytes_per_sample * channels;
+                            if divisor > 0 {
+                                // (data_len * 1000) / divisor
+                                (audio_data.data.len() * 1000) / (divisor as usize)
+                            } else {
+                                tracing::debug!(
+                                    "Cannot compute audio duration: invalid sample rate {}",
+                                    sample_rate
+                                );
+                                0
+                            }
+                        } else {
+                            // Non-PCM format without duration_ms - cannot reliably compute duration
+                            tracing::debug!(
+                                "Skipping interruption timing update: unknown format '{}' without duration_ms",
+                                audio_data.format
+                            );
+                            0
+                        }
+                    };
 
-                    let chunk_duration_seconds = audio_data.data.len() as f32
-                        / (sample_rate as f32 * bytes_per_sample as f32 * channels as f32);
-
-                    let chunk_duration_ms = (chunk_duration_seconds * 1000.0) as usize;
-
-                    // Add duration to non_interruptible_until_ms
-                    let current_until =
-                        int_state.non_interruptible_until_ms.load(Ordering::Acquire);
-                    int_state
-                        .non_interruptible_until_ms
-                        .store(current_until + chunk_duration_ms, Ordering::Release);
+                    // Add duration atomically to non_interruptible_until_ms.
+                    // Using fetch_add ensures concurrent audio callbacks cannot lose increments.
+                    if chunk_duration_ms > 0 {
+                        int_state
+                            .non_interruptible_until_ms
+                            .fetch_add(chunk_duration_ms, Ordering::AcqRel);
+                    }
                 }
             }
 

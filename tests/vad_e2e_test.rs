@@ -75,25 +75,18 @@ fn test_voice_manager_config_speech_final_settings() {
     };
 
     let speech_final_config = SpeechFinalConfig {
-        stt_speech_final_wait_ms: 600,
         turn_detection_inference_timeout_ms: 200,
-        speech_final_hard_timeout_ms: 8000,
         duplicate_window_ms: 500,
     };
 
     let config =
         VoiceManagerConfig::with_speech_final_config(stt_config, tts_config, speech_final_config);
 
-    assert_eq!(config.speech_final_config.stt_speech_final_wait_ms, 600);
     assert_eq!(
         config
             .speech_final_config
             .turn_detection_inference_timeout_ms,
         200
-    );
-    assert_eq!(
-        config.speech_final_config.speech_final_hard_timeout_ms,
-        8000
     );
     assert_eq!(config.speech_final_config.duplicate_window_ms, 500);
 }

@@ -24,12 +24,20 @@ impl Default for NoiseFilterConfig {
     }
 }
 
-/// Configuration for speech final timing control
+/// Configuration for speech final timing control.
+///
+/// **Note on removed timeout fields**: The `stt_speech_final_wait_ms` and
+/// `speech_final_hard_timeout_ms` fields were removed because all timeout-based
+/// fallbacks have been replaced by more reliable mechanisms:
+///
+/// - When `stt-vad` is enabled: VAD detects silence, then Smart-Turn confirms turn
+///   completion with semantic understanding. This is more accurate than arbitrary timeouts.
+/// - When `stt-vad` is NOT enabled: The STT provider's native `is_speech_final` signal
+///   is used directly, as providers already implement their own timeout logic.
+///
+/// See `STTProcessingConfig` in `stt_config.rs` for the current speech-final behavior.
 #[derive(Debug, Clone, Copy)]
 pub struct SpeechFinalConfig {
-    /// Time to wait for STT provider to send real speech_final (ms)
-    /// This is the primary window - we trust STT provider during this time
-    pub stt_speech_final_wait_ms: u64,
     /// Maximum time to wait for turn detection inference to complete (ms).
     ///
     /// This timeout covers both feature extraction and model inference in the
@@ -39,21 +47,20 @@ pub struct SpeechFinalConfig {
     /// Default: 800ms - provides ample headroom for the ~50ms typical inference
     /// while ensuring stuck models don't block speech_final indefinitely.
     pub turn_detection_inference_timeout_ms: u64,
-    /// Hard upper bound timeout for any user utterance (ms)
-    /// This guarantees that no utterance will wait longer than this value
-    /// even if neither the STT provider nor turn detector fire
-    pub speech_final_hard_timeout_ms: u64,
-    /// Window to prevent duplicate speech_final events (ms)
+    /// Window to prevent duplicate speech_final events (ms).
+    ///
+    /// When both the STT provider and VAD/Smart-Turn emit speech_final events
+    /// for the same utterance, this window prevents duplicate callbacks.
+    ///
+    /// Default: 500ms
     pub duplicate_window_ms: usize,
 }
 
 impl Default for SpeechFinalConfig {
     fn default() -> Self {
         Self {
-            stt_speech_final_wait_ms: 2800, // Wait 1.8s for real speech_final from STT
             turn_detection_inference_timeout_ms: 800, // 800ms max for model inference
-            speech_final_hard_timeout_ms: 5000, // 5s hard upper bound for any utterance
-            duplicate_window_ms: 500,       // 500ms duplicate prevention window
+            duplicate_window_ms: 500,                 // 500ms duplicate prevention window
         }
     }
 }
