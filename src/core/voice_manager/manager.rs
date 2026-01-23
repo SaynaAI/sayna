@@ -6,9 +6,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use tokio::sync::{Notify, RwLock};
 #[cfg(feature = "stt-vad")]
 use tokio::sync::mpsc;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 

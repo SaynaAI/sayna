@@ -268,7 +268,7 @@ mod tests {
         // Simulate adding some initial data
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend(std::iter::repeat(0i16).take(10_000));
+            buffer.extend(std::iter::repeat_n(0i16, 10_000));
         }
 
         // Create oversized chunk (larger than MAX)
@@ -304,7 +304,7 @@ mod tests {
         let fill_count = MAX_VAD_AUDIO_SAMPLES - 1000;
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend(std::iter::repeat(1i16).take(fill_count));
+            buffer.extend(std::iter::repeat_n(1i16, fill_count));
         }
 
         // Add a chunk that would require dropping samples
