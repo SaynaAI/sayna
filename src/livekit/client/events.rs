@@ -2,6 +2,9 @@
 //!
 //! Spawns background tasks that react to LiveKit room updates and forward
 //! audio or data payloads through registered callbacks.
+//!
+//! Note: Noise filtering is handled centrally in VoiceManager::receive_audio,
+//! so LiveKit forwards raw audio directly to the audio callback.
 
 use std::sync::Arc;
 
@@ -16,8 +19,6 @@ use super::{
     ParticipantDisconnectCallback, ParticipantDisconnectEvent,
 };
 use crate::AppError;
-#[cfg(feature = "noise-filter")]
-use crate::utils::noise_filter::reduce_noise_async;
 
 impl LiveKitClient {
     pub(super) async fn start_event_handler(&mut self) -> Result<(), AppError> {
@@ -139,9 +140,6 @@ impl LiveKitClient {
                                 config.channels as i32,
                             );
 
-                            let enable_noise_filter = config.enable_noise_filter;
-                            #[cfg(feature = "noise-filter")]
-                            let sample_rate = config.sample_rate;
                             let participant_id = participant.identity().to_string();
 
                             // Create a local buffer pool for this audio stream
@@ -151,59 +149,19 @@ impl LiveKitClient {
 
                             let handle = tokio::spawn(async move {
                                 info!(
-                                    "Starting audio stream processing for participant: {} (noise_filter: {})",
-                                    participant_id, enable_noise_filter
+                                    "Starting audio stream processing for participant: {}",
+                                    participant_id
                                 );
 
-                                #[cfg(not(feature = "noise-filter"))]
-                                if enable_noise_filter {
-                                    warn!(
-                                        "Noise filter requested for participant {} but the 'noise-filter' feature is disabled; forwarding raw audio",
-                                        participant_id
-                                    );
-                                }
-
+                                // Forward raw audio to VoiceManager - noise filtering
+                                // is handled centrally in VoiceManager::receive_audio
                                 while let Some(audio_frame) = audio_stream.next().await {
-                                    debug!(
-                                        "Received audio frame: {} samples",
-                                        audio_frame.data.len()
-                                    );
-
                                     let audio_buffer = LiveKitClient::convert_frame_to_audio(
                                         &audio_frame,
                                         Some(&stream_buffer_pool),
                                     );
 
-                                    if enable_noise_filter {
-                                        #[cfg(feature = "noise-filter")]
-                                        {
-                                            // For noise filtering, we need to clone since the filter may modify the buffer
-                                            match reduce_noise_async(
-                                                audio_buffer.clone().into(),
-                                                sample_rate,
-                                            )
-                                            .await
-                                            {
-                                                Ok(filtered_audio) => {
-                                                    LiveKitClient::return_buffer_to_pool(
-                                                        &stream_buffer_pool,
-                                                        audio_buffer,
-                                                    );
-                                                    callback_clone(filtered_audio);
-                                                }
-                                                Err(e) => {
-                                                    error!("Error reducing noise: {:?}", e);
-                                                    callback_clone(audio_buffer);
-                                                }
-                                            }
-                                        }
-                                        #[cfg(not(feature = "noise-filter"))]
-                                        {
-                                            callback_clone(audio_buffer);
-                                        }
-                                    } else {
-                                        callback_clone(audio_buffer);
-                                    }
+                                    callback_clone(audio_buffer);
                                 }
 
                                 info!("Audio stream ended for participant: {}", participant_id);

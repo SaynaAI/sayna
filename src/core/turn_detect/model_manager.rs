@@ -57,17 +57,17 @@ impl ModelManager {
     }
 
     fn validate_model_io(session: &Session) -> Result<()> {
-        let inputs = &session.inputs;
-        let outputs = &session.outputs;
+        let inputs = session.inputs();
+        let outputs = session.outputs();
 
         debug!("Smart-turn model input count: {}", inputs.len());
         for (i, input) in inputs.iter().enumerate() {
-            debug!("  Input {}: name={}", i, input.name);
+            debug!("  Input {}: name={}", i, input.name());
         }
 
         debug!("Smart-turn model output count: {}", outputs.len());
         for (i, output) in outputs.iter().enumerate() {
-            debug!("  Output {}: name={}", i, output.name);
+            debug!("  Output {}: name={}", i, output.name());
         }
 
         // Validate we have at least one input
@@ -76,12 +76,12 @@ impl ModelManager {
         }
 
         // Check for expected input name
-        let has_input_features = inputs.iter().any(|i| i.name == INPUT_TENSOR_NAME);
+        let has_input_features = inputs.iter().any(|i| i.name() == INPUT_TENSOR_NAME);
         if !has_input_features {
             warn!(
                 "Smart-turn model doesn't have expected input '{}'. Available inputs: {:?}",
                 INPUT_TENSOR_NAME,
-                inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+                inputs.iter().map(|i| i.name()).collect::<Vec<_>>()
             );
         }
 
@@ -92,14 +92,18 @@ impl ModelManager {
         Ok(())
     }
 
-    /// Run inference on mel spectrogram features.
+    /// Run inference on mel spectrogram features (synchronous).
+    ///
+    /// This method is synchronous and designed to be called from `spawn_blocking`
+    /// so that CPU-bound inference does not block the async runtime and allows
+    /// timeouts to fire properly.
     ///
     /// # Arguments
     /// * `mel_features` - Mel spectrogram with shape (mel_bins, mel_frames) as configured
     ///
     /// # Returns
     /// * `f32` - Turn completion probability (0.0-1.0)
-    pub async fn predict(&mut self, mel_features: ArrayView2<'_, f32>) -> Result<f32> {
+    pub fn predict(&mut self, mel_features: ArrayView2<'_, f32>) -> Result<f32> {
         let (mel_bins, mel_frames) = mel_features.dim();
 
         // Validate input dimensions against config (single source of truth)
@@ -131,10 +135,19 @@ impl ModelManager {
         let inputs: Vec<(&str, Value)> = vec![(INPUT_TENSOR_NAME, input_value)];
 
         // Lock session and run inference
-        let mut session = self.session.lock().unwrap();
+        let mut session = self.session.lock().map_err(|e| {
+            warn!(
+                "Turn detection ONNX session mutex poisoned (likely panic during inference): {}",
+                e
+            );
+            anyhow::anyhow!(
+                "Turn detection session mutex poisoned (likely panic during inference): {}",
+                e
+            )
+        })?;
 
         // Get output name before running
-        let output_name = session.outputs[0].name.clone();
+        let output_name = session.outputs()[0].name().to_string();
 
         let outputs = session.run(inputs).context("Smart-turn inference failed")?;
 

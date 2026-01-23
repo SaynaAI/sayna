@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod noise_filter;
 pub mod providers;
 pub mod state;
 pub mod stt;

@@ -439,15 +439,16 @@ fn test_livekit_ws_config_conversion() {
         listen_participants: vec![],
     };
 
+    // LiveKit config now uses TTS config for audio format (sample_rate for publishing)
     let tts_ws_config = TTSWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
+        voice_id: Some("aura-asteria-en".to_string()),
         speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
+        audio_format: Some("linear16".to_string()),
+        sample_rate: Some(24000), // TTS output sample rate
         connection_timeout: Some(30),
         request_timeout: Some(60),
-        model: "".to_string(),
+        model: "aura-asteria-en".to_string(),
         pronunciations: Vec::new(),
     };
 
@@ -458,12 +459,43 @@ fn test_livekit_ws_config_conversion() {
     assert_eq!(livekit_config.url, "wss://test-livekit.com");
     assert_eq!(livekit_config.token, test_token);
     assert_eq!(livekit_config.room_name, "test-room");
-    assert_eq!(livekit_config.sample_rate, 22050);
+    // Sample rate comes from TTS config for publishing, channels default to mono
+    assert_eq!(livekit_config.sample_rate, 24000);
     assert_eq!(livekit_config.channels, 1);
-    assert_eq!(
-        livekit_config.enable_noise_filter,
-        cfg!(feature = "noise-filter")
+}
+
+#[test]
+fn test_livekit_ws_config_conversion_default_sample_rate() {
+    let livekit_ws_config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec![],
+    };
+
+    // TTS config without sample_rate specified
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "deepgram".to_string(),
+        voice_id: None,
+        speaking_rate: None,
+        audio_format: None,
+        sample_rate: None, // Not specified - should default to 16000
+        connection_timeout: None,
+        request_timeout: None,
+        model: "".to_string(),
+        pronunciations: Vec::new(),
+    };
+
+    let livekit_config = livekit_ws_config.to_livekit_config(
+        "test-token".to_string(),
+        &tts_ws_config,
+        "wss://test.com",
     );
+
+    // Should default to STT rate (16000) when TTS rate not specified
+    assert_eq!(livekit_config.sample_rate, 16000);
+    assert_eq!(livekit_config.channels, 1);
 }
 
 #[test]
@@ -476,14 +508,15 @@ fn test_livekit_config_with_empty_listen_participants() {
         listen_participants: vec![],
     };
 
+    // LiveKit config now uses TTS config for audio format (publishing)
     let tts_ws_config = TTSWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
-        speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
-        connection_timeout: Some(30),
-        request_timeout: Some(60),
+        voice_id: None,
+        speaking_rate: None,
+        audio_format: None,
+        sample_rate: Some(24000),
+        connection_timeout: None,
+        request_timeout: None,
         model: "".to_string(),
         pronunciations: Vec::new(),
     };
@@ -510,14 +543,15 @@ fn test_livekit_config_with_listen_participants() {
         listen_participants: vec!["user-123".to_string(), "user-456".to_string()],
     };
 
+    // LiveKit config now uses TTS config for audio format (publishing)
     let tts_ws_config = TTSWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
-        speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
-        connection_timeout: Some(30),
-        request_timeout: Some(60),
+        voice_id: None,
+        speaking_rate: None,
+        audio_format: None,
+        sample_rate: Some(24000),
+        connection_timeout: None,
+        request_timeout: None,
         model: "".to_string(),
         pronunciations: Vec::new(),
     };

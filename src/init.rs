@@ -6,6 +6,7 @@
 //!
 //! - **stt-vad**: Smart-turn model and Silero-VAD model for voice activity
 //!   detection with integrated turn detection
+//! - **noise-filter**: DeepFilterNet ONNX models for real-time noise suppression
 //!
 //! Typical usage from the CLI:
 //!
@@ -28,21 +29,26 @@
 use anyhow::Result;
 use anyhow::anyhow;
 
-#[cfg(feature = "stt-vad")]
+#[cfg(any(feature = "stt-vad", feature = "noise-filter"))]
 use crate::config::ServerConfig;
+#[cfg(any(feature = "stt-vad", feature = "noise-filter"))]
+use anyhow::Context;
+
 #[cfg(feature = "stt-vad")]
 use crate::core::turn_detect::{MODEL_FILENAME, TurnDetectorConfig, assets as turn_assets};
 #[cfg(feature = "stt-vad")]
 use crate::core::vad::{SileroVADConfig, assets as vad_assets};
-#[cfg(feature = "stt-vad")]
-use anyhow::Context;
+
+#[cfg(feature = "noise-filter")]
+use crate::core::noise_filter::{NoiseFilterConfig, assets as noise_filter_assets};
 
 /// Download and prepare all assets required for runtime execution.
 ///
 /// Downloads models for enabled features:
 /// - Turn detection model (if `stt-vad` feature is enabled)
 /// - Silero-VAD model (if `stt-vad` feature is enabled)
-#[cfg(feature = "stt-vad")]
+/// - DeepFilterNet models (if `noise-filter` feature is enabled)
+#[cfg(any(feature = "stt-vad", feature = "noise-filter"))]
 pub async fn run() -> Result<()> {
     let config = ServerConfig::from_env().map_err(|e| anyhow!(e.to_string()))?;
     let cache_path = config
@@ -100,6 +106,30 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Download noise filter assets
+    #[cfg(feature = "noise-filter")]
+    {
+        tracing::info!("Downloading DeepFilterNet models...");
+        let noise_filter_config = NoiseFilterConfig {
+            cache_path: Some(cache_path.clone()),
+            ..Default::default()
+        };
+        match noise_filter_assets::download_assets(&noise_filter_config).await {
+            Ok(_) => tracing::info!("DeepFilterNet models downloaded successfully."),
+            Err(e) => {
+                tracing::error!("Failed to download DeepFilterNet models: {}", e);
+                tracing::error!(
+                    "You can manually download from: https://github.com/Rikorose/DeepFilterNet/raw/main/models/DeepFilterNet3_ll_onnx.tar.gz"
+                );
+                tracing::error!(
+                    "Extract and place files at: {:?}",
+                    cache_path.join("noise_filter")
+                );
+                return Err(e);
+            }
+        }
+    }
+
     // Verify downloaded assets
     verify_assets(&cache_path).await?;
 
@@ -108,7 +138,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// Verify that all required assets are present.
-#[cfg(feature = "stt-vad")]
+#[cfg(any(feature = "stt-vad", feature = "noise-filter"))]
 async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
     tracing::info!("Verifying downloaded assets...");
 
@@ -136,15 +166,42 @@ async fn verify_assets(cache_path: &std::path::Path) -> Result<()> {
         tracing::info!("  Silero-VAD: OK");
     }
 
+    #[cfg(feature = "noise-filter")]
+    {
+        use crate::core::noise_filter::config::{
+            CONFIG_FILENAME, DF_DEC_MODEL_FILENAME, ENC_MODEL_FILENAME, ERB_DEC_MODEL_FILENAME,
+        };
+
+        let noise_filter_dir = cache_path.join("noise_filter");
+        for filename in [
+            ENC_MODEL_FILENAME,
+            ERB_DEC_MODEL_FILENAME,
+            DF_DEC_MODEL_FILENAME,
+            CONFIG_FILENAME,
+        ] {
+            let model_path = noise_filter_dir.join(filename);
+            if !model_path.exists() {
+                anyhow::bail!(
+                    "DeepFilterNet {} missing at {:?}. Download may have failed.",
+                    filename,
+                    model_path
+                );
+            }
+        }
+        tracing::info!("  DeepFilterNet: OK");
+    }
+
     Ok(())
 }
 
-#[cfg(not(feature = "stt-vad"))]
+#[cfg(not(any(feature = "stt-vad", feature = "noise-filter")))]
 pub async fn run() -> Result<()> {
     Err(anyhow!(
-        "`sayna init` requires the `stt-vad` feature:\n\
-         - `stt-vad`: Download turn detection and Silero-VAD models\n\n\
-         Rebuild with the feature enabled, for example:\n\
-         cargo build --features stt-vad"
+        "`sayna init` requires at least one of these features:\n\
+         - `stt-vad`: Download turn detection and Silero-VAD models\n\
+         - `noise-filter`: Download DeepFilterNet noise suppression models\n\n\
+         Rebuild with a feature enabled, for example:\n\
+         cargo build --features stt-vad\n\
+         cargo build --features noise-filter"
     ))
 }

@@ -36,6 +36,10 @@ const PROVIDER_READY_TIMEOUT_SECS: u64 = 30;
 /// Maximum wait time for LiveKit audio source (in milliseconds)
 const LIVEKIT_AUDIO_WAIT_MS: u64 = 10000;
 
+/// Bounded channel capacity for LiveKit audio frames (backpressure threshold)
+/// At 100 frames/sec (10ms per frame), this provides ~500ms of buffering
+const LIVEKIT_AUDIO_CHANNEL_CAPACITY: usize = 50;
+
 /// Polling interval for LiveKit audio source check (in milliseconds)
 const LIVEKIT_POLL_INTERVAL_MS: u64 = 100;
 
@@ -292,11 +296,20 @@ async fn initialize_voice_manager(
 
     // Create voice manager configuration
     // VAD is automatically enabled when the stt-vad feature is compiled
+    // Noise filtering is automatically enabled when noise-filter feature is compiled
     let voice_config = VoiceManagerConfig::new(stt_config.clone(), tts_config.clone());
 
-    // Log that VAD is auto-enabled when feature is compiled
+    // Log feature status
     #[cfg(feature = "stt-vad")]
     info!("VAD automatically enabled (stt-vad feature compiled)");
+
+    #[cfg(feature = "noise-filter")]
+    info!(
+        "Noise filtering enabled (sample_rate={}Hz)",
+        voice_config.noise_filter_config.sample_rate
+    );
+    #[cfg(not(feature = "noise-filter"))]
+    debug!("Noise filtering disabled (noise-filter feature not compiled)");
 
     let turn_detector = app_state.core_state.get_turn_detector();
 
@@ -681,12 +694,19 @@ async fn register_final_tts_callback(
 /// Initialize LiveKit client and set up callbacks
 ///
 /// # Arguments
+/// * `livekit_ws_config` - LiveKit WebSocket configuration
+/// * `tts_config` - TTS configuration for audio format parameters (sample rate for output audio)
+/// * `livekit_url` - LiveKit server URL
+/// * `voice_manager` - Optional VoiceManager for audio processing
+/// * `message_tx` - Channel for sending WebSocket messages
+/// * `room_handler` - Optional LiveKit room handler
+/// * `stream_id` - Stream identifier for recording
 /// * `auth_id` - Optional tenant identifier. If provided, enforced via room metadata
 ///   to prevent cross-tenant room access.
 #[allow(clippy::too_many_arguments)]
 async fn initialize_livekit_client(
     livekit_ws_config: LiveKitWebSocketConfig,
-    tts_config: Option<&TTSWebSocketConfig>,
+    tts_ws_config: Option<&TTSWebSocketConfig>,
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -868,19 +888,20 @@ async fn initialize_livekit_client(
     };
 
     // Use default TTS config for LiveKit audio parameters when TTS is not configured
+    // TTS config drives the output audio format (sample rate) for the publish pipeline
     let default_tts_config = TTSWebSocketConfig {
         provider: "deepgram".to_string(),
         voice_id: None,
         speaking_rate: None,
         audio_format: None,
-        sample_rate: Some(24000), // Default sample rate for LiveKit
+        sample_rate: Some(24000), // Standard TTS sample rate
         connection_timeout: None,
         request_timeout: None,
-        model: "".to_string(),
+        model: "aura-asteria-en".to_string(),
         pronunciations: Vec::new(),
     };
 
-    let tts_config_for_livekit = tts_config.unwrap_or(&default_tts_config);
+    let tts_config_for_livekit = tts_ws_config.unwrap_or(&default_tts_config);
     let livekit_config =
         livekit_ws_config.to_livekit_config(agent_token, tts_config_for_livekit, livekit_url);
     let mut livekit_client = LiveKitClient::new(livekit_config);
@@ -931,33 +952,50 @@ async fn initialize_livekit_client(
     ))
 }
 
-/// Set up LiveKit audio callback to forward audio to STT
+/// Set up LiveKit audio callback to forward audio to STT with bounded backpressure
+///
+/// Uses a bounded channel with a single worker task to prevent unbounded task spawning
+/// per audio frame. When the channel is full, frames are dropped and logged.
 fn setup_livekit_audio_callback(
     livekit_client: &mut LiveKitClient,
     voice_manager: &Arc<VoiceManager>,
     message_tx: &mpsc::Sender<MessageRoute>,
 ) {
-    let voice_manager_clone = voice_manager.clone();
-    let message_tx_clone = message_tx.clone();
+    // Create bounded channel for backpressure control
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(LIVEKIT_AUDIO_CHANNEL_CAPACITY);
 
-    livekit_client.set_audio_callback(move |audio_data: Vec<u8>| {
-        let voice_manager = voice_manager_clone.clone();
-        let message_tx = message_tx_clone.clone();
-
-        // Direct processing - spawn lightweight task for async processing
-        tokio::spawn(async move {
-            debug!("Received LiveKit audio: {} bytes", audio_data.len());
+    // Spawn single worker task that processes audio frames sequentially
+    let voice_manager_worker = voice_manager.clone();
+    let message_tx_worker = message_tx.clone();
+    tokio::spawn(async move {
+        debug!("LiveKit audio worker started");
+        while let Some(audio_data) = audio_rx.recv().await {
+            debug!("Processing LiveKit audio: {} bytes", audio_data.len());
 
             // Forward LiveKit audio to the same STT processing pipeline
-            if let Err(e) = voice_manager.receive_audio(audio_data).await {
+            if let Err(e) = voice_manager_worker.receive_audio(audio_data).await {
                 error!("Failed to process LiveKit audio: {:?}", e);
-                let _ = message_tx
+                let _ = message_tx_worker
                     .send(MessageRoute::Outgoing(OutgoingMessage::Error {
                         message: format!("Failed to process LiveKit audio: {e:?}"),
                     }))
                     .await;
             }
-        });
+        }
+        debug!("LiveKit audio worker stopped");
+    });
+
+    // Set up callback that sends to bounded channel (non-blocking)
+    livekit_client.set_audio_callback(move |audio_data: Vec<u8>| {
+        // Use try_send for non-blocking send with backpressure
+        if let Err(mpsc::error::TrySendError::Full(_)) = audio_tx.try_send(audio_data) {
+            // Channel full - log and drop frame to prevent unbounded growth
+            warn!(
+                "LiveKit audio backpressure: dropping frame (channel capacity: {})",
+                LIVEKIT_AUDIO_CHANNEL_CAPACITY
+            );
+        }
+        // Note: TrySendError::Closed would mean the worker exited, which is expected on shutdown
     });
 }
 

@@ -7,14 +7,10 @@ pub struct LiveKitConfig {
     pub token: String,
     /// Room name (extracted from token or provided separately)
     pub room_name: String,
-    /// Sample rate for audio publishing (from TTS config)
+    /// Sample rate for audio (from STT config, used for input audio format)
     pub sample_rate: u32,
-    /// Number of audio channels for publishing (typically 1 for mono)
+    /// Number of audio channels (from STT config, used for input audio format)
     pub channels: u16,
-    /// Enable noise filtering on incoming audio (default: enabled when the `noise-filter`
-    /// feature is compiled in). Set to `false` to reduce latency when filtering is
-    /// available.
-    pub enable_noise_filter: bool,
     /// List of participant identities to listen to for audio tracks and data messages.
     ///
     /// If empty, all participants' audio and data will be processed.

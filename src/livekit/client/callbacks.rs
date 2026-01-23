@@ -27,7 +27,6 @@ impl LiveKitClient {
     /// #     room_name: "test-room".to_string(),
     /// #     sample_rate: 24000,
     /// #     channels: 1,
-    /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
     /// #     listen_participants: vec![],
     /// # });
     /// client.set_audio_callback(|audio_data: Vec<u8>| {
@@ -59,7 +58,6 @@ impl LiveKitClient {
     /// #     room_name: "test-room".to_string(),
     /// #     sample_rate: 24000,
     /// #     channels: 1,
-    /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
     /// #     listen_participants: vec![],
     /// # });
     /// client.set_data_callback(|data_message: DataMessage| {

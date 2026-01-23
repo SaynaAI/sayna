@@ -64,6 +64,24 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow!("Failed to install default crypto provider"))?;
 
+    // Initialize ONNX Runtime environment before any concurrent session creation.
+    // This prevents mutex poisoning when multiple threads try to lazily initialize
+    // the ORT environment simultaneously (e.g., noise filter workers, VAD, turn detection).
+    //
+    // IMPORTANT: ort::init().commit() only sets configuration options - it does NOT
+    // create the environment. The environment is created lazily on first SessionBuilder::new().
+    // We must trigger this creation synchronously at startup to avoid race conditions.
+    #[cfg(any(feature = "noise-filter", feature = "stt-vad"))]
+    {
+        ort::init().commit();
+        // Force environment creation by instantiating a SessionBuilder.
+        // This triggers the lazy initialization of G_ENV before any concurrent access.
+        // The builder is immediately dropped since we just need the side effect.
+        let _ = ort::session::builder::SessionBuilder::new()
+            .map_err(|e| anyhow!("Failed to initialize ONNX Runtime environment: {}", e))?;
+        tracing::info!("ONNX Runtime environment initialized");
+    }
+
     // Parse CLI arguments
     let cli = Cli::parse();
 

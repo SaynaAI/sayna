@@ -23,13 +23,14 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Configure LiveKit connection
+//!     // Note: Noise filtering is handled centrally in VoiceManager::receive_audio,
+//!     // not in LiveKit config. LiveKit forwards raw audio to VoiceManager.
 //!     let config = LiveKitConfig {
 //!         url: "wss://your-livekit-server.com".to_string(),
 //!         token: "your-jwt-token".to_string(),
 //!         room_name: "your-room".to_string(),
 //!         sample_rate: 24000,
 //!         channels: 1,
-//!         enable_noise_filter: cfg!(feature = "noise-filter"),
 //!         listen_participants: vec![],
 //!     };
 //!
@@ -110,13 +111,12 @@ mod tests {
             room_name: "test-room".to_string(),
             sample_rate: 24000,
             channels: 1,
-            enable_noise_filter: cfg!(feature = "noise-filter"),
             listen_participants: vec![],
         };
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
-        assert_eq!(config.enable_noise_filter, cfg!(feature = "noise-filter"));
+        assert_eq!(config.room_name, "test-room");
     }
 
     #[test]

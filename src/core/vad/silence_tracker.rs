@@ -98,8 +98,9 @@ impl Default for SilenceTrackerConfig {
     fn default() -> Self {
         Self {
             threshold: 0.5,
-            // PipeCat recommends stop_secs=0.2 (200ms) for optimal Smart-Turn performance
-            silence_duration_ms: 200,
+            // Increased from 200ms to 500ms for longer conversations.
+            // Natural speech pauses (200-400ms) shouldn't trigger premature turn detection.
+            silence_duration_ms: 500,
             // Increased from 100ms to 250ms to filter out brief filler sounds
             min_speech_duration_ms: 250,
             frame_duration_ms: 32.0, // 512 samples at 16kHz
@@ -379,6 +380,35 @@ impl SilenceTracker {
     pub fn config(&self) -> &SilenceTrackerConfig {
         &self.config
     }
+
+    /// Allow TurnEnd to fire again after Smart-Turn returns Incomplete.
+    ///
+    /// This method resets the TurnEnd latch and reduces accumulated silence
+    /// to enforce a retry delay. After calling this, TurnEnd can fire again
+    /// once additional silence accumulates past the threshold.
+    ///
+    /// # Arguments
+    /// * `additional_silence_ms` - Amount to subtract from accumulated silence (ms).
+    ///   This enforces a minimum wait before the next TurnEnd can fire.
+    pub fn allow_turn_end_retry(&self, additional_silence_ms: u64) {
+        // Reset the TurnEnd latch so it can fire again
+        self.turn_end_fired.store(false, Ordering::Release);
+
+        // Reduce accumulated silence to enforce retry delay
+        let previous_silence = self
+            .silence_duration_ms
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(additional_silence_ms))
+            })
+            .unwrap_or(0);
+
+        let new_silence = previous_silence.saturating_sub(additional_silence_ms);
+
+        debug!(
+            "SilenceTracker: allow_turn_end_retry called, silence adjusted from {}ms to {}ms (subtracted {}ms)",
+            previous_silence, new_silence, additional_silence_ms
+        );
+    }
 }
 
 impl Default for SilenceTracker {
@@ -395,8 +425,8 @@ mod tests {
     fn test_default_config() {
         let config = SilenceTrackerConfig::default();
         assert_eq!(config.threshold, 0.5);
-        // Updated to PipeCat-recommended values
-        assert_eq!(config.silence_duration_ms, 200); // stop_secs=0.2
+        // Increased to 500ms for longer conversations (was 200ms)
+        assert_eq!(config.silence_duration_ms, 500);
         assert_eq!(config.min_speech_duration_ms, 250); // Increased to filter filler sounds
         assert_eq!(config.frame_duration_ms, 32.0);
     }
@@ -860,5 +890,111 @@ mod tests {
         let event = tracker.process(0.2);
         assert_eq!(event, Some(VADEvent::TurnEnd));
         assert!(tracker.current_silence_ms() >= 64);
+    }
+
+    #[test]
+    fn test_allow_turn_end_retry_resets_latch_and_reduces_silence() {
+        let config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64, // 2 frames
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let tracker = SilenceTracker::new(config);
+
+        // Build up speech and trigger TurnEnd
+        tracker.process(0.8); // SpeechStart
+        tracker.process(0.2); // SilenceDetected (32ms silence)
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd)); // 64ms silence
+
+        // TurnEnd has fired, so more silence shouldn't trigger it again
+        assert_eq!(tracker.process(0.2), None); // 96ms silence
+        let silence_before = tracker.current_silence_ms();
+        assert_eq!(silence_before, 96);
+
+        // Call allow_turn_end_retry to reset the latch and reduce silence
+        tracker.allow_turn_end_retry(50);
+
+        // Verify silence was reduced
+        let silence_after = tracker.current_silence_ms();
+        assert_eq!(silence_after, 46); // 96 - 50 = 46
+    }
+
+    #[test]
+    fn test_allow_turn_end_retry_enables_turn_end_to_fire_again() {
+        let config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64, // 2 frames
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let tracker = SilenceTracker::new(config);
+
+        // Build up speech and trigger first TurnEnd
+        tracker.process(0.8); // SpeechStart
+        tracker.process(0.2); // SilenceDetected (32ms)
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd)); // 64ms
+
+        // More silence should NOT trigger TurnEnd again
+        assert_eq!(tracker.process(0.2), None); // 96ms
+        assert_eq!(tracker.process(0.2), None); // 128ms
+
+        // Allow retry with reduction that puts us below threshold
+        // Current silence is 128ms, reduce by 100ms to get 28ms
+        tracker.allow_turn_end_retry(100);
+        assert_eq!(tracker.current_silence_ms(), 28);
+
+        // Now accumulate silence until threshold is reached again
+        assert_eq!(tracker.process(0.2), None); // 60ms (still below 64ms)
+        // Next frame should trigger TurnEnd (60 + 32 = 92ms >= 64ms)
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd));
+    }
+
+    #[test]
+    fn test_allow_turn_end_retry_saturating_sub() {
+        let config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64,
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let tracker = SilenceTracker::new(config);
+
+        // Build up a small amount of silence
+        tracker.process(0.8); // SpeechStart
+        tracker.process(0.2); // 32ms silence
+
+        // Try to subtract more than accumulated silence
+        tracker.allow_turn_end_retry(1000);
+
+        // Should saturate at 0, not underflow
+        assert_eq!(tracker.current_silence_ms(), 0);
+    }
+
+    #[test]
+    fn test_allow_turn_end_retry_multiple_retries() {
+        let config = SilenceTrackerConfig {
+            threshold: 0.5,
+            silence_duration_ms: 64, // 2 frames
+            min_speech_duration_ms: 32,
+            frame_duration_ms: 32.0,
+        };
+        let tracker = SilenceTracker::new(config);
+
+        // Build up speech and trigger first TurnEnd
+        tracker.process(0.8); // SpeechStart
+        tracker.process(0.2); // SilenceDetected
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd)); // First TurnEnd
+
+        // Allow retry and accumulate to second TurnEnd
+        tracker.allow_turn_end_retry(64); // Reset silence to 0
+        assert_eq!(tracker.current_silence_ms(), 0);
+        tracker.process(0.2); // 32ms
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd)); // Second TurnEnd
+
+        // Allow retry and accumulate to third TurnEnd
+        tracker.allow_turn_end_retry(64);
+        tracker.process(0.2); // 32ms
+        assert_eq!(tracker.process(0.2), Some(VADEvent::TurnEnd)); // Third TurnEnd
     }
 }

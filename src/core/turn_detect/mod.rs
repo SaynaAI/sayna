@@ -19,7 +19,7 @@
 //!
 //! // Or use builder for custom config
 //! let detector = TurnDetectorBuilder::new()
-//!     .threshold(0.6)
+//!     .threshold(0.9)
 //!     .num_threads(2)
 //!     .build()
 //!     .await?;

@@ -7,14 +7,16 @@ use super::callbacks::STTCallback;
 use super::utils::get_current_time_ms;
 
 /// Internal state for managing speech final timing
+///
+/// This simplified state removes all timeout-based task handles. Speech final events
+/// are ONLY emitted when:
+/// 1. STT provider sends a real `is_speech_final=true` event
+/// 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
+///
 /// Uses parking_lot RwLock for faster synchronization and optimized field layout
 pub struct SpeechFinalState {
     /// Combined text buffer from STT results
     pub text_buffer: String,
-    /// Turn detection task handle
-    pub turn_detection_handle: Option<JoinHandle<()>>,
-    /// Hard timeout task handle - cancels when real speech_final arrives
-    pub hard_timeout_handle: Option<JoinHandle<()>>,
     /// Whether we're currently waiting for speech_final - atomic for lock-free reads
     pub waiting_for_speech_final: AtomicBool,
     /// User callback to call when turn detection completes
@@ -23,10 +25,6 @@ pub struct SpeechFinalState {
     pub turn_detection_last_fired_ms: AtomicUsize,
     /// Last text that was force-finalized by turn detection
     pub last_forced_text: String,
-    /// Timestamp (ms since epoch) when first is_final frame of current utterance arrived
-    pub segment_start_ms: AtomicUsize,
-    /// Hard timeout deadline (ms since epoch) - when the hard timeout will fire
-    pub hard_timeout_deadline_ms: AtomicUsize,
 
     // ─────────────────────────────────────────────────────────────────────────
     // VAD-based silence tracking state
@@ -44,6 +42,22 @@ pub struct SpeechFinalState {
     /// to run turn detection on the accumulated text. This handle allows
     /// cancellation if new speech arrives.
     pub vad_turn_detection_handle: Option<JoinHandle<()>>,
+
+    /// Whether a speaking turn is currently in progress.
+    ///
+    /// This flag is set to true on the first SpeechStart of a new turn and
+    /// remains true until the turn is confirmed complete (Smart-Turn returns true
+    /// or real speech_final is received). This prevents audio buffer clearing
+    /// during brief pauses mid-turn, which would cause the model to lose context
+    /// and trigger false positives (fixes Pipecat issue #3094).
+    pub turn_in_progress: AtomicBool,
+
+    /// Task handle for backup silence timeout.
+    ///
+    /// When Smart-Turn returns Incomplete, a backup timeout is started. If the
+    /// user remains silent for this duration, a speech_final is forced. This
+    /// handle allows cancellation if speech resumes or Smart-Turn runs again.
+    pub backup_timeout_handle: Option<JoinHandle<()>>,
 }
 
 impl SpeechFinalState {
@@ -51,16 +65,14 @@ impl SpeechFinalState {
     pub fn new() -> Self {
         Self {
             text_buffer: String::new(),
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
             turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::new(),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
+            turn_in_progress: AtomicBool::new(false),
+            backup_timeout_handle: None,
         }
     }
 
@@ -75,10 +87,13 @@ impl SpeechFinalState {
     /// Reset VAD-specific state for a new speech segment.
     ///
     /// Call this when speech resumes (VADEvent::SpeechStart or SpeechResumed)
-    /// to clear the VAD turn detection state.
+    /// to clear the VAD turn detection state and cancel any pending backup timeout.
     pub fn reset_vad_state(&mut self) {
         self.vad_turn_end_detected.store(false, Ordering::Release);
         if let Some(handle) = self.vad_turn_detection_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.backup_timeout_handle.take() {
             handle.abort();
         }
     }
@@ -88,14 +103,6 @@ impl SpeechFinalState {
     /// If `keep_fired_stats` is true, preserves `last_forced_text` and
     /// `turn_detection_last_fired_ms` (used after firing to prevent duplicates).
     fn reset_internal(&mut self, keep_fired_stats: bool) {
-        // Abort and clear handles
-        if let Some(handle) = self.turn_detection_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.hard_timeout_handle.take() {
-            handle.abort();
-        }
-
         // Reset VAD state
         self.reset_vad_state();
 
@@ -105,8 +112,9 @@ impl SpeechFinalState {
         // Reset timing state
         self.waiting_for_speech_final
             .store(false, Ordering::Release);
-        self.segment_start_ms.store(0, Ordering::Release);
-        self.hard_timeout_deadline_ms.store(0, Ordering::Release);
+
+        // Reset turn-in-progress flag - turn is complete
+        self.turn_in_progress.store(false, Ordering::Release);
 
         // Conditionally clear fired stats
         if !keep_fired_stats {

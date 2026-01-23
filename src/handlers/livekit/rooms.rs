@@ -296,6 +296,7 @@ fn participant_kind_to_string(kind: i32) -> String {
         Ok(participant_info::Kind::Egress) => "EGRESS".to_string(),
         Ok(participant_info::Kind::Sip) => "SIP".to_string(),
         Ok(participant_info::Kind::Agent) => "AGENT".to_string(),
+        Ok(participant_info::Kind::Connector) => "CONNECTOR".to_string(),
         Err(_) => "UNKNOWN".to_string(),
     }
 }

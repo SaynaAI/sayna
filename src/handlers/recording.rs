@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use object_store::{Error as ObjectStoreError, ObjectStore, path::Path as ObjectPath};
+use object_store::{Error as ObjectStoreError, ObjectStoreExt, path::Path as ObjectPath};
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error, info};

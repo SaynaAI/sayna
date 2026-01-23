@@ -136,8 +136,9 @@ volumes:
 ## Persistent Cache
 
 Mount a volume to `/data/cache` (or your configured `CACHE_PATH`) to persist:
-- VAD and turn detection model assets
-- Cached TTS audio outputs
+- **Noise filter model assets** - DeepFilterNet3 ONNX models (downloaded on first use when `noise-filter` feature is enabled)
+- **VAD and turn detection model assets** - Silero-VAD and smart-turn ONNX models
+- **Cached TTS audio outputs** - Previously synthesized audio for faster repeated requests
 
 ```bash
 docker run -d \
@@ -147,6 +148,19 @@ docker run -d \
   -v sayna-cache:/data/cache \
   saynaai/sayna
 ```
+
+**Note:** When the `noise-filter` feature is enabled, DeepFilterNet3 ONNX models are automatically downloaded from [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) to the cache directory on first use. Persisting the cache volume avoids re-downloading models on container restarts.
+
+**Noise filter model directory structure:**
+```
+<cache_path>/noise_filter/
+├── enc.onnx        # Encoder model
+├── erb_dec.onnx    # ERB decoder model
+├── df_dec.onnx     # Deep filter decoder model
+└── config.ini      # Model configuration (fft_size, hop_size, etc.)
+```
+
+The noise filter operates at 48kHz internally and automatically resamples audio from/to the configured sample rate.
 
 ## Health Check
 
@@ -189,9 +203,9 @@ Then send a WebSocket config with `audio_disabled: true`:
 
 The default image includes:
 - **VAD + Turn Detection** - Silero-VAD voice activity detection with ONNX-based turn detection
-- **Noise Filter** - DeepFilterNet noise suppression
+- **Noise Filter** - DeepFilterNet3 noise suppression via ONNX Runtime (ORT)
 
-Pre-downloaded model assets are included in the image.
+Pre-downloaded model assets are included in the image. The noise filter uses DeepFilterNet3 low-latency ONNX models for real-time noise suppression with automatic resampling to 48kHz internally.
 
 ## Architecture
 
