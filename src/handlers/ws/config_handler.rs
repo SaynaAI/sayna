@@ -159,7 +159,7 @@ pub async fn handle_config_message(
 
             match initialize_livekit_client(
                 livekit_ws_config,
-                stt_ws_config.as_ref(),
+                tts_ws_config.as_ref(),
                 &app_state.config.livekit_url,
                 voice_manager.as_ref(),
                 message_tx,
@@ -695,7 +695,7 @@ async fn register_final_tts_callback(
 ///
 /// # Arguments
 /// * `livekit_ws_config` - LiveKit WebSocket configuration
-/// * `stt_config` - STT configuration for audio format parameters (sample rate, channels)
+/// * `tts_config` - TTS configuration for audio format parameters (sample rate for output audio)
 /// * `livekit_url` - LiveKit server URL
 /// * `voice_manager` - Optional VoiceManager for audio processing
 /// * `message_tx` - Channel for sending WebSocket messages
@@ -706,7 +706,7 @@ async fn register_final_tts_callback(
 #[allow(clippy::too_many_arguments)]
 async fn initialize_livekit_client(
     livekit_ws_config: LiveKitWebSocketConfig,
-    stt_config: Option<&STTWebSocketConfig>,
+    tts_ws_config: Option<&TTSWebSocketConfig>,
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -887,21 +887,23 @@ async fn initialize_livekit_client(
         None
     };
 
-    // Use default STT config for LiveKit audio parameters when STT is not configured
-    // STT config drives the input audio format (sample rate, channels) for the receive pipeline
-    let default_stt_config = STTWebSocketConfig {
+    // Use default TTS config for LiveKit audio parameters when TTS is not configured
+    // TTS config drives the output audio format (sample rate) for the publish pipeline
+    let default_tts_config = TTSWebSocketConfig {
         provider: "deepgram".to_string(),
-        language: "en-US".to_string(),
-        sample_rate: 16000, // Standard STT sample rate
-        channels: 1,        // Mono audio for STT
-        punctuation: true,
-        encoding: "linear16".to_string(),
-        model: "nova-2".to_string(),
+        voice_id: None,
+        speaking_rate: None,
+        audio_format: None,
+        sample_rate: Some(24000), // Standard TTS sample rate
+        connection_timeout: None,
+        request_timeout: None,
+        model: "aura-asteria-en".to_string(),
+        pronunciations: Vec::new(),
     };
 
-    let stt_config_for_livekit = stt_config.unwrap_or(&default_stt_config);
+    let tts_config_for_livekit = tts_ws_config.unwrap_or(&default_tts_config);
     let livekit_config =
-        livekit_ws_config.to_livekit_config(agent_token, stt_config_for_livekit, livekit_url);
+        livekit_ws_config.to_livekit_config(agent_token, tts_config_for_livekit, livekit_url);
     let mut livekit_client = LiveKitClient::new(livekit_config);
 
     // Set up audio callback to forward to STT processing

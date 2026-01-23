@@ -5,17 +5,23 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use tar::Archive;
 use tokio::fs;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{error, info};
 
 use super::config::{
     CONFIG_FILENAME, DF_DEC_MODEL_FILENAME, ENC_MODEL_FILENAME, ERB_DEC_MODEL_FILENAME,
     NoiseFilterConfig,
 };
+
+/// Global lock for coordinating asset downloads across threads.
+/// Prevents race conditions when multiple threads call `ensure_assets` concurrently.
+static DOWNLOAD_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 /// Required files that must be present in the model directory.
 const REQUIRED_FILES: [&str; 4] = [
@@ -33,6 +39,10 @@ pub async fn download_assets(config: &NoiseFilterConfig) -> Result<()> {
 }
 
 /// Ensure all required assets are available, downloading if necessary.
+///
+/// This function uses double-checked locking to prevent race conditions when
+/// multiple threads attempt to download/extract concurrently. The lock is only
+/// acquired if the models are not already present.
 ///
 /// Returns the path to the model directory containing:
 /// - enc.onnx
@@ -59,13 +69,24 @@ pub async fn ensure_assets(config: &NoiseFilterConfig) -> Result<PathBuf> {
 
     // Use cache directory
     let cache_dir = config.get_cache_dir()?;
-    fs::create_dir_all(&cache_dir).await?;
 
-    // Check if already cached
+    // Quick check without lock - if already cached, return immediately
     if verify_model_directory(&cache_dir)? {
         info!("Using cached DeepFilterNet models at: {:?}", cache_dir);
         return Ok(cache_dir);
     }
+
+    // Acquire global lock for download/extract coordination
+    let _guard = DOWNLOAD_LOCK.lock().await;
+
+    // Re-check after acquiring lock (another thread may have completed download)
+    if verify_model_directory(&cache_dir)? {
+        info!("Using cached DeepFilterNet models at: {:?}", cache_dir);
+        return Ok(cache_dir);
+    }
+
+    // Create directory (may already exist from partial download)
+    fs::create_dir_all(&cache_dir).await?;
 
     // Download from URL
     let model_url = config
@@ -170,6 +191,7 @@ async fn download_and_extract(url: &str, cache_dir: &Path) -> Result<()> {
 /// └── config.ini
 ///
 /// Files are extracted directly to the cache directory, stripping the top-level directory.
+/// Uses atomic writes (temp file + rename) to prevent corruption from interrupted extractions.
 fn extract_tarball(data: &[u8], dest_dir: &Path) -> Result<()> {
     let gz = GzDecoder::new(data);
     let mut archive = Archive::new(gz);
@@ -196,15 +218,21 @@ fn extract_tarball(data: &[u8], dest_dir: &Path) -> Result<()> {
             continue;
         }
 
+        // Use atomic write: temp file + rename
         let dest_path = dest_dir.join(&filename);
+        let temp_path = dest_dir.join(format!(".{}.tmp", filename));
 
         // Read the file contents
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
 
-        // Write to destination (blocking I/O is acceptable here during init)
-        std::fs::write(&dest_path, &contents)
-            .with_context(|| format!("Failed to write {:?}", dest_path))?;
+        // Write to temp file
+        std::fs::write(&temp_path, &contents)
+            .with_context(|| format!("Failed to write temp file {:?}", temp_path))?;
+
+        // Atomic rename
+        std::fs::rename(&temp_path, &dest_path)
+            .with_context(|| format!("Failed to rename {:?} to {:?}", temp_path, dest_path))?;
 
         info!("Extracted: {}", filename);
     }

@@ -7,6 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::{Notify, RwLock};
+#[cfg(feature = "stt-vad")]
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -45,6 +47,11 @@ const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8; // 8 seconds at 16kHz for tu
 #[cfg(feature = "stt-vad")]
 const VAD_FRAME_BUFFER_CAPACITY: usize = 512; // 512 samples for frame processing
 
+// Bounded channel capacity for VAD processing (backpressure threshold)
+// At ~50 chunks/sec (20ms per chunk), this provides ~320ms of buffering
+#[cfg(feature = "stt-vad")]
+const VAD_CHANNEL_CAPACITY: usize = 16;
+
 /// VoiceManager provides a unified interface for managing STT and TTS providers
 /// Optimized for extreme low-latency with lock-free atomics and pre-allocated buffers
 pub struct VoiceManager {
@@ -79,6 +86,12 @@ pub struct VoiceManager {
     // - buffer_limit_warned: Per-instance flag for logging buffer limit warning once
     #[cfg(feature = "stt-vad")]
     vad_state: Arc<VADState>,
+
+    // Bounded channel for VAD task queue (backpressure control).
+    // Instead of spawning a new task per audio chunk, audio is sent through this
+    // channel to a single worker task that processes VAD sequentially.
+    #[cfg(feature = "stt-vad")]
+    vad_task_tx: Option<mpsc::Sender<Vec<u8>>>,
 
     // Interruption control - mostly lock-free with atomics
     interruption_state: Arc<InterruptionState>,
@@ -275,6 +288,67 @@ impl VoiceManager {
         #[cfg(not(feature = "stt-vad"))]
         let components = Self::initialize_components(&config);
 
+        // Create speech_final_state first so it can be shared with VAD worker
+        let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
+            text_buffer,
+            turn_detection_handle: None,
+            hard_timeout_handle: None,
+            waiting_for_speech_final: AtomicBool::new(false),
+            user_callback: None,
+            turn_detection_last_fired_ms: AtomicUsize::new(0),
+            last_forced_text: String::with_capacity(1024),
+            segment_start_ms: AtomicUsize::new(0),
+            hard_timeout_deadline_ms: AtomicUsize::new(0),
+            // VAD-based silence tracking state
+            vad_turn_end_detected: AtomicBool::new(false),
+            vad_turn_detection_handle: None,
+        }));
+
+        // Create bounded channel for VAD processing and spawn worker task
+        #[cfg(feature = "stt-vad")]
+        let vad_task_tx = if vad.is_some() {
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(VAD_CHANNEL_CAPACITY);
+
+            // Clone components for the worker task
+            let vad_clone = vad.clone();
+            let vad_state_clone = components.vad_state.clone();
+            let silence_tracker_clone = components.silence_tracker.clone();
+            let stt_processor_clone = components.stt_result_processor.clone();
+            let speech_final_state_clone = speech_final_state.clone();
+
+            // Spawn single worker task that processes VAD sequentially
+            tokio::spawn(async move {
+                debug!("VAD worker task started");
+                while let Some(audio) = rx.recv().await {
+                    if let Some(ref vad) = vad_clone {
+                        match super::vad_processor::process_audio_chunk(
+                            &audio,
+                            vad,
+                            &vad_state_clone,
+                            &silence_tracker_clone,
+                        )
+                        .await
+                        {
+                            Ok(events) => {
+                                for event in events {
+                                    stt_processor_clone
+                                        .process_vad_event(event, speech_final_state_clone.clone());
+                                }
+                            }
+                            Err(e) => {
+                                warn!("VAD processing error (STT continues): {:?}", e);
+                            }
+                        }
+                    }
+                }
+                debug!("VAD worker task exiting");
+            });
+
+            Some(tx)
+        } else {
+            None
+        };
+
         Ok(Self {
             tts: Arc::new(RwLock::new(tts)),
             stt: Arc::new(RwLock::new(stt)),
@@ -282,20 +356,7 @@ impl VoiceManager {
             tts_error_callback: Arc::new(SyncRwLock::new(None)),
             audio_clear_callback: Arc::new(SyncRwLock::new(None)),
             tts_complete_callback: Arc::new(SyncRwLock::new(None)),
-            speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
-                text_buffer,
-                turn_detection_handle: None,
-                hard_timeout_handle: None,
-                waiting_for_speech_final: AtomicBool::new(false),
-                user_callback: None,
-                turn_detection_last_fired_ms: AtomicUsize::new(0),
-                last_forced_text: String::with_capacity(1024),
-                segment_start_ms: AtomicUsize::new(0),
-                hard_timeout_deadline_ms: AtomicUsize::new(0),
-                // VAD-based silence tracking state
-                vad_turn_end_detected: AtomicBool::new(false),
-                vad_turn_detection_handle: None,
-            })),
+            speech_final_state,
             stt_result_processor: components.stt_result_processor,
             #[cfg(feature = "stt-vad")]
             vad,
@@ -303,6 +364,8 @@ impl VoiceManager {
             silence_tracker: components.silence_tracker,
             #[cfg(feature = "stt-vad")]
             vad_state: components.vad_state,
+            #[cfg(feature = "stt-vad")]
+            vad_task_tx,
             interruption_state: Arc::new(InterruptionState {
                 allow_interruption: AtomicBool::new(true),
                 non_interruptible_until_ms: AtomicUsize::new(0),
@@ -569,40 +632,25 @@ impl VoiceManager {
 
         // Process audio through VAD when stt-vad feature is compiled.
         // VAD is always active under stt-vad feature - no runtime config switch.
-        // VAD runs concurrently with STT and errors are logged rather than propagated,
-        // ensuring STT always receives audio even if VAD processing fails.
+        // Uses bounded channel with backpressure instead of spawning per-chunk tasks.
+        // This prevents unbounded task accumulation under load.
         #[cfg(feature = "stt-vad")]
-        if let Some(vad) = &self.vad {
-            let vad = vad.clone();
-            let vad_state = self.vad_state.clone();
-            let silence_tracker = self.silence_tracker.clone();
-            let stt_result_processor = self.stt_result_processor.clone();
-            let speech_final_state = self.speech_final_state.clone();
-            let audio_for_vad = processed_audio.clone();
-
-            // Spawn VAD processing as a concurrent task - errors are logged, not propagated
-            tokio::spawn(async move {
-                match super::vad_processor::process_audio_chunk(
-                    &audio_for_vad,
-                    &vad,
-                    &vad_state,
-                    &silence_tracker,
-                )
-                .await
-                {
-                    Ok(events) => {
-                        // Handle each VAD event through the STT result processor
-                        for event in events {
-                            stt_result_processor
-                                .process_vad_event(event, speech_final_state.clone());
-                        }
-                    }
-                    Err(e) => {
-                        // Log VAD errors but don't block STT processing
-                        warn!("VAD processing error (STT continues): {:?}", e);
-                    }
+        if let Some(ref vad_tx) = self.vad_task_tx {
+            match vad_tx.try_send(processed_audio.clone()) {
+                Ok(()) => {
+                    // Audio queued for VAD processing
                 }
-            });
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Channel full - log and drop frame (backpressure)
+                    debug!(
+                        "VAD channel full, dropping audio frame. \
+                         Consider increasing VAD_CHANNEL_CAPACITY if this happens frequently."
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("VAD worker has stopped, skipping VAD processing");
+                }
+            }
         }
 
         // Send audio to STT provider - always executed regardless of VAD outcome
@@ -1186,6 +1234,8 @@ pub mod test_support {
                 vad,
                 silence_tracker,
                 vad_state,
+                // Test-only: No worker task, VAD events processed directly via receive_audio spawn
+                vad_task_tx: None,
                 interruption_state: Arc::new(InterruptionState {
                     allow_interruption: AtomicBool::new(true),
                     non_interruptible_until_ms: AtomicUsize::new(0),
@@ -1271,6 +1321,9 @@ pub mod test_support {
                 silence_tracker: components.silence_tracker,
                 #[cfg(feature = "stt-vad")]
                 vad_state: components.vad_state,
+                // Test-only: No worker task, VAD events processed directly via receive_audio spawn
+                #[cfg(feature = "stt-vad")]
+                vad_task_tx: None,
                 interruption_state: Arc::new(InterruptionState {
                     allow_interruption: AtomicBool::new(true),
                     non_interruptible_until_ms: AtomicUsize::new(0),

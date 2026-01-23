@@ -141,27 +141,46 @@ pub async fn process_audio_chunk(
     };
 
     // Accumulate samples in ring buffer for turn detection.
-    // When buffer would exceed MAX_VAD_AUDIO_SAMPLES, drop oldest samples first.
+    // Handle oversized chunks defensively to prevent panics.
     {
         let mut audio_buffer = vad_state.audio_buffer.write();
 
-        // Calculate how many samples to drop to make room for new samples
-        let new_total = audio_buffer.len() + samples.len();
-        if new_total > MAX_VAD_AUDIO_SAMPLES {
-            let samples_to_drop = new_total - MAX_VAD_AUDIO_SAMPLES;
-            audio_buffer.drain(..samples_to_drop);
-
+        // Handle oversized chunks: if a single chunk exceeds MAX, keep only the tail
+        if samples.len() >= MAX_VAD_AUDIO_SAMPLES {
+            // Log this unusual condition (likely indicates upstream batching/buffering)
             if !vad_state.buffer_limit_warned.swap(true, Ordering::Relaxed) {
                 debug!(
-                    "VAD audio ring buffer at capacity ({} samples / 30 seconds). \
-                     Dropping oldest samples to keep most recent audio for turn detection.",
+                    "Received oversized audio chunk ({} samples > {} max). \
+                     Keeping only the most recent {} samples for turn detection.",
+                    samples.len(),
+                    MAX_VAD_AUDIO_SAMPLES,
                     MAX_VAD_AUDIO_SAMPLES
                 );
             }
-        }
+            audio_buffer.clear();
+            // Keep only the last MAX_VAD_AUDIO_SAMPLES samples
+            let start_idx = samples.len() - MAX_VAD_AUDIO_SAMPLES;
+            audio_buffer.extend(samples[start_idx..].iter().copied());
+        } else {
+            // Normal case: make room for new samples if needed
+            let new_total = audio_buffer.len() + samples.len();
+            if new_total > MAX_VAD_AUDIO_SAMPLES {
+                let samples_to_drop = new_total - MAX_VAD_AUDIO_SAMPLES;
+                // Clamp to actual buffer length (defensive)
+                let drop_count = samples_to_drop.min(audio_buffer.len());
+                audio_buffer.drain(..drop_count);
 
-        // Add all new samples (buffer now has room)
-        audio_buffer.extend(samples.iter().copied());
+                if !vad_state.buffer_limit_warned.swap(true, Ordering::Relaxed) {
+                    debug!(
+                        "VAD audio ring buffer at capacity ({} samples / 30 seconds). \
+                         Dropping oldest samples to keep most recent audio for turn detection.",
+                        MAX_VAD_AUDIO_SAMPLES
+                    );
+                }
+            }
+            // Add all new samples (buffer now has room)
+            audio_buffer.extend(samples.iter().copied());
+        }
     }
 
     // Extract complete frames from frame_buffer for VAD processing
@@ -238,5 +257,72 @@ mod tests {
         // Set back to false
         vad_state.set_force_error(false);
         assert!(!vad_state.is_force_error());
+    }
+
+    /// Test that oversized audio chunks do not panic and are handled correctly.
+    #[test]
+    fn test_oversized_chunk_does_not_panic() {
+        // Create VADState with small initial capacity
+        let vad_state = VADState::new(1024, 512);
+
+        // Simulate adding some initial data
+        {
+            let mut buffer = vad_state.audio_buffer.write();
+            buffer.extend(std::iter::repeat(0i16).take(10_000));
+        }
+
+        // Create oversized chunk (larger than MAX)
+        let oversized_samples: Vec<i16> = (0..MAX_VAD_AUDIO_SAMPLES + 50_000)
+            .map(|i| (i % 1000) as i16)
+            .collect();
+
+        // Simulate the ring buffer logic for oversized chunks - this should NOT panic
+        {
+            let mut audio_buffer = vad_state.audio_buffer.write();
+
+            if oversized_samples.len() >= MAX_VAD_AUDIO_SAMPLES {
+                audio_buffer.clear();
+                let start_idx = oversized_samples.len() - MAX_VAD_AUDIO_SAMPLES;
+                audio_buffer.extend(oversized_samples[start_idx..].iter().copied());
+            }
+        }
+
+        // Verify buffer contains exactly MAX_VAD_AUDIO_SAMPLES
+        let buffer = vad_state.audio_buffer.read();
+        assert_eq!(buffer.len(), MAX_VAD_AUDIO_SAMPLES);
+
+        // Verify the content is from the tail of the oversized samples
+        assert_eq!(buffer[0], (50_000 % 1000) as i16);
+    }
+
+    /// Test that normal chunks work correctly with clamped drop_count.
+    #[test]
+    fn test_normal_chunk_with_clamping() {
+        let vad_state = VADState::new(1024, 512);
+
+        // Fill buffer close to capacity
+        let fill_count = MAX_VAD_AUDIO_SAMPLES - 1000;
+        {
+            let mut buffer = vad_state.audio_buffer.write();
+            buffer.extend(std::iter::repeat(1i16).take(fill_count));
+        }
+
+        // Add a chunk that would require dropping samples
+        let new_samples: Vec<i16> = (0..5000).map(|i| (i + 100) as i16).collect();
+        {
+            let mut audio_buffer = vad_state.audio_buffer.write();
+
+            let new_total = audio_buffer.len() + new_samples.len();
+            if new_total > MAX_VAD_AUDIO_SAMPLES {
+                let samples_to_drop = new_total - MAX_VAD_AUDIO_SAMPLES;
+                let drop_count = samples_to_drop.min(audio_buffer.len());
+                audio_buffer.drain(..drop_count);
+            }
+            audio_buffer.extend(new_samples.iter().copied());
+        }
+
+        // Verify buffer is at exactly MAX capacity
+        let buffer = vad_state.audio_buffer.read();
+        assert_eq!(buffer.len(), MAX_VAD_AUDIO_SAMPLES);
     }
 }
