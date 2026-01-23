@@ -15,9 +15,9 @@ use crate::core::voice_manager::utils::get_current_time_ms;
 #[cfg(not(feature = "stt-vad"))]
 use parking_lot::RwLock as SyncRwLock;
 #[cfg(not(feature = "stt-vad"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(not(feature = "stt-vad"))]
 use std::sync::Arc;
+#[cfg(not(feature = "stt-vad"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(feature = "stt-vad"))]
 use tokio::sync::mpsc;
 
