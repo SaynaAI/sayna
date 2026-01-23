@@ -3,9 +3,9 @@
 //! Handles STT results with VAD-based silence detection. When `stt-vad` is compiled,
 //! VAD mode is always active. All timeout-based fallbacks have been removed.
 //!
-//! Speech final events are ONLY emitted when:
-//! 1. STT provider sends a real `is_speech_final=true` event
-//! 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
+//! Speech final events are emitted based on feature flag:
+//! - When `stt-vad` enabled: VAD + Smart-Turn ONLY (STT provider's is_speech_final is IGNORED)
+//! - When `stt-vad` NOT enabled: STT provider's `is_speech_final` ONLY
 //!
 //! See CLAUDE.md for detailed architecture documentation.
 
@@ -30,6 +30,7 @@ use super::stt_config::STTProcessingConfig;
 use super::turn_detection_tasks;
 #[cfg(feature = "stt-vad")]
 use super::utils::MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION;
+#[cfg(not(feature = "stt-vad"))]
 use super::utils::get_current_time_ms;
 #[cfg(feature = "stt-vad")]
 use super::vad_processor::VADState;
@@ -97,12 +98,28 @@ impl STTResultProcessor {
             return None;
         }
 
-        let now_ms = get_current_time_ms();
-
-        // Handle real speech_final
+        // Handle real speech_final from STT provider.
+        // When stt-vad is enabled, IGNORE this and let VAD + Smart Turn control turn completion.
+        #[cfg(not(feature = "stt-vad"))]
         if result.is_speech_final {
+            let now_ms = get_current_time_ms();
             return self.handle_real_speech_final(result, speech_final_state, now_ms);
         }
+
+        // When stt-vad is enabled, override is_speech_final to false so user only
+        // receives is_speech_final=true from the VAD + Smart Turn path.
+        #[cfg(feature = "stt-vad")]
+        let result = if result.is_speech_final {
+            debug!(
+                "STT provider sent is_speech_final=true, but stt-vad is enabled - overriding to false (VAD controls turn completion)"
+            );
+            STTResult {
+                is_speech_final: false,
+                ..result
+            }
+        } else {
+            result
+        };
 
         // Handle is_final (but not speech_final) - spawn turn detection in background
         if result.is_final {
@@ -173,9 +190,9 @@ impl STTResultProcessor {
 
     /// Handle turn detection by accumulating text and setting waiting flag.
     ///
-    /// No timeout tasks are spawned. Speech final events are ONLY emitted when:
-    /// 1. STT provider sends a real `is_speech_final=true` event
-    /// 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
+    /// No timeout tasks are spawned. The actual speech_final emission depends on feature:
+    /// - When `stt-vad` enabled: VAD + Smart-Turn path controls turn completion
+    /// - When `stt-vad` NOT enabled: STT provider's `is_speech_final` controls turn completion
     fn handle_turn_detection(
         &self,
         result: STTResult,
@@ -194,6 +211,7 @@ impl STTResultProcessor {
         );
     }
 
+    #[cfg(not(feature = "stt-vad"))]
     fn handle_real_speech_final(
         &self,
         result: STTResult,
@@ -217,6 +235,7 @@ impl STTResultProcessor {
         Some(result)
     }
 
+    #[cfg(not(feature = "stt-vad"))]
     fn is_duplicate_speech_final(
         &self,
         state: &SpeechFinalState,

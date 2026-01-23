@@ -1,10 +1,8 @@
 //! Turn detection task spawning logic
 //!
 //! This module contains async task creation for VAD-triggered turn detection.
-//! All timeout-based fallbacks have been removed. Speech final events are ONLY
-//! emitted when:
-//! 1. STT provider sends a real `is_speech_final=true` event
-//! 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
+//! When `stt-vad` is enabled, this is the SOLE source of `is_speech_final=true` events.
+//! STT provider's `is_speech_final` flag is ignored and overridden to false.
 
 #[cfg(feature = "stt-vad")]
 use parking_lot::RwLock as SyncRwLock;

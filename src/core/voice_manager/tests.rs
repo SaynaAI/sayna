@@ -104,6 +104,10 @@ async fn test_voice_manager_callback_registration() {
     assert!(tts_result.is_ok());
 }
 
+// This test verifies STT provider's is_speech_final handling, which is only
+// active when stt-vad is NOT enabled. When stt-vad is enabled, is_speech_final
+// from STT providers is ignored and VAD + Smart Turn controls turn completion.
+#[cfg(not(feature = "stt-vad"))]
 #[tokio::test]
 async fn test_speech_final_timing_control() {
     let stt_config = STTConfig {
@@ -275,6 +279,10 @@ async fn test_speech_final_timing_control() {
     }
 }
 
+// This test verifies duplicate speech_final prevention using STT provider's
+// is_speech_final flag, which is only active when stt-vad is NOT enabled.
+// When stt-vad is enabled, is_speech_final from STT providers is ignored.
+#[cfg(not(feature = "stt-vad"))]
 #[tokio::test]
 async fn test_duplicate_speech_final_prevention() {
     // Test Case 1: Forced speech_final fires, then real speech_final arrives - should prevent duplicate
