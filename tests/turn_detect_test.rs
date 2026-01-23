@@ -292,12 +292,12 @@ mod turn_detector_tests {
     #[ignore = "Requires model files to be downloaded"]
     async fn test_builder_with_custom_threshold() {
         let detector = TurnDetectorBuilder::new()
-            .threshold(0.7)
+            .threshold(0.9)
             .build()
             .await
             .unwrap();
 
-        assert_eq!(detector.get_threshold(), 0.7);
+        assert_eq!(detector.get_threshold(), 0.9);
     }
 
     #[tokio::test]
@@ -1475,8 +1475,8 @@ mod config_tests {
     #[test]
     fn test_config_defaults() {
         let config = TurnDetectorConfig::default();
-        // Increased from 0.5 to 0.6 for better filler sound handling
-        assert_eq!(config.threshold, 0.6);
+        // Increased to 0.9 for high-confidence turn detection only
+        assert_eq!(config.threshold, 0.9);
         assert_eq!(config.sample_rate, 16000);
         assert_eq!(config.max_audio_duration_seconds, 8);
         assert_eq!(config.mel_bins, 80);
@@ -2109,10 +2109,8 @@ mod stt_result_processor_integration_tests {
         // Create VAD state
         let vad_state = create_vad_state();
 
-        // Setup processor with fast timeouts for testing
-        let config = STTProcessingConfig::default()
-            .set_vad_silence_duration_ms(64) // 64ms silence threshold
-            .set_hard_timeout_ms(5000);
+        // Setup processor with VAD settings for testing
+        let config = STTProcessingConfig::default().set_vad_silence_duration_ms(64); // 64ms silence threshold
 
         let processor = STTResultProcessor::with_vad_components(
             config,
@@ -2213,9 +2211,7 @@ mod stt_result_processor_integration_tests {
 
         let vad_state = create_vad_state();
 
-        let config = STTProcessingConfig::default()
-            .set_vad_silence_duration_ms(64)
-            .set_hard_timeout_ms(10000);
+        let config = STTProcessingConfig::default().set_vad_silence_duration_ms(64);
 
         let processor = STTResultProcessor::with_vad_components(
             config,
@@ -2341,13 +2337,10 @@ mod stt_result_processor_integration_tests {
         let vad_state = create_vad_state();
 
         // Use very short inference timeout
-        let config = STTProcessingConfig::new(
-            5000, // stt_speech_final_wait_ms
-            10,   // turn_detection_inference_timeout_ms - VERY SHORT
-            5000, // speech_final_hard_timeout_ms
-            500,  // duplicate_window_ms
-        )
-        .set_vad_silence_duration_ms(64);
+        let config = STTProcessingConfig::default()
+            .set_turn_detection_inference_timeout_ms(10) // VERY SHORT
+            .set_duplicate_window_ms(500)
+            .set_vad_silence_duration_ms(64);
 
         let processor = STTResultProcessor::with_vad_components(
             config,
@@ -2432,13 +2425,10 @@ mod stt_result_processor_integration_tests {
         let vad_state = create_vad_state();
 
         // Use longer inference timeout so we can inject SpeechResumed before it completes
-        let config = STTProcessingConfig::new(
-            5000, // stt_speech_final_wait_ms
-            500,  // turn_detection_inference_timeout_ms - give time to cancel
-            5000, // speech_final_hard_timeout_ms
-            500,  // duplicate_window_ms
-        )
-        .set_vad_silence_duration_ms(64);
+        let config = STTProcessingConfig::default()
+            .set_turn_detection_inference_timeout_ms(500) // give time to cancel
+            .set_duplicate_window_ms(500)
+            .set_vad_silence_duration_ms(64);
 
         let processor = STTResultProcessor::with_vad_components(
             config,
@@ -2958,9 +2948,7 @@ mod stt_result_processor_integration_tests {
 
         let vad_state = create_vad_state();
 
-        let config = STTProcessingConfig::default()
-            .set_vad_silence_duration_ms(64)
-            .set_hard_timeout_ms(10000);
+        let config = STTProcessingConfig::default().set_vad_silence_duration_ms(64);
 
         let processor = STTResultProcessor::with_vad_components(
             config,

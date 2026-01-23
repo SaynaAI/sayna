@@ -139,6 +139,7 @@ impl TurnDetector {
                     total_ms = total_duration.as_secs_f64() * 1000.0,
                     feature_ms = feature_duration.as_secs_f64() * 1000.0,
                     inference_ms = inference_duration.as_secs_f64() * 1000.0,
+                    probability = probability,
                     "Smart-turn prediction took longer than 50ms"
                 );
             }
@@ -259,12 +260,12 @@ mod tests {
     #[tokio::test]
     async fn test_builder_pattern() {
         let builder = TurnDetectorBuilder::new()
-            .threshold(0.6)
+            .threshold(0.9)
             .use_quantized(true)
             .num_threads(2)
             .sample_rate(16000);
 
-        assert!(builder.config.threshold == 0.6);
+        assert!(builder.config.threshold == 0.9);
         assert!(builder.config.use_quantized);
         assert!(builder.config.num_threads == Some(2));
         assert!(builder.config.sample_rate == 16000);

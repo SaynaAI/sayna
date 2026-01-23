@@ -1,18 +1,22 @@
 //! STT result processing with timing control.
 //!
-//! Handles STT results with configurable timing, supporting both timeout-based
-//! and VAD-based silence detection. When `stt-vad` is compiled, VAD mode is
-//! always active. See CLAUDE.md for detailed architecture documentation.
+//! Handles STT results with VAD-based silence detection. When `stt-vad` is compiled,
+//! VAD mode is always active. All timeout-based fallbacks have been removed.
+//!
+//! Speech final events are ONLY emitted when:
+//! 1. STT provider sends a real `is_speech_final=true` event
+//! 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
+//!
+//! See CLAUDE.md for detailed architecture documentation.
 
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 #[cfg(feature = "stt-vad")]
 use tokio::sync::RwLock;
-#[cfg(not(feature = "stt-vad"))]
 use tracing::debug;
 #[cfg(feature = "stt-vad")]
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::core::stt::STTResult;
 #[cfg(feature = "stt-vad")]
@@ -22,6 +26,7 @@ use crate::core::vad::{SilenceTracker, VADEvent};
 
 use super::state::SpeechFinalState;
 use super::stt_config::STTProcessingConfig;
+#[cfg(feature = "stt-vad")]
 use super::turn_detection_tasks;
 #[cfg(feature = "stt-vad")]
 use super::utils::MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION;
@@ -166,101 +171,27 @@ impl STTResultProcessor {
         !(result.transcript.trim().is_empty() && result.is_final && !result.is_speech_final)
     }
 
+    /// Handle turn detection by accumulating text and setting waiting flag.
+    ///
+    /// No timeout tasks are spawned. Speech final events are ONLY emitted when:
+    /// 1. STT provider sends a real `is_speech_final=true` event
+    /// 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
     fn handle_turn_detection(
         &self,
         result: STTResult,
         speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     ) {
-        use tracing::info;
-
-        // Update text buffer and cancel any existing task (person still talking)
-        let (buffered_text, is_new_segment) = {
-            let mut state = speech_final_state.write();
-
-            // CRITICAL: Cancel old task when new is_final arrives - this implements the "timer reset"
-            // The new is_final indicates the person is still talking, so we cancel the old timer
-            // and start a fresh 2800ms timer below
-            if let Some(old_handle) = state.turn_detection_handle.take() {
-                info!(
-                    "Smart fallback timer reset: new is_final arrived, cancelling previous timer and starting fresh"
-                );
-                old_handle.abort();
-            }
-
-            state.text_buffer.push_str(&result.transcript);
-
-            // Check if this is the first is_final for a new segment
-            let is_new = state.segment_start_ms.load(Ordering::Acquire) == 0;
-
-            (state.text_buffer.clone(), is_new)
-        };
-
-        // Create and store NEW detection task handle
-        // When stt-vad is enabled and components are available, use smart fallback
-        #[cfg(feature = "stt-vad")]
-        let detection_handle = {
-            if let (Some(turn_detector), Some(silence_tracker), Some(vad_state)) =
-                (&self.turn_detector, &self.silence_tracker, &self.vad_state)
-            {
-                turn_detection_tasks::create_smart_fallback_task(
-                    &self.config,
-                    buffered_text.clone(),
-                    speech_final_state.clone(),
-                    turn_detector.clone(),
-                    silence_tracker.clone(),
-                    vad_state.clone(),
-                )
-            } else {
-                turn_detection_tasks::create_detection_task(
-                    &self.config,
-                    buffered_text.clone(),
-                    speech_final_state.clone(),
-                )
-            }
-        };
-
-        #[cfg(not(feature = "stt-vad"))]
-        let detection_handle = turn_detection_tasks::create_detection_task(
-            &self.config,
-            buffered_text,
-            speech_final_state.clone(),
-        );
-
+        // Update text buffer and set waiting flag
         let mut state = speech_final_state.write();
-        state.turn_detection_handle = Some(detection_handle);
+        state.text_buffer.push_str(&result.transcript);
         state
             .waiting_for_speech_final
             .store(true, Ordering::Release);
 
-        // Schedule hard-timeout task if this is a new segment
-        if is_new_segment {
-            let now_ms = get_current_time_ms();
-            state.segment_start_ms.store(now_ms, Ordering::Release);
-
-            let deadline_ms = now_ms + self.config.speech_final_hard_timeout_ms as usize;
-            state
-                .hard_timeout_deadline_ms
-                .store(deadline_ms, Ordering::Release);
-
-            debug!(
-                "Starting new speech segment - hard timeout will fire in {}ms at {}",
-                self.config.speech_final_hard_timeout_ms, deadline_ms
-            );
-
-            // Cancel any existing hard timeout task
-            if let Some(old_handle) = state.hard_timeout_handle.take() {
-                debug!("Cancelling previous hard timeout task");
-                old_handle.abort();
-            }
-
-            // Spawn hard timeout task
-            let hard_timeout_handle = turn_detection_tasks::create_hard_timeout_task(
-                &self.config,
-                speech_final_state.clone(),
-                now_ms,
-            );
-            state.hard_timeout_handle = Some(hard_timeout_handle);
-        }
+        debug!(
+            "Accumulated text for turn detection: '{}' (waiting for VAD TurnEnd or real speech_final)",
+            state.text_buffer
+        );
     }
 
     fn handle_real_speech_final(
@@ -392,8 +323,9 @@ impl STTResultProcessor {
 
             state.vad_turn_end_detected.store(true, Ordering::Release);
 
-            if let Some(old_handle) = state.turn_detection_handle.take() {
-                debug!("VAD: Cancelling timeout-based turn detection task");
+            // Cancel any previous VAD turn detection task if still running
+            if let Some(old_handle) = state.vad_turn_detection_handle.take() {
+                debug!("VAD: Cancelling previous VAD turn detection task");
                 old_handle.abort();
             }
 

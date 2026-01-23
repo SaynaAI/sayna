@@ -405,10 +405,10 @@ mod tests {
     #[test]
     fn test_builder_default() {
         let builder = SileroVADBuilder::default();
-        assert_eq!(builder.config.threshold, 0.5);
-        // Updated to PipeCat-recommended values
-        assert_eq!(builder.config.silence_duration_ms, 200); // stop_secs=0.2
-        assert_eq!(builder.config.min_speech_duration_ms, 250); // Increased to filter filler sounds
+        assert_eq!(builder.config.threshold, 0.8);
+        // Increased to 800ms for longer conversations
+        assert_eq!(builder.config.silence_duration_ms, 800);
+        assert_eq!(builder.config.min_speech_duration_ms, 500); // Increased to filter filler sounds
     }
 
     #[test]

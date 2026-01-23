@@ -1,46 +1,38 @@
 //! Configuration for STT result processing
 
 /// Configuration for STT result processing
+///
+/// This simplified config removes all timeout-based fallbacks. Speech final events
+/// are ONLY emitted when:
+/// 1. STT provider sends a real `is_speech_final=true` event
+/// 2. VAD detects silence -> Smart-Turn confirms turn complete (when `stt-vad` enabled)
 #[derive(Clone, Copy)]
 pub struct STTProcessingConfig {
     /// Use VAD-based silence detection instead of timeout.
     ///
     /// **Note**: When `stt-vad` is compiled, this field is ignored - VAD is always active.
-    /// When `stt-vad` is NOT compiled, VAD is unavailable and timeout-based mode is used.
+    /// When `stt-vad` is NOT compiled, VAD is unavailable.
     ///
     /// Default: false
     pub use_vad_silence_detection: bool,
-
-    /// Time to wait for STT provider to send real speech_final (ms).
-    ///
-    /// Only used when `stt-vad` feature is NOT compiled.
-    ///
-    /// Default: 2000ms
-    pub stt_speech_final_wait_ms: u64,
 
     /// VAD silence duration threshold (ms).
     ///
     /// When `stt-vad` is compiled, this is how long continuous silence must be
     /// observed before triggering turn detection.
     ///
-    /// Default: 200ms (PipeCat recommendation)
+    /// Default: 500ms (increased from 200ms for longer conversations)
     pub vad_silence_duration_ms: u64,
 
     /// Maximum time to wait for turn detection inference to complete (ms).
     ///
     /// This timeout covers both feature extraction and model inference, which run
     /// in `spawn_blocking` to avoid blocking the async runtime. The 800ms default
-    /// matches `SpeechFinalConfig::turn_detection_inference_timeout_ms` and provides
-    /// ample headroom for CPU-bound inference while still allowing the timeout to
-    /// fire if the model is stuck or overloaded.
+    /// provides ample headroom for CPU-bound inference while still allowing the
+    /// timeout to fire if the model is stuck or overloaded.
     ///
-    /// Default: 800ms (from SpeechFinalConfig)
+    /// Default: 800ms
     pub turn_detection_inference_timeout_ms: u64,
-
-    /// Hard upper bound timeout for any user utterance (ms).
-    ///
-    /// Default: 5000ms
-    pub speech_final_hard_timeout_ms: u64,
 
     /// Window to prevent duplicate speech_final events (ms).
     ///
@@ -52,36 +44,14 @@ impl Default for STTProcessingConfig {
     fn default() -> Self {
         Self {
             use_vad_silence_detection: false,
-            stt_speech_final_wait_ms: 2000,
-            vad_silence_duration_ms: 200,
-            // 800ms default matches SpeechFinalConfig for consistency across VAD and
-            // smart fallback paths. This provides enough time for spawn_blocking
-            // inference while allowing timeouts to fire if the model is stuck.
+            vad_silence_duration_ms: 500,
             turn_detection_inference_timeout_ms: 800,
-            speech_final_hard_timeout_ms: 5000,
             duplicate_window_ms: 500,
         }
     }
 }
 
 impl STTProcessingConfig {
-    /// Create a new STTProcessingConfig with explicit timeout values (legacy API).
-    pub fn new(
-        stt_speech_final_wait_ms: u64,
-        turn_detection_inference_timeout_ms: u64,
-        speech_final_hard_timeout_ms: u64,
-        duplicate_window_ms: usize,
-    ) -> Self {
-        Self {
-            use_vad_silence_detection: false,
-            stt_speech_final_wait_ms,
-            vad_silence_duration_ms: 300,
-            turn_detection_inference_timeout_ms,
-            speech_final_hard_timeout_ms,
-            duplicate_window_ms,
-        }
-    }
-
     /// Create a new config with VAD-based silence detection settings.
     pub fn with_vad(vad_silence_duration_ms: u64) -> Self {
         Self {
@@ -104,18 +74,6 @@ impl STTProcessingConfig {
     /// Set the VAD silence duration threshold.
     pub fn set_vad_silence_duration_ms(mut self, duration_ms: u64) -> Self {
         self.vad_silence_duration_ms = duration_ms;
-        self
-    }
-
-    /// Set the STT speech final wait timeout (timeout mode only).
-    pub fn set_stt_speech_final_wait_ms(mut self, wait_ms: u64) -> Self {
-        self.stt_speech_final_wait_ms = wait_ms;
-        self
-    }
-
-    /// Set the hard timeout for any utterance.
-    pub fn set_hard_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.speech_final_hard_timeout_ms = timeout_ms;
         self
     }
 

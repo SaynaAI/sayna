@@ -139,11 +139,11 @@ Audio In -> VAD -> SilenceTracker -> TurnEnd Event -> Smart-Turn -> speech_final
 ```yaml
 vad:
   threshold: 0.5              # Speech probability threshold for VAD (0.0-1.0)
-  silence_duration_ms: 200    # Silence duration to trigger turn detection (PipeCat: stop_secs=0.2)
+  silence_duration_ms: 500    # Silence duration to trigger turn detection (default: 500ms)
   min_speech_duration_ms: 250 # Minimum speech before checking silence (filters filler sounds)
 
 turn_detect:
-  threshold: 0.6              # Turn completion probability threshold (0.0-1.0), increased for robustness
+  threshold: 0.9              # Turn completion probability threshold (0.0-1.0), high threshold for definitive turn ends
   num_threads: 4              # ONNX inference threads (default: 4)
   # Advanced options (rarely need changing):
   # model_path: /path/to/model.onnx  # Override model location
@@ -158,7 +158,7 @@ turn_detect:
 {
   "type": "config",
   "vad": {
-    "silence_duration_ms": 200
+    "silence_duration_ms": 500
   }
 }
 ```

@@ -154,10 +154,11 @@ impl Default for SileroVADConfig {
         Self {
             threshold: 0.5, // Default Silero-VAD recommendation
             sample_rate: VADSampleRate::Rate16kHz,
-            // PipeCat recommends stop_secs=0.2 (200ms) for optimal Smart-Turn performance.
-            // This matches the training data and allows Smart-Turn to properly evaluate
-            // whether the speaker has finished based on prosody cues.
-            silence_duration_ms: 200,
+            // Increased from PipeCat's 200ms to 500ms for longer conversations.
+            // Natural speech contains pauses of 200-400ms (breaths, thinking) that
+            // shouldn't trigger premature turn detection. 500ms of true silence
+            // strongly indicates the speaker has finished their turn.
+            silence_duration_ms: 500,
             // Increased from 100ms to 250ms to filter out brief filler sounds like "um", "mmm"
             // that shouldn't trigger turn detection without meaningful speech content.
             min_speech_duration_ms: 250,
@@ -362,8 +363,8 @@ mod tests {
         let config = SileroVADConfig::default();
         assert_eq!(config.threshold, 0.5);
         assert_eq!(config.sample_rate, VADSampleRate::Rate16kHz);
-        // Updated to PipeCat-recommended values
-        assert_eq!(config.silence_duration_ms, 200); // stop_secs=0.2
+        // Increased to 500ms for longer conversations (was 200ms)
+        assert_eq!(config.silence_duration_ms, 500);
         assert_eq!(config.min_speech_duration_ms, 250); // Increased to filter filler sounds
         assert_eq!(config.num_threads, Some(1));
         assert!(config.model_url.is_some());

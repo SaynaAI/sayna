@@ -43,7 +43,7 @@ use super::{
 
 // Buffer size constants for VAD processing
 #[cfg(feature = "stt-vad")]
-const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 8; // 8 seconds at 16kHz for turn detection
+const VAD_AUDIO_BUFFER_CAPACITY: usize = 16000 * 5; // 5 seconds at 16kHz for turn detection
 #[cfg(feature = "stt-vad")]
 const VAD_FRAME_BUFFER_CAPACITY: usize = 512; // 512 samples for frame processing
 
@@ -188,8 +188,6 @@ impl VoiceManager {
         {
             let vad_config = &config.vad_config.silero_config;
             STTProcessingConfig::with_vad(vad_config.silence_duration_ms)
-                .set_stt_speech_final_wait_ms(config.speech_final_config.stt_speech_final_wait_ms)
-                .set_hard_timeout_ms(config.speech_final_config.speech_final_hard_timeout_ms)
                 .set_turn_detection_inference_timeout_ms(
                     config
                         .speech_final_config
@@ -200,14 +198,14 @@ impl VoiceManager {
 
         #[cfg(not(feature = "stt-vad"))]
         {
-            STTProcessingConfig::new(
-                config.speech_final_config.stt_speech_final_wait_ms,
-                config
-                    .speech_final_config
-                    .turn_detection_inference_timeout_ms,
-                config.speech_final_config.speech_final_hard_timeout_ms,
-                config.speech_final_config.duplicate_window_ms,
-            )
+            // Without VAD feature, use default config with duplicate window
+            STTProcessingConfig::default()
+                .set_turn_detection_inference_timeout_ms(
+                    config
+                        .speech_final_config
+                        .turn_detection_inference_timeout_ms,
+                )
+                .set_duplicate_window_ms(config.speech_final_config.duplicate_window_ms)
         }
     }
 
@@ -291,14 +289,10 @@ impl VoiceManager {
         // Create speech_final_state first so it can be shared with VAD worker
         let speech_final_state = Arc::new(SyncRwLock::new(SpeechFinalState {
             text_buffer,
-            turn_detection_handle: None,
-            hard_timeout_handle: None,
             waiting_for_speech_final: AtomicBool::new(false),
             user_callback: None,
             turn_detection_last_fired_ms: AtomicUsize::new(0),
             last_forced_text: String::with_capacity(1024),
-            segment_start_ms: AtomicUsize::new(0),
-            hard_timeout_deadline_ms: AtomicUsize::new(0),
             // VAD-based silence tracking state
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
@@ -1219,14 +1213,10 @@ pub mod test_support {
                 tts_complete_callback: Arc::new(SyncRwLock::new(None)),
                 speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                     text_buffer,
-                    turn_detection_handle: None,
-                    hard_timeout_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                     turn_detection_last_fired_ms: AtomicUsize::new(0),
                     last_forced_text: String::with_capacity(1024),
-                    segment_start_ms: AtomicUsize::new(0),
-                    hard_timeout_deadline_ms: AtomicUsize::new(0),
                     vad_turn_end_detected: AtomicBool::new(false),
                     vad_turn_detection_handle: None,
                 })),
@@ -1303,14 +1293,10 @@ pub mod test_support {
                 tts_complete_callback: Arc::new(SyncRwLock::new(None)),
                 speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
                     text_buffer,
-                    turn_detection_handle: None,
-                    hard_timeout_handle: None,
                     waiting_for_speech_final: AtomicBool::new(false),
                     user_callback: None,
                     turn_detection_last_fired_ms: AtomicUsize::new(0),
                     last_forced_text: String::with_capacity(1024),
-                    segment_start_ms: AtomicUsize::new(0),
-                    hard_timeout_deadline_ms: AtomicUsize::new(0),
                     vad_turn_end_detected: AtomicBool::new(false),
                     vad_turn_detection_handle: None,
                 })),
