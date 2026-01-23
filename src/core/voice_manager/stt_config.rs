@@ -28,7 +28,13 @@ pub struct STTProcessingConfig {
 
     /// Maximum time to wait for turn detection inference to complete (ms).
     ///
-    /// Default: 100ms
+    /// This timeout covers both feature extraction and model inference, which run
+    /// in `spawn_blocking` to avoid blocking the async runtime. The 800ms default
+    /// matches `SpeechFinalConfig::turn_detection_inference_timeout_ms` and provides
+    /// ample headroom for CPU-bound inference while still allowing the timeout to
+    /// fire if the model is stuck or overloaded.
+    ///
+    /// Default: 800ms (from SpeechFinalConfig)
     pub turn_detection_inference_timeout_ms: u64,
 
     /// Hard upper bound timeout for any user utterance (ms).
@@ -48,7 +54,10 @@ impl Default for STTProcessingConfig {
             use_vad_silence_detection: false,
             stt_speech_final_wait_ms: 2000,
             vad_silence_duration_ms: 200,
-            turn_detection_inference_timeout_ms: 100,
+            // 800ms default matches SpeechFinalConfig for consistency across VAD and
+            // smart fallback paths. This provides enough time for spawn_blocking
+            // inference while allowing timeouts to fire if the model is stuck.
+            turn_detection_inference_timeout_ms: 800,
             speech_final_hard_timeout_ms: 5000,
             duplicate_window_ms: 500,
         }

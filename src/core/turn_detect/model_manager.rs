@@ -92,14 +92,18 @@ impl ModelManager {
         Ok(())
     }
 
-    /// Run inference on mel spectrogram features.
+    /// Run inference on mel spectrogram features (synchronous).
+    ///
+    /// This method is synchronous and designed to be called from `spawn_blocking`
+    /// so that CPU-bound inference does not block the async runtime and allows
+    /// timeouts to fire properly.
     ///
     /// # Arguments
     /// * `mel_features` - Mel spectrogram with shape (mel_bins, mel_frames) as configured
     ///
     /// # Returns
     /// * `f32` - Turn completion probability (0.0-1.0)
-    pub async fn predict(&mut self, mel_features: ArrayView2<'_, f32>) -> Result<f32> {
+    pub fn predict(&mut self, mel_features: ArrayView2<'_, f32>) -> Result<f32> {
         let (mel_bins, mel_frames) = mel_features.dim();
 
         // Validate input dimensions against config (single source of truth)
@@ -132,6 +136,10 @@ impl ModelManager {
 
         // Lock session and run inference
         let mut session = self.session.lock().map_err(|e| {
+            warn!(
+                "Turn detection ONNX session mutex poisoned (likely panic during inference): {}",
+                e
+            );
             anyhow::anyhow!(
                 "Turn detection session mutex poisoned (likely panic during inference): {}",
                 e

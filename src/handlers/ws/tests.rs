@@ -439,31 +439,27 @@ fn test_livekit_ws_config_conversion() {
         listen_participants: vec![],
     };
 
-    let tts_ws_config = TTSWebSocketConfig {
+    // LiveKit config now uses STT config for audio format (sample_rate, channels)
+    let stt_ws_config = STTWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
-        speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
-        connection_timeout: Some(30),
-        request_timeout: Some(60),
-        model: "".to_string(),
-        pronunciations: Vec::new(),
+        language: "en-US".to_string(),
+        sample_rate: 16000,
+        channels: 1,
+        punctuation: true,
+        encoding: "linear16".to_string(),
+        model: "nova-3".to_string(),
     };
 
     let livekit_url = "wss://test-livekit.com".to_string();
     let test_token = "test-jwt-token".to_string();
     let livekit_config =
-        livekit_ws_config.to_livekit_config(test_token.clone(), &tts_ws_config, &livekit_url);
+        livekit_ws_config.to_livekit_config(test_token.clone(), &stt_ws_config, &livekit_url);
     assert_eq!(livekit_config.url, "wss://test-livekit.com");
     assert_eq!(livekit_config.token, test_token);
     assert_eq!(livekit_config.room_name, "test-room");
-    assert_eq!(livekit_config.sample_rate, 22050);
+    // Sample rate and channels now come from STT config
+    assert_eq!(livekit_config.sample_rate, 16000);
     assert_eq!(livekit_config.channels, 1);
-    assert_eq!(
-        livekit_config.enable_noise_filter,
-        cfg!(feature = "noise-filter")
-    );
 }
 
 #[test]
@@ -476,21 +472,20 @@ fn test_livekit_config_with_empty_listen_participants() {
         listen_participants: vec![],
     };
 
-    let tts_ws_config = TTSWebSocketConfig {
+    // LiveKit config now uses STT config for audio format
+    let stt_ws_config = STTWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
-        speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
-        connection_timeout: Some(30),
-        request_timeout: Some(60),
-        model: "".to_string(),
-        pronunciations: Vec::new(),
+        language: "en-US".to_string(),
+        sample_rate: 16000,
+        channels: 1,
+        punctuation: true,
+        encoding: "linear16".to_string(),
+        model: "nova-3".to_string(),
     };
 
     let livekit_config = livekit_ws_config.to_livekit_config(
         "test-token".to_string(),
-        &tts_ws_config,
+        &stt_ws_config,
         "wss://test.com",
     );
 
@@ -510,21 +505,20 @@ fn test_livekit_config_with_listen_participants() {
         listen_participants: vec!["user-123".to_string(), "user-456".to_string()],
     };
 
-    let tts_ws_config = TTSWebSocketConfig {
+    // LiveKit config now uses STT config for audio format
+    let stt_ws_config = STTWebSocketConfig {
         provider: "deepgram".to_string(),
-        voice_id: Some("aura-luna-en".to_string()),
-        speaking_rate: Some(1.0),
-        audio_format: Some("pcm".to_string()),
-        sample_rate: Some(22050),
-        connection_timeout: Some(30),
-        request_timeout: Some(60),
-        model: "".to_string(),
-        pronunciations: Vec::new(),
+        language: "en-US".to_string(),
+        sample_rate: 16000,
+        channels: 1,
+        punctuation: true,
+        encoding: "linear16".to_string(),
+        model: "nova-3".to_string(),
     };
 
     let livekit_config = livekit_ws_config.to_livekit_config(
         "test-token".to_string(),
-        &tts_ws_config,
+        &stt_ws_config,
         "wss://test.com",
     );
 

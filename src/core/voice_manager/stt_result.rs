@@ -387,7 +387,8 @@ impl STTResultProcessor {
                 return;
             }
 
-            let audio = audio_buffer.clone();
+            // Convert VecDeque to Vec for turn detection inference
+            let audio: Vec<i16> = audio_buffer.iter().copied().collect();
 
             state.vad_turn_end_detected.store(true, Ordering::Release);
 

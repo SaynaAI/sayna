@@ -313,7 +313,7 @@ mod tests;
 pub use callbacks::{
     AudioClearCallback, STTCallback, STTErrorCallback, TTSAudioCallback, TTSErrorCallback,
 };
-pub use config::{SpeechFinalConfig, VoiceManagerConfig};
+pub use config::{NoiseFilterConfig, SpeechFinalConfig, VoiceManagerConfig};
 pub use errors::{VoiceManagerError, VoiceManagerResult};
 pub use manager::VoiceManager;
 pub use state::SpeechFinalState;

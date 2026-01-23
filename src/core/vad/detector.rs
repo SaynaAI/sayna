@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 use tracing::{debug, info};
 
 use super::config::SileroVADConfig;
@@ -86,7 +86,39 @@ impl SileroVAD {
         Ok(Self { model, config })
     }
 
+    /// Test-only: Create a SileroVAD stub without loading a real ONNX model.
+    ///
+    /// This constructor creates a `SileroVAD` instance that can be used in tests
+    /// to enter the VAD processing path without requiring the actual ONNX model.
+    /// The returned instance should only be used with `VADState::set_force_error(true)`
+    /// which causes `process_audio_chunk` to return an error before any model access.
+    ///
+    /// # Usage
+    ///
+    /// ```ignore
+    /// let vad = SileroVAD::stub_for_testing(SileroVADConfig::default());
+    /// let vad_state = Arc::new(VADState::new(16000 * 8, 512));
+    /// vad_state.set_force_error(true); // Required!
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// Calling `process_audio` on a stub instance will return an error, not panic,
+    /// because the underlying model manager has no ONNX session.
+    #[cfg(test)]
+    pub fn stub_for_testing(config: SileroVADConfig) -> Self {
+        Self {
+            model: Arc::new(Mutex::new(VADModelManager::new_stub_for_testing(
+                config.clone(),
+            ))),
+            config,
+        }
+    }
+
     /// Process an audio frame and return speech probability.
+    ///
+    /// This method runs the CPU-bound ONNX inference in a blocking thread
+    /// via `spawn_blocking` to avoid blocking the Tokio runtime.
     ///
     /// # Arguments
     ///
@@ -103,8 +135,15 @@ impl SileroVAD {
     ///
     /// Returns an error if the audio frame size is incorrect or inference fails.
     pub async fn process_audio(&self, audio: &[i16]) -> Result<f32> {
-        let mut model = self.model.lock().await;
-        model.process_audio(audio)
+        let model = Arc::clone(&self.model);
+        let audio = audio.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let mut model = model.lock();
+            model.process_audio(&audio)
+        })
+        .await
+        .context("VAD inference task was cancelled")?
     }
 
     /// Check if the given audio frame contains speech.
@@ -130,9 +169,15 @@ impl SileroVAD {
     /// Call this when starting a new audio stream or after a long pause.
     /// This clears the LSTM state and context buffer.
     pub async fn reset(&self) {
-        let mut model = self.model.lock().await;
-        model.reset();
-        debug!("Silero-VAD state reset");
+        let model = Arc::clone(&self.model);
+        // Reset is fast, but we still use spawn_blocking for consistency
+        // and to avoid holding the lock across await points
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut model = model.lock();
+            model.reset();
+            debug!("Silero-VAD state reset");
+        })
+        .await;
     }
 
     /// Get the configured speech threshold.
@@ -172,6 +217,43 @@ impl SileroVAD {
     /// Get the full configuration.
     pub fn get_config(&self) -> &SileroVADConfig {
         &self.config
+    }
+
+    /// Get a clone of the internal model manager Arc for lock-free inference.
+    ///
+    /// This allows callers to perform VAD inference without holding an external
+    /// lock across the await point. The returned Arc can be used with
+    /// [`Self::process_audio_with_model`].
+    pub fn get_model(&self) -> Arc<Mutex<VADModelManager>> {
+        Arc::clone(&self.model)
+    }
+
+    /// Process audio using a pre-cloned model reference.
+    ///
+    /// This is useful when you need to avoid holding an async lock across the
+    /// await point. First call [`Self::get_model`] while holding the lock,
+    /// release the lock, then call this method.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - Arc clone of the VADModelManager from [`Self::get_model`]
+    /// * `audio` - Audio samples as i16
+    ///
+    /// # Returns
+    ///
+    /// * `f32` - Speech probability between 0.0 and 1.0
+    pub async fn process_audio_with_model(
+        model: Arc<Mutex<VADModelManager>>,
+        audio: &[i16],
+    ) -> anyhow::Result<f32> {
+        let audio = audio.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let mut model = model.lock();
+            model.process_audio(&audio)
+        })
+        .await
+        .context("VAD inference task was cancelled")?
     }
 }
 

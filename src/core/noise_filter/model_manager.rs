@@ -4,15 +4,21 @@
 //! through the ORT (ONNX Runtime) backend.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, ArrayView1};
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 use ort::value::Value;
+use parking_lot::Mutex;
+use realfft::FftError;
 use realfft::num_complex::Complex32;
 use tracing::{debug, info, warn};
+
+/// Static flag to ensure ISTFT failure is logged only once per process.
+static ISTFT_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 use super::assets;
 use super::config::{
@@ -290,7 +296,9 @@ impl ModelManager {
         debug_assert_eq!(input_frame.len(), state.hop_size);
 
         // Step 1: STFT Analysis
-        let spectrum = state.frame_analysis(input_frame);
+        let spectrum = state
+            .frame_analysis(input_frame)
+            .context("FFT analysis failed")?;
         state.push_rolling_spec_x(spectrum.clone());
 
         // Step 2: Compute features
@@ -352,7 +360,35 @@ impl ModelManager {
         self.apply_atten_limit(&mut output_spectrum, &spectrum.view());
 
         // Step 9: ISTFT Synthesis
-        let output_frame = state.frame_synthesis(&mut output_spectrum);
+        // Enforce real DC and Nyquist bins: for a valid real-valued IFFT, these bins
+        // must have zero imaginary parts (Hermitian symmetry requirement).
+        let last_idx = output_spectrum.len().saturating_sub(1);
+        output_spectrum[0].im = 0.0;
+        if last_idx > 0 {
+            output_spectrum[last_idx].im = 0.0;
+        }
+
+        // Capture DC and Nyquist bin values before synthesis for diagnostic logging on failure
+        let dc_bin = output_spectrum[0];
+        let nyquist_bin = output_spectrum[last_idx];
+
+        let output_frame = match state.frame_synthesis(&mut output_spectrum) {
+            Ok(frame) => frame,
+            Err(FftError::InputValues(dc_invalid, nyquist_invalid)) => {
+                // Log diagnostics only once per process to avoid spam
+                if !ISTFT_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
+                    debug!(
+                        "ISTFT InputValues error: DC bin[0]={:?} (invalid={}), Nyquist bin[{}]={:?} (invalid={})",
+                        dc_bin, dc_invalid, last_idx, nyquist_bin, nyquist_invalid
+                    );
+                }
+                // Passthrough: return original input on ISTFT failure
+                return Ok(input_frame.to_vec());
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("IFFT synthesis failed: {}", e));
+            }
+        };
 
         // Step 10: Validate output for NaN/Inf and fallback to input if corrupted
         if Self::contains_non_finite(&output_frame) {
@@ -373,7 +409,7 @@ impl ModelManager {
         feat_erb: &Array1<f32>,
         feat_spec: &Array1<f32>,
     ) -> Result<(f32, EncoderOutputs)> {
-        let mut session = self.enc_session.lock().unwrap();
+        let mut session = self.enc_session.lock();
 
         // Collect output names first to avoid borrow issues
         let output_names: Vec<String> = session
@@ -492,7 +528,7 @@ impl ModelManager {
     ///
     /// Uses the original tensor shapes from encoder outputs to ensure correct data layout.
     fn run_erb_decoder(&self, enc_outputs: &EncoderOutputs) -> Result<Vec<f32>> {
-        let mut session = self.erb_dec_session.lock().unwrap();
+        let mut session = self.erb_dec_session.lock();
 
         // Get output name before running
         let output_name = session.outputs()[0].name().to_string();
@@ -561,14 +597,25 @@ impl ModelManager {
     /// Run the DF decoder model.
     ///
     /// Uses the original tensor shapes from encoder outputs to ensure correct data layout.
+    /// Returns coefficients reshaped to `(nb_df, df_order * 2)` for use with `apply_df`.
+    ///
+    /// # Layout Handling
+    /// The ONNX model may output different layouts:
+    /// - `[1, nb_df, df_order, 2]` - standard layout (no transpose needed)
+    /// - `[1, df_order, nb_df, 2]` - transposed layout (needs transpose)
+    /// - `[nb_df, df_order, 2]` - no batch dimension
+    /// - `[df_order, nb_df, 2]` - transposed, no batch dimension
+    ///
+    /// This function detects the layout and applies the necessary reshape/transpose.
     fn run_df_decoder(&self, enc_outputs: &EncoderOutputs) -> Result<Array2<f32>> {
-        let mut session = self.df_dec_session.lock().unwrap();
+        let mut session = self.df_dec_session.lock();
 
         // Get output name before running
         let output_name = session.outputs()[0].name().to_string();
 
         let nb_df = self.df_params.nb_df;
         let df_order = self.df_params.df_order;
+        let expected_total = nb_df * df_order * 2;
 
         // Build inputs using the ORIGINAL shapes from encoder outputs
         // DF decoder takes embedding and c0 from encoder
@@ -580,7 +627,6 @@ impl ModelManager {
         let outputs = session.run(inputs).context("DF decoder inference failed")?;
 
         // Extract DF coefficients from first output
-        // Shape should be [1, nb_df, df_order, 2] (real/imag)
         let output_value = outputs
             .get(output_name.as_str())
             .context("No output from DF decoder")?;
@@ -589,17 +635,122 @@ impl ModelManager {
             .context("Failed to extract DF decoder output")?;
 
         let (shape, data) = tensor;
+        let shape_vec: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
 
-        debug!("DF decoder output shape: {:?}", shape);
+        // Validate data length matches expected total
+        debug_assert_eq!(
+            data.len(),
+            expected_total,
+            "DF decoder output length mismatch: got {}, expected {} (nb_df={}, df_order={}, shape={:?})",
+            data.len(),
+            expected_total,
+            nb_df,
+            df_order,
+            shape_vec
+        );
 
-        // Flatten the last two dimensions (df_order, 2) into df_order * 2
-        let coefs = Array2::from_shape_vec(
-            (nb_df, df_order * 2),
-            data.iter().take(nb_df * df_order * 2).copied().collect(),
-        )
-        .unwrap_or_else(|_| Array2::zeros((nb_df, df_order * 2)));
+        if data.len() != expected_total {
+            anyhow::bail!(
+                "DF decoder output length mismatch: got {}, expected {} (nb_df={}, df_order={}, shape={:?})",
+                data.len(),
+                expected_total,
+                nb_df,
+                df_order,
+                shape_vec
+            );
+        }
+
+        // Detect layout and reshape/transpose as needed
+        let (layout_type, coefs) =
+            Self::reshape_df_coefs(&shape_vec, data, nb_df, df_order, expected_total)?;
+
+        debug!(
+            "DF decoder output: actual_shape={:?}, detected_layout={}, final_shape=[{}, {}]",
+            shape_vec,
+            layout_type,
+            nb_df,
+            df_order * 2
+        );
 
         Ok(coefs)
+    }
+
+    /// Detect the ONNX output layout and reshape/transpose DF coefficients to `(nb_df, df_order * 2)`.
+    ///
+    /// Returns `(layout_description, reshaped_coefficients)`.
+    fn reshape_df_coefs(
+        shape: &[usize],
+        data: &[f32],
+        nb_df: usize,
+        df_order: usize,
+        expected_total: usize,
+    ) -> Result<(&'static str, Array2<f32>)> {
+        // Remove leading batch dimensions of size 1
+        let effective_shape: Vec<usize> = shape.iter().copied().filter(|&d| d != 1).collect();
+
+        match effective_shape.as_slice() {
+            // Standard layout: [nb_df, df_order, 2]
+            [d0, d1, 2] if *d0 == nb_df && *d1 == df_order => {
+                // Data is already in correct order: (nb_df, df_order, 2) -> flatten to (nb_df, df_order * 2)
+                let coefs = Array2::from_shape_vec(
+                    (nb_df, df_order * 2),
+                    data.iter().take(expected_total).copied().collect(),
+                )
+                .context("Failed to reshape DF coefficients from standard layout")?;
+                Ok(("[nb_df, df_order, 2]", coefs))
+            }
+
+            // Transposed layout: [df_order, nb_df, 2]
+            [d0, d1, 2] if *d0 == df_order && *d1 == nb_df => {
+                // Data is in (df_order, nb_df, 2) order, need to transpose to (nb_df, df_order, 2)
+                let mut coefs = Array2::zeros((nb_df, df_order * 2));
+                for t in 0..df_order {
+                    for f in 0..nb_df {
+                        let src_idx = (t * nb_df + f) * 2;
+                        let re = data.get(src_idx).copied().unwrap_or(0.0);
+                        let im = data.get(src_idx + 1).copied().unwrap_or(0.0);
+                        coefs[[f, t * 2]] = re;
+                        coefs[[f, t * 2 + 1]] = im;
+                    }
+                }
+                Ok(("[df_order, nb_df, 2] (transposed)", coefs))
+            }
+
+            // Flat or 2D layout: treat as already (nb_df, df_order * 2)
+            [d0, d1] if *d0 == nb_df && *d1 == df_order * 2 => {
+                let coefs = Array2::from_shape_vec(
+                    (nb_df, df_order * 2),
+                    data.iter().take(expected_total).copied().collect(),
+                )
+                .context("Failed to reshape DF coefficients from 2D layout")?;
+                Ok(("[nb_df, df_order*2]", coefs))
+            }
+
+            // Flat 1D layout
+            [total] if *total == expected_total => {
+                // Assume standard (nb_df, df_order, 2) ordering in the flat buffer
+                let coefs = Array2::from_shape_vec(
+                    (nb_df, df_order * 2),
+                    data.iter().take(expected_total).copied().collect(),
+                )
+                .context("Failed to reshape DF coefficients from 1D layout")?;
+                Ok(("[flat]", coefs))
+            }
+
+            // Unknown layout - reject with error (no fallback to avoid mis-ordered coefficients)
+            _ => {
+                anyhow::bail!(
+                    "DF decoder output has unsupported layout: shape={:?}, effective_shape={:?}, \
+                     expected one of: [nb_df={}, df_order={}, 2], [df_order, nb_df, 2], \
+                     [nb_df, df_order*2], or [flat={}]",
+                    shape,
+                    effective_shape,
+                    nb_df,
+                    df_order,
+                    expected_total
+                );
+            }
+        }
     }
 
     /// Apply ERB mask to the spectrum.
@@ -762,6 +913,28 @@ impl TensorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
+    use std::path::PathBuf;
+
+    /// Helper to check if DeepFilterNet model assets are available.
+    ///
+    /// Returns `Some(PathBuf)` with the cache path if models are available,
+    /// or `None` if assets are missing. Used to skip tests that require
+    /// the actual ONNX models.
+    fn get_model_cache_path() -> Option<PathBuf> {
+        let cache_path = std::env::var("CACHE_PATH").ok()?;
+        let noise_filter_dir = std::path::Path::new(&cache_path).join("noise_filter");
+
+        // Check all required model files exist
+        let required_files = ["enc.onnx", "erb_dec.onnx", "df_dec.onnx", "config.ini"];
+        for filename in &required_files {
+            if !noise_filter_dir.join(filename).exists() {
+                return None;
+            }
+        }
+
+        Some(PathBuf::from(cache_path))
+    }
 
     #[test]
     fn test_encoder_outputs_default() {
@@ -945,5 +1118,80 @@ mod tests {
             !ModelManager::contains_non_finite(&empty),
             "Empty slice should not contain non-finite values"
         );
+    }
+
+    /// Smoke test for `ModelManager::process_frame` to ensure the full pipeline
+    /// (STFT -> encoder -> decoders -> ISTFT) works on a normal input frame.
+    ///
+    /// This test requires DeepFilterNet model assets to be available (set CACHE_PATH
+    /// environment variable). Skips gracefully if models are not present.
+    #[tokio::test]
+    async fn test_process_frame_smoke() {
+        // Skip if model assets are not available
+        let cache_path = match get_model_cache_path() {
+            Some(path) => path,
+            None => {
+                eprintln!(
+                    "Skipping test_process_frame_smoke: DeepFilterNet model assets not available. \
+                     Set CACHE_PATH environment variable to a directory containing noise_filter/ \
+                     with enc.onnx, erb_dec.onnx, df_dec.onnx, and config.ini."
+                );
+                return;
+            }
+        };
+
+        // Build config with 16kHz sample rate (common for STT)
+        let config = NoiseFilterConfig {
+            cache_path: Some(cache_path),
+            sample_rate: 16000,
+            ..Default::default()
+        };
+
+        // Create the ModelManager (loads ONNX models)
+        let mut manager = ModelManager::new(config)
+            .await
+            .expect("ModelManager::new should succeed with valid model assets");
+
+        // Create DfState from the loaded parameters
+        let mut state = DfState::new(manager.df_params());
+        let hop_size = state.hop_size;
+
+        // Create a simple sine wave input frame at hop_size length
+        // Using 440 Hz tone at the model's native sample rate (48kHz)
+        let freq = 440.0;
+        let sr = manager.df_params().sr as f32;
+        let input_frame: Vec<f32> = (0..hop_size)
+            .map(|i| (2.0 * PI * freq * i as f32 / sr).sin() * 0.5)
+            .collect();
+
+        // Process the frame through the full DeepFilterNet pipeline
+        let result = manager.process_frame(&mut state, &input_frame);
+
+        // Assert the result is Ok
+        assert!(
+            result.is_ok(),
+            "process_frame should succeed on normal input: {:?}",
+            result.err()
+        );
+
+        let output = result.unwrap();
+
+        // Assert output length equals hop_size
+        assert_eq!(
+            output.len(),
+            hop_size,
+            "Output length should equal hop_size ({})",
+            hop_size
+        );
+
+        // Assert all output samples are finite (no NaN or Inf)
+        for (i, &sample) in output.iter().enumerate() {
+            assert!(
+                sample.is_finite(),
+                "Output sample at index {} is not finite: {}",
+                i,
+                sample
+            );
+        }
     }
 }

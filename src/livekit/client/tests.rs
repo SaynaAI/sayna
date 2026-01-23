@@ -11,7 +11,6 @@ fn create_test_config() -> LiveKitConfig {
         room_name: "test-room".to_string(),
         sample_rate: 24000,
         channels: 1,
-        enable_noise_filter: cfg!(feature = "noise-filter"),
         listen_participants: vec![],
     }
 }

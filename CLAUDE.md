@@ -68,7 +68,7 @@ Always consult these rule files when implementing new features.
    - WebRTC audio streaming with room/participant management
    - Audio track subscription and data message forwarding
 
-5. **DeepFilterNet** (`src/utils/noise_filter.rs`):
+5. **DeepFilterNet** (`src/core/noise_filter/`):
    - Advanced noise reduction with thread pool for CPU-intensive operations
 
 6. **Authentication** (`src/auth/` and `src/middleware/auth.rs`):

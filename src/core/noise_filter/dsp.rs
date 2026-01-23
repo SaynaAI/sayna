@@ -265,34 +265,35 @@ impl DfState {
     ///
     /// Input: real-valued time-domain signal of length fft_size.
     /// Output: complex spectrum of length freq_size.
-    pub fn rfft(&mut self, input: &[f32], output: &mut [Complex32]) {
+    pub fn rfft(&mut self, input: &[f32], output: &mut [Complex32]) -> Result<(), FftError> {
         debug_assert_eq!(input.len(), self.fft_size);
         debug_assert_eq!(output.len(), self.freq_size);
 
         self.input_frame_buf.copy_from_slice(input);
-        self.fft_forward
-            .process_with_scratch(&mut self.input_frame_buf, output, &mut self.fft_scratch)
-            .expect("FFT failed");
+        self.fft_forward.process_with_scratch(
+            &mut self.input_frame_buf,
+            output,
+            &mut self.fft_scratch,
+        )
     }
 
     /// Perform inverse FFT (complex to real).
     ///
     /// Input: complex spectrum of length freq_size (will be modified).
     /// Output: real-valued time-domain signal of length fft_size.
-    pub fn irfft(&mut self, input: &mut [Complex32], output: &mut [f32]) {
+    pub fn irfft(&mut self, input: &mut [Complex32], output: &mut [f32]) -> Result<(), FftError> {
         debug_assert_eq!(input.len(), self.freq_size);
         debug_assert_eq!(output.len(), self.fft_size);
 
         self.fft_inverse
             .process_with_scratch(input, output, &mut self.fft_scratch)
-            .expect("IFFT failed");
     }
 
     /// Perform STFT frame analysis.
     ///
     /// Applies windowing and overlap-add, then FFT.
     /// Returns the complex spectrum for the current frame.
-    pub fn frame_analysis(&mut self, input_frame: &[f32]) -> Array1<Complex32> {
+    pub fn frame_analysis(&mut self, input_frame: &[f32]) -> Result<Array1<Complex32>, FftError> {
         debug_assert_eq!(input_frame.len(), self.hop_size);
 
         let overlap_size = self.fft_size - self.hop_size;
@@ -326,49 +327,45 @@ impl DfState {
 
         // Apply FFT (no normalization - realfft is unnormalized)
         let mut spectrum = vec![Complex32::new(0.0, 0.0); self.freq_size];
-        self.fft_forward
-            .process_with_scratch(
-                &mut self.input_frame_buf,
-                &mut spectrum,
-                &mut self.fft_scratch,
-            )
-            .expect("FFT failed");
+        self.fft_forward.process_with_scratch(
+            &mut self.input_frame_buf,
+            &mut spectrum,
+            &mut self.fft_scratch,
+        )?;
 
-        Array1::from_vec(spectrum)
+        Ok(Array1::from_vec(spectrum))
     }
 
     /// Perform ISTFT frame synthesis.
     ///
     /// Applies IFFT, windowing, and overlap-add.
     /// Returns the time-domain output frame.
-    pub fn frame_synthesis(&mut self, spectrum: &mut [Complex32]) -> Vec<f32> {
+    ///
+    /// # Errors
+    /// Returns `FftError::InputValues` if DC or Nyquist bins have non-zero imaginary parts.
+    /// This allows callers to handle IFFT failures via passthrough with warning logs.
+    pub fn frame_synthesis(&mut self, spectrum: &mut [Complex32]) -> Result<Vec<f32>, FftError> {
         debug_assert_eq!(spectrum.len(), self.freq_size);
 
         // For realfft complex-to-real transform, DC (bin 0) and Nyquist (last bin)
-        // must have zero imaginary parts. The deep filtering stage can produce
-        // non-zero imaginary parts, so we zero them out before IFFT.
-        // This matches upstream DeepFilterNet behavior which silently ignores
-        // FftError::InputValues errors.
-        spectrum[0].im = 0.0;
-        if self.freq_size > 1 {
-            spectrum[self.freq_size - 1].im = 0.0;
+        // must have zero imaginary parts. Return an error if they don't, so callers
+        // can handle the failure (e.g., passthrough with warning logs).
+        const EPSILON: f32 = 1e-10;
+        let dc_invalid = spectrum[0].im.abs() > EPSILON;
+        let nyquist_invalid = self.freq_size > 1 && spectrum[self.freq_size - 1].im.abs() > EPSILON;
+
+        if dc_invalid || nyquist_invalid {
+            return Err(FftError::InputValues(dc_invalid, nyquist_invalid));
         }
 
         // Apply IFFT
-        // Note: Upstream DeepFilterNet silently ignores FftError::InputValues errors.
-        // We fix the DC/Nyquist bins above, but also handle any remaining errors gracefully.
-        match self.fft_inverse.process_with_scratch(
+        // All FFT/IFFT errors are propagated to callers so they can handle failures
+        // via passthrough with warning logs.
+        self.fft_inverse.process_with_scratch(
             spectrum,
             &mut self.output_frame_buf,
             &mut self.fft_scratch,
-        ) {
-            Ok(()) => {}
-            Err(FftError::InputValues(_, _)) => {
-                // This can happen if spectrum values are still invalid after our fix.
-                // Continue processing like upstream does - output may have minor artifacts.
-            }
-            Err(e) => panic!("IFFT failed with unexpected error: {:?}", e),
-        }
+        )?;
 
         // Normalize IFFT output (realfft doesn't normalize)
         // For perfect STFT/ISTFT reconstruction with Vorbis window and 50% overlap:
@@ -396,7 +393,7 @@ impl DfState {
         self.synthesis_mem
             .copy_from_slice(&self.output_frame_buf[self.hop_size..]);
 
-        output
+        Ok(output)
     }
 
     /// Add spectrum to rolling input buffer.
@@ -531,16 +528,27 @@ pub fn apply_df(
         return;
     }
 
-    // Zero the DF bins first
-    for i in 0..nb_df.min(output_spec.len()) {
-        output_spec[i] = Complex32::new(0.0, 0.0);
+    // Determine Nyquist bin index (last bin in spectrum)
+    let nyquist_idx = output_spec.len().saturating_sub(1);
+
+    // Zero the DF bins first, but preserve DC (bin 0) and Nyquist bins.
+    // DC and Nyquist must remain real-valued for valid real IFFT (Hermitian symmetry).
+    for i in 1..nb_df.min(output_spec.len()) {
+        if i != nyquist_idx {
+            output_spec[i] = Complex32::new(0.0, 0.0);
+        }
     }
 
-    // Apply DF convolution
+    // Apply DF convolution, skipping DC (bin 0) and Nyquist bins to preserve
+    // their real-valued property required for real IFFT.
     // coefs shape: [nb_df, df_order * 2] (real/imag pairs)
     for (freq_idx, row) in coefs.outer_iter().enumerate().take(nb_df) {
         if freq_idx >= output_spec.len() {
             break;
+        }
+        // Skip DC and Nyquist bins to preserve existing values
+        if freq_idx == 0 || freq_idx == nyquist_idx {
+            continue;
         }
 
         let mut acc = Complex32::new(0.0, 0.0);
@@ -648,7 +656,7 @@ mod tests {
 
         // Values should be in [0, 1]
         for &v in &window {
-            assert!(v >= 0.0 && v <= 1.0, "Window value {} out of range", v);
+            assert!((0.0..=1.0).contains(&v), "Window value {} out of range", v);
         }
 
         // For 50% overlap, window²[i] + window²[i + hop_size] should sum to 1
@@ -688,11 +696,15 @@ mod tests {
             .collect();
 
         // Process through STFT
-        let spectrum = state.frame_analysis(&signal);
+        let spectrum = state
+            .frame_analysis(&signal)
+            .expect("frame_analysis failed");
 
         // Process through ISTFT
         let mut spec_vec: Vec<Complex32> = spectrum.to_vec();
-        let reconstructed = state.frame_synthesis(&mut spec_vec);
+        let reconstructed = state
+            .frame_synthesis(&mut spec_vec)
+            .expect("frame_synthesis failed");
 
         assert_eq!(reconstructed.len(), hop_size);
 
@@ -726,9 +738,11 @@ mod tests {
             let end = start + hop_size;
             let frame = &signal[start..end];
 
-            let spectrum = state.frame_analysis(frame);
+            let spectrum = state.frame_analysis(frame).expect("frame_analysis failed");
             let mut spec_vec: Vec<Complex32> = spectrum.to_vec();
-            let out_frame = state.frame_synthesis(&mut spec_vec);
+            let out_frame = state
+                .frame_synthesis(&mut spec_vec)
+                .expect("frame_synthesis failed");
             output.extend(out_frame);
         }
 
@@ -873,6 +887,169 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_df_preserves_dc_and_nyquist_bins() {
+        // Test that apply_df preserves DC (bin 0) and Nyquist bins, which must remain
+        // real-valued for valid ISTFT (Hermitian symmetry requirement).
+        let params = DfParams::default();
+        let state = DfState::new(&params);
+
+        let freq_size = state.freq_size;
+        let nb_df = state.nb_df;
+        let df_order = state.df_order;
+        let nyquist_idx = freq_size - 1;
+
+        // Create synthetic rolling spectra buffer with enough frames for DF
+        let mut rolling_spec: VecDeque<Array1<Complex32>> = VecDeque::new();
+        for _ in 0..df_order {
+            // Each frame has complex values (including imaginary parts)
+            let frame: Array1<Complex32> = Array1::from_iter(
+                (0..freq_size).map(|i| Complex32::new(1.0 + i as f32 * 0.01, 0.5)),
+            );
+            rolling_spec.push_back(frame);
+        }
+
+        // Create output spectrum with known DC and Nyquist values (real-valued)
+        let mut output_spec: Vec<Complex32> = (0..freq_size)
+            .map(|i| Complex32::new(1.0 + i as f32 * 0.1, 0.0))
+            .collect();
+
+        // Set DC and Nyquist bins to specific real values that we want to preserve
+        let dc_original = Complex32::new(10.0, 0.0);
+        let nyquist_original = Complex32::new(20.0, 0.0);
+        output_spec[0] = dc_original;
+        output_spec[nyquist_idx] = nyquist_original;
+
+        // Create synthetic DF coefficients that would modify bins if applied
+        // Shape: [nb_df, df_order * 2] (real/imag pairs)
+        let coefs = Array2::from_elem((nb_df, df_order * 2), 0.5);
+
+        // Apply deep filtering
+        apply_df(&rolling_spec, &coefs, &mut output_spec, nb_df, df_order);
+
+        // Verify DC bin (bin 0) is preserved
+        assert_eq!(
+            output_spec[0], dc_original,
+            "DC bin should be preserved by apply_df"
+        );
+
+        // Verify Nyquist bin is preserved (if within nb_df range)
+        if nyquist_idx < nb_df {
+            assert_eq!(
+                output_spec[nyquist_idx], nyquist_original,
+                "Nyquist bin should be preserved by apply_df"
+            );
+        }
+
+        // Verify DC and Nyquist bins remain real-valued (zero imaginary)
+        assert!(
+            output_spec[0].im.abs() < 1e-10,
+            "DC bin must have zero imaginary part for valid ISTFT"
+        );
+        assert!(
+            output_spec[nyquist_idx].im.abs() < 1e-10,
+            "Nyquist bin must have zero imaginary part for valid ISTFT"
+        );
+    }
+
+    #[test]
+    fn test_apply_df_modifies_middle_bins() {
+        // Test that apply_df does modify the middle bins (not DC or Nyquist),
+        // confirming the skip logic only applies to boundary bins.
+        let params = DfParams::default();
+        let state = DfState::new(&params);
+
+        let freq_size = state.freq_size;
+        let nb_df = state.nb_df;
+        let df_order = state.df_order;
+        let nyquist_idx = freq_size - 1;
+
+        // Create rolling spectra with non-trivial values
+        let mut rolling_spec: VecDeque<Array1<Complex32>> = VecDeque::new();
+        for _ in 0..df_order {
+            let frame: Array1<Complex32> = Array1::from_elem(freq_size, Complex32::new(2.0, 1.0));
+            rolling_spec.push_back(frame);
+        }
+
+        // Create output spectrum initialized to zero
+        let mut output_spec: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); freq_size];
+
+        // Set DC and Nyquist to known values
+        output_spec[0] = Complex32::new(10.0, 0.0);
+        output_spec[nyquist_idx] = Complex32::new(20.0, 0.0);
+
+        // Create non-zero coefficients
+        let coefs = Array2::from_elem((nb_df, df_order * 2), 1.0);
+
+        // Apply deep filtering
+        apply_df(&rolling_spec, &coefs, &mut output_spec, nb_df, df_order);
+
+        // Middle bins (1 to nb_df-1, excluding Nyquist if in range) should be modified
+        // They were initialized to zero and should now have non-zero values from convolution
+        let middle_bin = 1.min(nb_df - 1);
+        if middle_bin > 0 && middle_bin != nyquist_idx && middle_bin < nb_df {
+            // The bin should have been modified by apply_df (no longer zero)
+            let is_modified = output_spec[middle_bin].re.abs() > 1e-10
+                || output_spec[middle_bin].im.abs() > 1e-10;
+            assert!(
+                is_modified,
+                "Middle bins should be modified by apply_df convolution"
+            );
+        }
+    }
+
+    #[test]
+    fn test_frame_synthesis_after_apply_df_succeeds() {
+        // Integration test: verify that a spectrum processed through apply_df
+        // can successfully pass through frame_synthesis (DC/Nyquist remain valid).
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        let freq_size = state.freq_size;
+        let nb_df = state.nb_df;
+        let df_order = state.df_order;
+        let nyquist_idx = freq_size - 1;
+
+        // Create rolling spectra buffer
+        let mut rolling_spec: VecDeque<Array1<Complex32>> = VecDeque::new();
+        for _ in 0..df_order {
+            let frame: Array1<Complex32> = Array1::from_elem(freq_size, Complex32::new(1.0, 0.5));
+            rolling_spec.push_back(frame);
+        }
+
+        // Start with a valid spectrum (DC and Nyquist have zero imaginary)
+        let mut spectrum: Vec<Complex32> = (0..freq_size)
+            .map(|i| Complex32::new(0.5, if i == 0 || i == nyquist_idx { 0.0 } else { 0.1 }))
+            .collect();
+
+        // Apply DF (which should preserve DC and Nyquist)
+        let coefs = Array2::from_elem((nb_df, df_order * 2), 0.5);
+        apply_df(&rolling_spec, &coefs, &mut spectrum, nb_df, df_order);
+
+        // Verify DC and Nyquist are still valid for ISTFT
+        assert!(
+            spectrum[0].im.abs() < 1e-10,
+            "DC bin imaginary should be zero after apply_df"
+        );
+        assert!(
+            spectrum[nyquist_idx].im.abs() < 1e-10,
+            "Nyquist bin imaginary should be zero after apply_df"
+        );
+
+        // frame_synthesis should succeed with this spectrum
+        let result = state.frame_synthesis(&mut spectrum);
+        assert!(
+            result.is_ok(),
+            "frame_synthesis should succeed after apply_df preserves DC/Nyquist"
+        );
+
+        // Output should be finite
+        let output = result.unwrap();
+        for &s in &output {
+            assert!(s.is_finite(), "Output should be finite");
+        }
+    }
+
+    #[test]
     fn test_compute_feat_erb_with_zeros() {
         let params = DfParams::default();
         let state = DfState::new(&params);
@@ -999,9 +1176,13 @@ mod tests {
         // Create all-zero input
         let zero_frame = vec![0.0f32; params.hop_size];
 
-        let spectrum = state.frame_analysis(&zero_frame);
+        let spectrum = state
+            .frame_analysis(&zero_frame)
+            .expect("frame_analysis failed");
         let mut spec_vec: Vec<Complex32> = spectrum.to_vec();
-        let output = state.frame_synthesis(&mut spec_vec);
+        let output = state
+            .frame_synthesis(&mut spec_vec)
+            .expect("frame_synthesis failed");
 
         // Output should be finite
         for &s in &output {
@@ -1020,9 +1201,13 @@ mod tests {
         // Create very small input
         let tiny_frame = vec![1e-20f32; params.hop_size];
 
-        let spectrum = state.frame_analysis(&tiny_frame);
+        let spectrum = state
+            .frame_analysis(&tiny_frame)
+            .expect("frame_analysis failed");
         let mut spec_vec: Vec<Complex32> = spectrum.to_vec();
-        let output = state.frame_synthesis(&mut spec_vec);
+        let output = state
+            .frame_synthesis(&mut spec_vec)
+            .expect("frame_synthesis failed");
 
         // Output should be finite
         for &s in &output {
@@ -1041,9 +1226,13 @@ mod tests {
         // Create large input (but valid f32 range)
         let large_frame = vec![0.999f32; params.hop_size];
 
-        let spectrum = state.frame_analysis(&large_frame);
+        let spectrum = state
+            .frame_analysis(&large_frame)
+            .expect("frame_analysis failed");
         let mut spec_vec: Vec<Complex32> = spectrum.to_vec();
-        let output = state.frame_synthesis(&mut spec_vec);
+        let output = state
+            .frame_synthesis(&mut spec_vec)
+            .expect("frame_synthesis failed");
 
         // Output should be finite
         for &s in &output {
@@ -1051,6 +1240,111 @@ mod tests {
                 s.is_finite(),
                 "Output contains non-finite value with large input"
             );
+        }
+    }
+
+    #[test]
+    fn test_irfft_returns_error_for_invalid_dc_bin() {
+        // Test that irfft propagates FftError::InputValues when DC bin has non-zero imaginary part.
+        // This verifies error propagation for IFFT failures per Task 017 requirements.
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        // Create a spectrum with invalid DC bin (non-zero imaginary part)
+        let mut invalid_spectrum = vec![Complex32::new(0.0, 0.0); state.freq_size];
+        invalid_spectrum[0] = Complex32::new(1.0, 1.0); // DC bin with non-zero imaginary - invalid for real FFT
+
+        let mut output = vec![0.0f32; state.fft_size];
+
+        // irfft should return an error for invalid input
+        let result = state.irfft(&mut invalid_spectrum, &mut output);
+        assert!(
+            result.is_err(),
+            "irfft should return error for invalid DC bin with non-zero imaginary part"
+        );
+    }
+
+    #[test]
+    fn test_irfft_returns_error_for_invalid_nyquist_bin() {
+        // Test that irfft propagates FftError::InputValues when Nyquist bin has non-zero imaginary part.
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        // Create a spectrum with invalid Nyquist bin (non-zero imaginary part)
+        let mut invalid_spectrum = vec![Complex32::new(0.0, 0.0); state.freq_size];
+        let nyquist_idx = state.freq_size - 1;
+        invalid_spectrum[nyquist_idx] = Complex32::new(1.0, 1.0); // Nyquist bin with non-zero imaginary - invalid
+
+        let mut output = vec![0.0f32; state.fft_size];
+
+        // irfft should return an error for invalid input
+        let result = state.irfft(&mut invalid_spectrum, &mut output);
+        assert!(
+            result.is_err(),
+            "irfft should return error for invalid Nyquist bin with non-zero imaginary part"
+        );
+    }
+
+    #[test]
+    fn test_frame_synthesis_returns_error_for_invalid_dc_bin() {
+        // Test that frame_synthesis returns FftError::InputValues when DC bin has
+        // non-zero imaginary part. This allows callers to handle IFFT failures via
+        // passthrough with warning logs (Task 023/025 requirement).
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        // Create a spectrum with invalid DC bin (non-zero imaginary part)
+        let mut spectrum = vec![Complex32::new(0.0, 0.0); state.freq_size];
+        spectrum[0] = Complex32::new(1.0, 0.5); // DC with non-zero imaginary - invalid
+
+        let result = state.frame_synthesis(&mut spectrum);
+        assert!(
+            result.is_err(),
+            "frame_synthesis should return error for invalid DC bin with non-zero imaginary part"
+        );
+    }
+
+    #[test]
+    fn test_frame_synthesis_returns_error_for_invalid_nyquist_bin() {
+        // Test that frame_synthesis returns FftError::InputValues when Nyquist bin has
+        // non-zero imaginary part.
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        // Create a spectrum with invalid Nyquist bin (non-zero imaginary part)
+        let mut spectrum = vec![Complex32::new(0.0, 0.0); state.freq_size];
+        let nyquist_idx = state.freq_size - 1;
+        spectrum[nyquist_idx] = Complex32::new(1.0, 0.5); // Nyquist with non-zero imaginary - invalid
+
+        let result = state.frame_synthesis(&mut spectrum);
+        assert!(
+            result.is_err(),
+            "frame_synthesis should return error for invalid Nyquist bin with non-zero imaginary part"
+        );
+    }
+
+    #[test]
+    fn test_frame_synthesis_succeeds_with_valid_spectrum() {
+        // Test that frame_synthesis succeeds when DC and Nyquist bins have zero imaginary parts.
+        let params = DfParams::default();
+        let mut state = DfState::new(&params);
+
+        // Create a valid spectrum (DC and Nyquist with zero imaginary parts)
+        let mut spectrum = vec![Complex32::new(1.0, 0.0); state.freq_size];
+        spectrum[0] = Complex32::new(1.0, 0.0); // DC with zero imaginary - valid
+        let nyquist_idx = state.freq_size - 1;
+        spectrum[nyquist_idx] = Complex32::new(1.0, 0.0); // Nyquist with zero imaginary - valid
+
+        let result = state.frame_synthesis(&mut spectrum);
+        assert!(
+            result.is_ok(),
+            "frame_synthesis should succeed with valid DC/Nyquist bins"
+        );
+
+        // Output should be finite
+        let output = result.unwrap();
+        for &s in &output {
+            assert!(s.is_finite(), "Output should contain finite values");
         }
     }
 }

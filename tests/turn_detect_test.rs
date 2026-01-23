@@ -693,7 +693,7 @@ mod vad_turn_integration_tests {
 
         for frame in &speech_frames {
             // Accumulate in VAD audio buffer
-            vad_state.audio_buffer.write().extend_from_slice(frame);
+            vad_state.audio_buffer.write().extend(frame);
 
             // Simulate VAD probability for speech (high probability)
             let speech_prob = 0.9;
@@ -715,7 +715,7 @@ mod vad_turn_integration_tests {
         let mut turn_end_detected = false;
         for frame in &silence_frames {
             // Accumulate in VAD audio buffer
-            vad_state.audio_buffer.write().extend_from_slice(frame);
+            vad_state.audio_buffer.write().extend(frame);
 
             // Simulate VAD probability for silence (low probability)
             let silence_prob = 0.1;
@@ -730,7 +730,7 @@ mod vad_turn_integration_tests {
         assert!(turn_end_detected, "Should have detected TurnEnd");
 
         // Phase 3: Run smart-turn on accumulated audio
-        let audio_buffer = vad_state.audio_buffer.read().clone();
+        let audio_buffer: Vec<i16> = vad_state.audio_buffer.read().iter().copied().collect();
         assert!(
             audio_buffer.len() > 16000,
             "Should have more than 1 second of audio"
@@ -802,14 +802,14 @@ mod vad_turn_integration_tests {
         // Phase 1: Initial speech
         for _ in 0..5 {
             let frame: Vec<i16> = vec![1000i16; 512];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // Phase 2: Brief silence (not enough for TurnEnd)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; 512];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.1);
             // Should be SilenceDetected, not TurnEnd
             if let Some(e) = event {
@@ -819,7 +819,7 @@ mod vad_turn_integration_tests {
 
         // Phase 3: Speech resumes
         let frame: Vec<i16> = vec![1000i16; 512];
-        vad_state.audio_buffer.write().extend_from_slice(&frame);
+        vad_state.audio_buffer.write().extend(&frame);
         let event = silence_tracker.process(0.9);
         assert_eq!(event, Some(VADEvent::SpeechResumed));
 
@@ -922,7 +922,7 @@ mod audio_buffer_accumulation_tests {
         let initial_speech_frames = 16;
         for i in 0..initial_speech_frames {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size]; // Distinguishable values
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9); // High speech probability
         }
 
@@ -938,7 +938,7 @@ mod audio_buffer_accumulation_tests {
         let brief_silence_frames = 2;
         for _ in 0..brief_silence_frames {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.1); // Low speech probability
             // Should be SilenceDetected, not TurnEnd
             if let Some(e) = event {
@@ -957,7 +957,7 @@ mod audio_buffer_accumulation_tests {
 
             // First frame after silence triggers SpeechResumed
             // In the real implementation, process_vad_event does NOT clear the buffer on SpeechResumed
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.9);
 
             if i == 0 {
@@ -975,7 +975,7 @@ mod audio_buffer_accumulation_tests {
         let max_silence_frames = 10;
         for _ in 0..max_silence_frames {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             if let Some(event) = silence_tracker.process(0.1)
                 && event == VADEvent::TurnEnd
             {
@@ -1057,7 +1057,7 @@ mod audio_buffer_accumulation_tests {
         // Speech for first turn
         for i in 0..5 {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1069,7 +1069,7 @@ mod audio_buffer_accumulation_tests {
         // Silence until TurnEnd
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.1);
             if let Some(VADEvent::TurnEnd) = event {
                 // In real implementation, turn detection would run here
@@ -1112,7 +1112,7 @@ mod audio_buffer_accumulation_tests {
         // New turn accumulates fresh audio
         for i in 0..3 {
             let frame: Vec<i16> = vec![(1000 + i * 100) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1153,7 +1153,7 @@ mod audio_buffer_accumulation_tests {
         let phase1_frames = 10;
         for i in 0..phase1_frames {
             let frame: Vec<i16> = vec![(i * 100) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1161,7 +1161,7 @@ mod audio_buffer_accumulation_tests {
         let mut first_turn_end = false;
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 first_turn_end = true;
                 // In real system, turn detection would be spawned here
@@ -1179,7 +1179,7 @@ mod audio_buffer_accumulation_tests {
         let phase3_frames = 5;
         for i in 0..phase3_frames {
             let frame: Vec<i16> = vec![((phase1_frames + i) * 100) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
 
             if i == 0 {
                 let event = silence_tracker.process(0.9);
@@ -1203,7 +1203,7 @@ mod audio_buffer_accumulation_tests {
         let mut second_turn_end = false;
         for _ in 0..3 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 second_turn_end = true;
                 break;
@@ -1359,14 +1359,14 @@ mod audio_buffer_accumulation_tests {
         // "Hello"
         for i in 0..5 {
             let frame: Vec<i16> = vec![1000 + (i * 10) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // "..." (short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.1);
             assert_ne!(
                 event,
@@ -1378,7 +1378,7 @@ mod audio_buffer_accumulation_tests {
         // "um"
         for i in 0..3 {
             let frame: Vec<i16> = vec![2000 + (i * 10) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let event = silence_tracker.process(0.9);
             if i == 0 {
                 assert_eq!(
@@ -1392,28 +1392,28 @@ mod audio_buffer_accumulation_tests {
         // "..." (another short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.1);
         }
 
         // "how are"
         for i in 0..4 {
             let frame: Vec<i16> = vec![3000 + (i * 10) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
         // "..." (yet another short pause)
         for _ in 0..2 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.1);
         }
 
         // "you?"
         for i in 0..3 {
             let frame: Vec<i16> = vec![4000 + (i * 10) as i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             let _ = silence_tracker.process(0.9);
         }
 
@@ -1421,7 +1421,7 @@ mod audio_buffer_accumulation_tests {
         let mut turn_end_detected = false;
         for _ in 0..10 {
             let frame: Vec<i16> = vec![0i16; frame_size];
-            vad_state.audio_buffer.write().extend_from_slice(&frame);
+            vad_state.audio_buffer.write().extend(&frame);
             if let Some(VADEvent::TurnEnd) = silence_tracker.process(0.1) {
                 turn_end_detected = true;
                 break;
@@ -1716,14 +1716,14 @@ mod performance_tests {
         let audio = generate_sine_wave(440.0, 8.0, 16000);
         let mel_features = extractor.extract(&audio).unwrap();
 
-        // Warm-up inference
-        let _ = model.predict(mel_features.view()).await;
+        // Warm-up inference (predict is now synchronous)
+        let _ = model.predict(mel_features.view());
 
-        // Measure inference-only time
+        // Measure inference-only time (predict is synchronous)
         let iterations = 10;
         let start = Instant::now();
         for _ in 0..iterations {
-            let _ = model.predict(mel_features.view()).await;
+            let _ = model.predict(mel_features.view());
         }
         let total_elapsed = start.elapsed();
         let avg_elapsed = total_elapsed / iterations;
@@ -2154,7 +2154,7 @@ mod stt_result_processor_integration_tests {
         let audio_samples: Vec<i16> = super::generate_sine_wave(440.0, 1.0, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio_samples);
+            buffer.extend(&audio_samples);
         }
 
         // Verify audio buffer has samples
@@ -2253,7 +2253,7 @@ mod stt_result_processor_integration_tests {
         let short_audio: Vec<i16> = super::generate_sine_wave(440.0, 0.5, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&short_audio);
+            buffer.extend(&short_audio);
         }
 
         // First TurnEnd - likely to be rejected due to high threshold
@@ -2279,7 +2279,7 @@ mod stt_result_processor_integration_tests {
         let more_audio: Vec<i16> = super::generate_sine_wave(880.0, 1.0, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&more_audio);
+            buffer.extend(&more_audio);
         }
 
         // Lower threshold and try again
@@ -2384,7 +2384,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = super::generate_sine_wave(440.0, 2.0, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // TurnEnd - should trigger detection with short timeout
@@ -2475,7 +2475,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = super::generate_sine_wave(440.0, 1.0, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // TurnEnd - starts detection task
@@ -2539,7 +2539,7 @@ mod stt_result_processor_integration_tests {
         let more_audio: Vec<i16> = super::generate_sine_wave(880.0, 0.5, 16000);
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&more_audio);
+            buffer.extend(&more_audio);
         }
 
         // Another TurnEnd should be able to trigger detection
@@ -2604,7 +2604,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // SilenceDetected - should NOT trigger detection
@@ -2665,7 +2665,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // TurnEnd - should be ignored because not waiting
@@ -2780,7 +2780,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // TurnEnd - should be skipped because detection already in progress
@@ -2842,7 +2842,7 @@ mod stt_result_processor_integration_tests {
         let audio: Vec<i16> = vec![1000i16; 16000];
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&audio);
+            buffer.extend(&audio);
         }
 
         // TurnEnd without detector - should fire based on silence alone
@@ -2908,7 +2908,7 @@ mod stt_result_processor_integration_tests {
         let initial_audio: Vec<i16> = vec![1000i16; 8000]; // 0.5s at 16kHz
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&initial_audio);
+            buffer.extend(&initial_audio);
         }
 
         // Verify initial buffer state
@@ -2998,7 +2998,7 @@ mod stt_result_processor_integration_tests {
         let initial_samples = initial_audio.len();
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&initial_audio);
+            buffer.extend(&initial_audio);
         }
 
         // === PHASE 2: Simulate rejection scenario state ===
@@ -3032,7 +3032,7 @@ mod stt_result_processor_integration_tests {
         let additional_samples = additional_audio.len();
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&additional_audio);
+            buffer.extend(&additional_audio);
         }
 
         // Verify buffer has grown (accumulated audio)
@@ -3122,7 +3122,7 @@ mod stt_result_processor_integration_tests {
         let old_audio: Vec<i16> = vec![500i16; 8000];
         {
             let mut buffer = vad_state.audio_buffer.write();
-            buffer.extend_from_slice(&old_audio);
+            buffer.extend(&old_audio);
         }
 
         assert_eq!(

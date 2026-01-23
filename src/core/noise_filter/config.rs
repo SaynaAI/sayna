@@ -92,7 +92,7 @@ pub struct NoiseFilterConfig {
 
     /// Attenuation limit in dB (higher = more aggressive filtering).
     /// Default: 100.0 dB (essentially unlimited attenuation).
-    /// Note: The runtime worker pool in `src/utils/noise_filter.rs` overrides this
+    /// Note: The runtime worker pool in `src/core/noise_filter/pool.rs` overrides this
     /// to 40.0 dB for better speech naturalness in real-time voice processing.
     /// A 40dB limit ensures ~1% of the original signal remains, preventing artifacts.
     pub atten_lim_db: f32,

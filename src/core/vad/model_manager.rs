@@ -4,7 +4,9 @@
 //! and inference for Silero-VAD voice activity detection.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use ndarray::Array3;
@@ -51,8 +53,9 @@ const STATE_DIM_2: usize = 128;
 /// For 16kHz: 512 samples + 64 context samples from the previous frame.
 /// The context buffer is automatically managed between calls to `process_audio`.
 pub struct VADModelManager {
-    /// ONNX inference session wrapped for thread safety
-    session: Arc<Mutex<Session>>,
+    /// ONNX inference session wrapped for thread safety.
+    /// This is `None` only in test stubs created by `new_stub_for_testing()`.
+    session: Option<Arc<Mutex<Session>>>,
 
     /// Configuration for the VAD model
     config: SileroVADConfig,
@@ -117,7 +120,7 @@ impl VADModelManager {
         );
 
         Ok(Self {
-            session: Arc::new(Mutex::new(session)),
+            session: Some(Arc::new(Mutex::new(session))),
             config,
             state,
             context,
@@ -230,9 +233,11 @@ impl VADModelManager {
 
     /// Run ONNX inference with the prepared input.
     fn run_inference(&mut self, input: &[f32]) -> Result<f32> {
-        let mut session = self.session.lock().map_err(|e| {
-            anyhow::anyhow!("VAD session mutex poisoned (likely panic during inference): {}", e)
-        })?;
+        let session_arc = self
+            .session
+            .as_ref()
+            .context("VAD model not initialized (stub instance used in production)")?;
+        let mut session = session_arc.lock();
 
         let input_len = input.len();
 
@@ -341,6 +346,30 @@ impl VADModelManager {
     /// Get the sample rate in Hz.
     pub fn sample_rate(&self) -> u32 {
         self.config.sample_rate.as_hz()
+    }
+
+    /// Test-only: Create a stub VADModelManager without loading a real ONNX model.
+    ///
+    /// This constructor creates a `VADModelManager` instance with `session: None`.
+    /// It should only be used in tests where `VADState::set_force_error(true)` is set,
+    /// which causes `process_audio_chunk` to return an error before any model access.
+    ///
+    /// # Panics
+    ///
+    /// Calling `process_audio` on a stub instance will return an error (not panic),
+    /// as `run_inference` checks for `None` session.
+    #[cfg(test)]
+    pub fn new_stub_for_testing(config: SileroVADConfig) -> Self {
+        let context_size = config.sample_rate.context_size();
+        let sample_rate_tensor = config.sample_rate.as_hz() as i64;
+
+        Self {
+            session: None, // No real ONNX session
+            config,
+            state: Array3::<f32>::zeros((STATE_DIM_0, STATE_DIM_1, STATE_DIM_2)),
+            context: vec![0.0f32; context_size],
+            sample_rate_tensor,
+        }
     }
 }
 

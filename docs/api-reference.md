@@ -31,7 +31,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | Provider layer | `src/core/stt/*`, `src/core/tts/*` | Trait-based adapters that normalize provider-specific options, handle retries, and expose metrics. |
 | WebSocket stack | `src/handlers/ws/*` | Parses messages, validates configs, orchestrates LiveKit setup, and streams audio/data. |
 | LiveKit integration | `src/livekit/*` | Token creation, room management, recording hooks, and participant filtering for mirrored audio. |
-| Noise filter | `src/core/noise_filter/*`, `src/utils/noise_filter.rs` | DeepFilterNet3-based noise suppression via ONNX Runtime for cleaner audio. |
+| Noise filter | `src/core/noise_filter/` | DeepFilterNet3-based noise suppression via ONNX Runtime for cleaner audio. |
 | Turn detection | `src/core/turn_detect/*` | ONNX-based turn detection for better speech-final timing. |
 | Request & cache utilities | `src/utils/req_manager.rs`, `src/core/cache/*` | Shared HTTP/2 pools plus filesystem/in-memory caches for previously synthesized audio. |
 | Routing layer | `src/main.rs`, `src/routes/*`, `src/handlers/*` | Axum routers, REST handlers, and middleware wiring. |
@@ -45,7 +45,7 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | `src/handlers/` | REST and WebSocket handlers (`api.rs`, `voices.rs`, `speak.rs`, `livekit.rs`, `ws/`). |
 | `src/core/` | Provider implementations, cache infrastructure, voice manager, turn detection, and shared state. |
 | `src/livekit/` | Client + manager used to join rooms, publish audio, and start/stop recording egress. |
-| `src/utils/` | Reusable utilities such as the HTTP request manager and noise filtering helpers. |
+| `src/utils/` | Reusable utilities such as the HTTP request manager. |
 | `tests/` | Integration tests covering REST, WebSocket flows, and LiveKit/token handling. |
 | `docs/` | Human-facing documentation (this file, authentication guide, API reference assets). |
 

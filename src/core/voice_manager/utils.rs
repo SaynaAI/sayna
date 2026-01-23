@@ -4,8 +4,11 @@
 #[cfg(feature = "stt-vad")]
 pub(crate) const MIN_AUDIO_SAMPLES_FOR_TURN_DETECTION: usize = 8000;
 
-/// Maximum audio samples for VAD buffer (30 seconds at 16kHz).
-/// Prevents unbounded memory growth during continuous noise or long speech segments.
+/// Maximum audio samples for VAD ring buffer (30 seconds at 16kHz).
+/// The VAD audio buffer uses a ring buffer strategy: when new audio would exceed
+/// this limit, oldest samples are dropped to make room for the most recent audio.
+/// This ensures turn detection always has access to recent context while preventing
+/// unbounded memory growth during continuous streams.
 #[cfg(feature = "stt-vad")]
 pub(crate) const MAX_VAD_AUDIO_SAMPLES: usize = 480_000;
 

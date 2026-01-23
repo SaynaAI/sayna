@@ -35,8 +35,9 @@ use bytes::Bytes;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::Instant;
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tracing::info;
+use tracing::{debug, info};
 
 use super::{NoiseFilter, NoiseFilterConfig};
 
@@ -87,14 +88,14 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
 
             // Build config with cache path from environment
             let cache_path = get_cache_path();
-            // Note: atten_lim_db is set to 15.0 for STT-optimized processing.
-            // 15dB = ~18% signal floor, preserving speech harmonics for accurate transcription.
+            // Note: atten_lim_db is set to 25.0 for STT-optimized processing.
+            // 25dB signal floor, preserving speech harmonics for accurate transcription.
             // Higher values (40dB) cause over-attenuation and ~20% WER degradation for STT.
             // Post-filter is disabled (0.0) as it causes additional over-attenuation.
             // See: https://github.com/Rikorose/DeepFilterNet/issues/483
             let config = NoiseFilterConfig {
                 cache_path,
-                atten_lim_db: 15.0, // Conservative limit for STT quality (vs 40dB for aggressive filtering)
+                atten_lim_db: 25.0, // Conservative limit for STT quality (vs 40dB for aggressive filtering)
                 post_filter_beta: 0.0, // Disabled - causes over-attenuation harmful to STT
                 ..Default::default()
             };
@@ -110,7 +111,7 @@ static SENDER_POOL: LazyLock<SenderPool> = LazyLock::new(|| {
             };
 
             info!(
-                "DeepFilterNet ORT worker initialized with STT-optimized settings (atten_lim=15dB, no post-filter)"
+                "DeepFilterNet ORT worker initialized with STT-optimized settings (atten_lim=25dB, no post-filter)"
             );
 
             // The worker's main loop. It blocks efficiently until a task arrives.
@@ -265,7 +266,8 @@ fn process_audio_chunk(
         return Ok(pcm.to_owned());
     }
 
-    // Process through NoiseFilter
+    // Process through NoiseFilter with timing
+    let inference_start = Instant::now();
     let filtered = match filter.process(&samples) {
         Ok(f) => f,
         Err(e) => {
@@ -273,6 +275,29 @@ fn process_audio_chunk(
             return Ok(pcm.to_owned());
         }
     };
+    let inference_duration = inference_start.elapsed();
+
+    // Fallback: if input was non-empty but output is empty, pass through original bytes
+    // to prevent STT starvation (DeepFilterNet may buffer when input < hop size)
+    if filtered.is_empty() {
+        debug!(
+            input_bytes = pcm_len,
+            input_samples = sample_count,
+            "Noise filter output empty, passing through original bytes"
+        );
+        return Ok(pcm.to_owned());
+    }
+
+    // Log noise filter inference timing and byte counts
+    let output_bytes = filtered.len() * 2;
+    debug!(
+        input_bytes = pcm_len,
+        input_samples = sample_count,
+        output_bytes = output_bytes,
+        output_samples = filtered.len(),
+        inference_ms = inference_duration.as_secs_f64() * 1000.0,
+        "Noise filter inference completed"
+    );
 
     // Convert back to PCM bytes
     let mut result = Vec::with_capacity(filtered.len() * 2);
@@ -397,12 +422,12 @@ impl StreamNoiseProcessor {
         };
 
         // Build config with cache path from environment
-        // STT-optimized: 15dB limit preserves speech, post-filter disabled
+        // STT-optimized: 25dB limit preserves speech, post-filter disabled
         let cache_path = get_cache_path();
         let config = NoiseFilterConfig {
             cache_path,
             sample_rate,
-            atten_lim_db: 15.0, // Conservative for STT quality
+            atten_lim_db: 25.0,    // Conservative for STT quality
             post_filter_beta: 0.0, // Disabled - causes over-attenuation
             ..Default::default()
         };

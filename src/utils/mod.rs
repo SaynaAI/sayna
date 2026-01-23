@@ -1,5 +1,3 @@
-pub mod noise_filter;
-pub use noise_filter::reduce_noise_async;
 pub mod phone_validation;
 pub use phone_validation::validate_phone_number;
 pub mod req_manager;

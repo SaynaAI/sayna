@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -9,7 +9,7 @@ use crate::core::turn_detect::{
 };
 
 pub struct TurnDetector {
-    model: Arc<tokio::sync::Mutex<ModelManager>>,
+    model: Arc<Mutex<ModelManager>>,
     feature_extractor: Arc<FeatureExtractor>,
     config: TurnDetectorConfig,
 }
@@ -30,7 +30,7 @@ impl TurnDetector {
             config
         );
 
-        let model = Arc::new(tokio::sync::Mutex::new(
+        let model = Arc::new(Mutex::new(
             ModelManager::new(config.clone())
                 .await
                 .context("Failed to initialize model manager")?,
@@ -48,6 +48,10 @@ impl TurnDetector {
     }
 
     /// Predict the probability that the user has finished their turn.
+    ///
+    /// Feature extraction and model inference run in `spawn_blocking` to avoid
+    /// blocking the async runtime. This allows timeouts to fire properly even
+    /// when the CPU-bound work is slow.
     ///
     /// # Arguments
     /// * `audio` - Raw audio samples as i16 PCM (16kHz mono)
@@ -68,35 +72,81 @@ impl TurnDetector {
             return Ok(0.0); // Empty audio is not a complete turn
         }
 
-        let start = Instant::now();
+        // Clone what we need for the blocking task
+        let audio_vec = audio.to_vec();
+        let feature_extractor = self.feature_extractor.clone();
+        let model = self.model.clone();
+        let config_mel_bins = self.config.mel_bins;
+        let config_mel_frames = self.config.mel_frames;
 
-        // Extract mel spectrogram features
-        let mel_features = self
-            .feature_extractor
-            .extract(audio)
-            .context("Failed to extract mel features")?;
+        // Run feature extraction and inference in spawn_blocking so timeouts can fire
+        let audio_sample_count = audio_vec.len();
+        let probability = tokio::task::spawn_blocking(move || -> Result<f32> {
+            let overall_start = Instant::now();
 
-        debug!("Feature extraction completed in {:?}", start.elapsed());
+            // Extract mel spectrogram features with timing
+            let feature_start = Instant::now();
+            let mel_features = feature_extractor
+                .extract(&audio_vec)
+                .context("Failed to extract mel features")?;
+            let feature_duration = feature_start.elapsed();
 
-        // Run model inference
-        let probability = self
-            .model
-            .lock()
-            .await
-            .predict(mel_features.view())
-            .await
-            .context("Model prediction failed")?;
+            debug!(
+                audio_samples = audio_sample_count,
+                feature_extraction_ms = feature_duration.as_secs_f64() * 1000.0,
+                "Smart-turn feature extraction completed"
+            );
 
-        let elapsed = start.elapsed();
-        debug!(
-            "Smart-turn prediction completed in {:?}, probability: {:.4}",
-            elapsed, probability
-        );
+            // Validate dimensions before prediction
+            let (mel_bins, mel_frames) = mel_features.dim();
+            if mel_bins != config_mel_bins || mel_frames != config_mel_frames {
+                anyhow::bail!(
+                    "Invalid mel spectrogram dimensions: got ({}, {}), expected ({}, {})",
+                    mel_bins,
+                    mel_frames,
+                    config_mel_bins,
+                    config_mel_frames
+                );
+            }
 
-        // Warn if inference is slow
-        if elapsed > Duration::from_millis(50) {
-            warn!("Smart-turn prediction took longer than 50ms: {:?}", elapsed);
-        }
+            // Run model inference with timing
+            let inference_start = Instant::now();
+            let mut model_guard = model.lock().map_err(|e| {
+                anyhow::anyhow!(
+                    "Turn detection model mutex poisoned (likely panic during inference): {}",
+                    e
+                )
+            })?;
+
+            let probability = model_guard
+                .predict(mel_features.view())
+                .context("Model prediction failed")?;
+            let inference_duration = inference_start.elapsed();
+
+            let total_duration = overall_start.elapsed();
+            debug!(
+                audio_samples = audio_sample_count,
+                feature_extraction_ms = feature_duration.as_secs_f64() * 1000.0,
+                inference_ms = inference_duration.as_secs_f64() * 1000.0,
+                total_ms = total_duration.as_secs_f64() * 1000.0,
+                probability = probability,
+                "Smart-turn prediction completed"
+            );
+
+            // Warn if inference is slow
+            if total_duration > Duration::from_millis(50) {
+                warn!(
+                    total_ms = total_duration.as_secs_f64() * 1000.0,
+                    feature_ms = feature_duration.as_secs_f64() * 1000.0,
+                    inference_ms = inference_duration.as_secs_f64() * 1000.0,
+                    "Smart-turn prediction took longer than 50ms"
+                );
+            }
+
+            Ok(probability)
+        })
+        .await
+        .context("spawn_blocking task panicked")??;
 
         Ok(probability)
     }

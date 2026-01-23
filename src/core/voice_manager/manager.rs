@@ -1,5 +1,6 @@
 //! Main VoiceManager implementation
 
+use bytes::Bytes;
 use parking_lot::RwLock as SyncRwLock;
 use std::future::Future;
 use std::pin::Pin;
@@ -7,13 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tokio::time::Duration;
-use tracing::debug;
+use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "stt-vad")]
 use super::vad_processor::VADState;
 use crate::core::cache::store::CacheStore;
+use crate::core::noise_filter::StreamNoiseProcessor;
 #[cfg(feature = "stt-vad")]
-use crate::core::vad::{SilenceTracker, SilenceTrackerConfig, SileroVAD, VADEvent};
+use crate::core::vad::{SilenceTracker, SilenceTrackerConfig, SileroVAD};
 use crate::core::{
     create_stt_provider, create_tts_provider,
     stt::{
@@ -86,6 +88,11 @@ pub struct VoiceManager {
 
     // Notification for audio clear completion instead of sleep
     clear_notify: Arc<Notify>,
+
+    // Optional noise processor for DeepFilterNet noise suppression.
+    // When enabled, audio is filtered before VAD and STT processing.
+    // Uses RwLock for async initialization during start().
+    noise_processor: Arc<RwLock<Option<StreamNoiseProcessor>>>,
 }
 
 /// Components returned from initialization.
@@ -304,6 +311,8 @@ impl VoiceManager {
             }),
             config,
             clear_notify: Arc::new(Notify::new()),
+            // Noise processor is initialized lazily in start() if enabled
+            noise_processor: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -371,6 +380,31 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn start(&self) -> VoiceManagerResult<()> {
+        // Initialize noise processor if enabled
+        if self.config.noise_filter_config.enabled {
+            let sample_rate = self.config.noise_filter_config.sample_rate;
+            info!(
+                "Initializing noise processor with sample_rate={}Hz",
+                sample_rate
+            );
+            match StreamNoiseProcessor::new(sample_rate).await {
+                Ok(processor) => {
+                    let mut noise_processor = self.noise_processor.write().await;
+                    *noise_processor = Some(processor);
+                    info!("Noise processor initialized successfully");
+                }
+                Err(e) => {
+                    // Log and fall back to passthrough - don't fail the whole start
+                    warn!(
+                        "Failed to initialize noise processor: {:?}. Audio will pass through unfiltered.",
+                        e
+                    );
+                }
+            }
+        } else {
+            debug!("Noise filtering disabled in config");
+        }
+
         // Connect STT provider
         {
             let mut stt = self.stt.write().await;
@@ -502,58 +536,81 @@ impl VoiceManager {
     /// # }
     /// ```
     pub async fn receive_audio(&self, audio: Vec<u8>) -> VoiceManagerResult<()> {
-        // Process audio through VAD when stt-vad feature is compiled
-        // VAD is always active under stt-vad feature - no runtime config switch
+        // Apply noise filtering if enabled and processor is initialized
+        let processed_audio = {
+            let noise_processor = self.noise_processor.read().await;
+            if let Some(ref processor) = *noise_processor {
+                let sample_rate = self.config.noise_filter_config.sample_rate;
+                match processor
+                    .process(Bytes::from(audio.clone()), sample_rate)
+                    .await
+                {
+                    Ok(filtered) => {
+                        debug!(
+                            "Noise filter processed {} bytes -> {} bytes",
+                            audio.len(),
+                            filtered.len()
+                        );
+                        filtered
+                    }
+                    Err(e) => {
+                        error!(
+                            "Noise filter error: {:?}. Passing through original audio.",
+                            e
+                        );
+                        audio
+                    }
+                }
+            } else {
+                // No noise processor, pass through unchanged
+                audio
+            }
+        };
+
+        // Process audio through VAD when stt-vad feature is compiled.
+        // VAD is always active under stt-vad feature - no runtime config switch.
+        // VAD runs concurrently with STT and errors are logged rather than propagated,
+        // ensuring STT always receives audio even if VAD processing fails.
         #[cfg(feature = "stt-vad")]
         if let Some(vad) = &self.vad {
-            self.process_audio_with_vad(&audio, vad).await?;
+            let vad = vad.clone();
+            let vad_state = self.vad_state.clone();
+            let silence_tracker = self.silence_tracker.clone();
+            let stt_result_processor = self.stt_result_processor.clone();
+            let speech_final_state = self.speech_final_state.clone();
+            let audio_for_vad = processed_audio.clone();
+
+            // Spawn VAD processing as a concurrent task - errors are logged, not propagated
+            tokio::spawn(async move {
+                match super::vad_processor::process_audio_chunk(
+                    &audio_for_vad,
+                    &vad,
+                    &vad_state,
+                    &silence_tracker,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        // Handle each VAD event through the STT result processor
+                        for event in events {
+                            stt_result_processor
+                                .process_vad_event(event, speech_final_state.clone());
+                        }
+                    }
+                    Err(e) => {
+                        // Log VAD errors but don't block STT processing
+                        warn!("VAD processing error (STT continues): {:?}", e);
+                    }
+                }
+            });
         }
 
-        // Send audio to STT provider
+        // Send audio to STT provider - always executed regardless of VAD outcome
         let mut stt = self.stt.write().await;
-        stt.send_audio(audio)
+        stt.send_audio(processed_audio)
             .await
             .map_err(VoiceManagerError::STTError)?;
         Ok(())
-    }
-
-    /// Process audio through Silero-VAD for silence detection
-    ///
-    /// This method delegates audio processing to `vad_processor::process_audio_chunk`
-    /// which handles byte-to-sample conversion, frame buffering, and VAD inference.
-    /// VAD events are then processed via `handle_vad_event` to trigger speech_final
-    /// when silence exceeds the configured threshold.
-    #[cfg(feature = "stt-vad")]
-    async fn process_audio_with_vad(
-        &self,
-        audio: &[u8],
-        vad: &Arc<RwLock<SileroVAD>>,
-    ) -> VoiceManagerResult<()> {
-        use super::vad_processor;
-
-        // Delegate audio processing to vad_processor
-        let events =
-            vad_processor::process_audio_chunk(audio, vad, &self.vad_state, &self.silence_tracker)
-                .await?;
-
-        // Handle each VAD event
-        for event in events {
-            self.handle_vad_event(event);
-        }
-
-        Ok(())
-    }
-
-    /// Handle VAD events from the SilenceTracker
-    ///
-    /// This method delegates VAD event processing to the STTResultProcessor,
-    /// which provides centralized turn detection logic for both timeout-based
-    /// and VAD-based silence detection.
-    #[cfg(feature = "stt-vad")]
-    fn handle_vad_event(&self, event: VADEvent) {
-        // Delegate to STTResultProcessor for centralized turn detection logic
-        self.stt_result_processor
-            .process_vad_event(event, self.speech_final_state.clone());
     }
 
     /// Send text to the TTS provider for synthesis
@@ -1052,3 +1109,178 @@ impl VoiceManager {
 // Ensure VoiceManager is thread-safe
 unsafe impl Send for VoiceManager {}
 unsafe impl Sync for VoiceManager {}
+
+// Test-only module for injecting stub providers
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+    use crate::core::stt::BaseSTT;
+    use crate::core::tts::BaseTTS;
+
+    impl VoiceManager {
+        /// Test-only: Get a reference to the VAD state for setting test flags.
+        #[cfg(feature = "stt-vad")]
+        pub fn get_vad_state_for_testing(&self) -> Arc<VADState> {
+            self.vad_state.clone()
+        }
+
+        /// Test-only constructor with forced VAD error support.
+        ///
+        /// This variant allows tests to inject:
+        /// - A VAD instance (so the VAD processing path is taken)
+        /// - A pre-configured VADState with `force_error` set (so VAD returns an error)
+        ///
+        /// This enables testing the VAD error path without needing a real VAD model.
+        #[cfg(feature = "stt-vad")]
+        pub fn new_with_providers_and_vad_state(
+            config: VoiceManagerConfig,
+            stt: Box<dyn BaseSTT>,
+            tts: Box<dyn BaseTTS>,
+            turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+            vad: Option<Arc<RwLock<SileroVAD>>>,
+            vad_state: Arc<VADState>,
+        ) -> VoiceManagerResult<Self> {
+            // Pre-allocate string buffers with reasonable capacity
+            const TEXT_BUFFER_CAPACITY: usize = 1024;
+            let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
+            // Initialize STT result processor with the provided VADState
+            let processing_config = Self::create_stt_processing_config(&config);
+            let vad_config = &config.vad_config.silero_config;
+            let silence_tracker_config = SilenceTrackerConfig::from_sample_rate(
+                vad_config.sample_rate.as_hz(),
+                vad_config.threshold,
+                vad_config.silence_duration_ms,
+                vad_config.min_speech_duration_ms,
+            );
+            let silence_tracker = Arc::new(SilenceTracker::new(silence_tracker_config));
+
+            let stt_result_processor = Arc::new(STTResultProcessor::with_vad_components(
+                processing_config,
+                turn_detector,
+                silence_tracker.clone(),
+                vad_state.clone(),
+            ));
+
+            Ok(Self {
+                tts: Arc::new(RwLock::new(tts)),
+                stt: Arc::new(RwLock::new(stt)),
+                tts_audio_callback: Arc::new(SyncRwLock::new(None)),
+                tts_error_callback: Arc::new(SyncRwLock::new(None)),
+                audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+                tts_complete_callback: Arc::new(SyncRwLock::new(None)),
+                speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
+                    text_buffer,
+                    turn_detection_handle: None,
+                    hard_timeout_handle: None,
+                    waiting_for_speech_final: AtomicBool::new(false),
+                    user_callback: None,
+                    turn_detection_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
+                    segment_start_ms: AtomicUsize::new(0),
+                    hard_timeout_deadline_ms: AtomicUsize::new(0),
+                    vad_turn_end_detected: AtomicBool::new(false),
+                    vad_turn_detection_handle: None,
+                })),
+                stt_result_processor,
+                vad,
+                silence_tracker,
+                vad_state,
+                interruption_state: Arc::new(InterruptionState {
+                    allow_interruption: AtomicBool::new(true),
+                    non_interruptible_until_ms: AtomicUsize::new(0),
+                    current_sample_rate: AtomicU32::new(24000),
+                    is_completed: AtomicBool::new(true),
+                }),
+                config,
+                clear_notify: Arc::new(Notify::new()),
+                noise_processor: Arc::new(RwLock::new(None)),
+            })
+        }
+
+        /// Test-only constructor that accepts pre-built STT and TTS providers.
+        ///
+        /// This allows tests to inject stub implementations for verifying
+        /// behavior in isolation (e.g., testing that STT receives audio
+        /// even when VAD errors).
+        #[cfg(feature = "stt-vad")]
+        pub fn new_with_providers(
+            config: VoiceManagerConfig,
+            stt: Box<dyn BaseSTT>,
+            tts: Box<dyn BaseTTS>,
+            turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+            vad: Option<Arc<RwLock<SileroVAD>>>,
+        ) -> VoiceManagerResult<Self> {
+            Self::new_with_providers_internal(config, stt, tts, turn_detector, vad)
+        }
+
+        #[cfg(not(feature = "stt-vad"))]
+        #[allow(dead_code)]
+        pub fn new_with_providers(
+            config: VoiceManagerConfig,
+            stt: Box<dyn BaseSTT>,
+            tts: Box<dyn BaseTTS>,
+            _turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+        ) -> VoiceManagerResult<Self> {
+            Self::new_with_providers_internal(config, stt, tts, _turn_detector)
+        }
+
+        fn new_with_providers_internal(
+            config: VoiceManagerConfig,
+            stt: Box<dyn BaseSTT>,
+            tts: Box<dyn BaseTTS>,
+            #[cfg(feature = "stt-vad")] turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+            #[cfg(not(feature = "stt-vad"))] _turn_detector: Option<Arc<RwLock<TurnDetector>>>,
+            #[cfg(feature = "stt-vad")] vad: Option<Arc<RwLock<SileroVAD>>>,
+        ) -> VoiceManagerResult<Self> {
+            // Pre-allocate string buffers with reasonable capacity
+            const TEXT_BUFFER_CAPACITY: usize = 1024;
+            let text_buffer = String::with_capacity(TEXT_BUFFER_CAPACITY);
+
+            // Initialize STT result processor and VAD components using unified method
+            #[cfg(feature = "stt-vad")]
+            let components = Self::initialize_components(&config, turn_detector);
+
+            #[cfg(not(feature = "stt-vad"))]
+            let components = Self::initialize_components(&config);
+
+            Ok(Self {
+                tts: Arc::new(RwLock::new(tts)),
+                stt: Arc::new(RwLock::new(stt)),
+                tts_audio_callback: Arc::new(SyncRwLock::new(None)),
+                tts_error_callback: Arc::new(SyncRwLock::new(None)),
+                audio_clear_callback: Arc::new(SyncRwLock::new(None)),
+                tts_complete_callback: Arc::new(SyncRwLock::new(None)),
+                speech_final_state: Arc::new(SyncRwLock::new(SpeechFinalState {
+                    text_buffer,
+                    turn_detection_handle: None,
+                    hard_timeout_handle: None,
+                    waiting_for_speech_final: AtomicBool::new(false),
+                    user_callback: None,
+                    turn_detection_last_fired_ms: AtomicUsize::new(0),
+                    last_forced_text: String::with_capacity(1024),
+                    segment_start_ms: AtomicUsize::new(0),
+                    hard_timeout_deadline_ms: AtomicUsize::new(0),
+                    vad_turn_end_detected: AtomicBool::new(false),
+                    vad_turn_detection_handle: None,
+                })),
+                stt_result_processor: components.stt_result_processor,
+                #[cfg(feature = "stt-vad")]
+                vad,
+                #[cfg(feature = "stt-vad")]
+                silence_tracker: components.silence_tracker,
+                #[cfg(feature = "stt-vad")]
+                vad_state: components.vad_state,
+                interruption_state: Arc::new(InterruptionState {
+                    allow_interruption: AtomicBool::new(true),
+                    non_interruptible_until_ms: AtomicUsize::new(0),
+                    current_sample_rate: AtomicU32::new(24000),
+                    is_completed: AtomicBool::new(true),
+                }),
+                config,
+                clear_notify: Arc::new(Notify::new()),
+                noise_processor: Arc::new(RwLock::new(None)),
+            })
+        }
+    }
+}

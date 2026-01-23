@@ -209,6 +209,11 @@ pub enum SmartTurnResult {
 /// on accumulated audio. It is used by both VAD-triggered events and the
 /// smart fallback timer.
 ///
+/// The `inference_timeout_ms` parameter (default 800ms from `SpeechFinalConfig`)
+/// wraps the detection call. Because `TurnDetector::is_turn_complete` runs the
+/// CPU-bound feature extraction and model inference in `spawn_blocking`, this
+/// timeout can fire even when the blocking thread is busy.
+///
 /// # Returns
 /// - `SmartTurnResult::Complete(method)` if turn is complete
 /// - `SmartTurnResult::Incomplete` if turn is not complete (should reset and wait)
@@ -462,9 +467,10 @@ pub fn create_smart_fallback_task(
             "Smart fallback: No new text after {}ms - executing Smart Turn detection",
             smart_fallback_ms
         );
-        let audio_samples = {
+        // Convert VecDeque to Vec for turn detection inference
+        let audio_samples: Vec<i16> = {
             let buffer = vad_state.audio_buffer.read();
-            buffer.clone()
+            buffer.iter().copied().collect()
         };
 
         if audio_samples.is_empty() {

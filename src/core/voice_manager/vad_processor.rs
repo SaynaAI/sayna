@@ -5,10 +5,12 @@
 //! to `STTResultProcessor` for better cohesion.
 
 use parking_lot::RwLock as SyncRwLock;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::debug;
 
 use crate::core::vad::{SilenceTracker, SileroVAD, VADEvent};
 
@@ -18,16 +20,17 @@ use super::utils::MAX_VAD_AUDIO_SAMPLES;
 /// Encapsulates VAD processing buffers and state per VoiceManager instance.
 ///
 /// This struct groups together:
-/// - `audio_buffer`: Accumulates ALL audio samples during an utterance for turn detection
+/// - `audio_buffer`: Ring buffer accumulating recent audio samples for turn detection
 /// - `frame_buffer`: Temporary buffer for VAD frame processing
 /// - `buffer_limit_warned`: Per-instance flag for logging buffer limit warning once
 pub struct VADState {
-    /// Buffer for accumulating audio samples for turn detection.
+    /// Ring buffer for accumulating audio samples for turn detection.
     ///
     /// Per smart-turn best practices: "run Smart Turn on the entire recording of the user's turn"
-    /// This buffer accumulates ALL samples during an utterance so that when silence is detected,
-    /// the turn detection model can analyze the complete context (up to 8 seconds).
-    pub audio_buffer: SyncRwLock<Vec<i16>>,
+    /// This buffer keeps the most recent `MAX_VAD_AUDIO_SAMPLES` (30 seconds at 16kHz).
+    /// When new audio would exceed the limit, oldest samples are dropped to make room.
+    /// This ensures turn detection always has access to the most recent audio context.
+    pub audio_buffer: SyncRwLock<VecDeque<i16>>,
 
     /// Temporary buffer for VAD frame processing.
     ///
@@ -39,38 +42,68 @@ pub struct VADState {
 
     /// Per-instance flag to log VAD buffer limit warning only once.
     buffer_limit_warned: AtomicBool,
+
+    /// Test-only flag to force `process_audio_chunk` to return an error.
+    /// Used for testing that STT continues to receive audio when VAD fails.
+    #[cfg(test)]
+    force_error: AtomicBool,
 }
 
 impl VADState {
     /// Create a new VADState with pre-allocated buffers.
     ///
-    /// - `audio_buffer_capacity`: Capacity for the audio buffer (default: 8 seconds at 16kHz)
+    /// - `audio_buffer_capacity`: Capacity for the ring buffer (default: 8 seconds at 16kHz)
     /// - `frame_buffer_capacity`: Capacity for the frame buffer (default: 512 samples)
     pub fn new(audio_buffer_capacity: usize, frame_buffer_capacity: usize) -> Self {
         Self {
-            audio_buffer: SyncRwLock::new(Vec::with_capacity(audio_buffer_capacity)),
+            audio_buffer: SyncRwLock::new(VecDeque::with_capacity(audio_buffer_capacity)),
             frame_buffer: SyncRwLock::new(Vec::with_capacity(frame_buffer_capacity)),
             buffer_limit_warned: AtomicBool::new(false),
+            #[cfg(test)]
+            force_error: AtomicBool::new(false),
         }
     }
 
     /// Clear both buffers and reset the warning flag.
     pub fn reset(&self) {
-        {
-            let mut buffer = self.audio_buffer.write();
-            buffer.clear();
-        }
-        {
-            let mut buffer = self.frame_buffer.write();
-            buffer.clear();
-        }
+        let (audio_len, frame_len) = {
+            let mut audio_buffer = self.audio_buffer.write();
+            let mut frame_buffer = self.frame_buffer.write();
+            let audio_len = audio_buffer.len();
+            let frame_len = frame_buffer.len();
+            audio_buffer.clear();
+            frame_buffer.clear();
+            (audio_len, frame_len)
+        };
         self.buffer_limit_warned.store(false, Ordering::Relaxed);
+        debug!(
+            audio_samples_cleared = audio_len,
+            frame_samples_cleared = frame_len,
+            "VAD state reset: cleared audio and frame buffers"
+        );
     }
 
     /// Clear just the audio buffer (used when new speech starts).
     pub fn clear_audio_buffer(&self) {
         let mut buffer = self.audio_buffer.write();
+        let samples_cleared = buffer.len();
         buffer.clear();
+        debug!(
+            samples_cleared = samples_cleared,
+            "VAD audio buffer cleared"
+        );
+    }
+
+    /// Test-only: Set flag to force `process_audio_chunk` to return an error.
+    #[cfg(test)]
+    pub fn set_force_error(&self, force: bool) {
+        self.force_error.store(force, Ordering::SeqCst);
+    }
+
+    /// Test-only: Check if error is forced.
+    #[cfg(test)]
+    pub fn is_force_error(&self) -> bool {
+        self.force_error.load(Ordering::SeqCst)
     }
 }
 
@@ -87,6 +120,14 @@ pub async fn process_audio_chunk(
     vad_state: &Arc<VADState>,
     silence_tracker: &Arc<SilenceTracker>,
 ) -> VoiceManagerResult<Vec<VADEvent>> {
+    // Test-only: Return error immediately if force_error flag is set
+    #[cfg(test)]
+    if vad_state.is_force_error() {
+        return Err(VoiceManagerError::InitializationError(
+            "Forced VAD error for testing".to_string(),
+        ));
+    }
+
     // Convert bytes to i16 samples (assuming 16-bit PCM little-endian)
     let samples: Vec<i16> = audio
         .chunks_exact(2)
@@ -99,24 +140,28 @@ pub async fn process_audio_chunk(
         vad_guard.frame_size()
     };
 
-    // Accumulate samples in audio_buffer for turn detection (never drained here)
+    // Accumulate samples in ring buffer for turn detection.
+    // When buffer would exceed MAX_VAD_AUDIO_SAMPLES, drop oldest samples first.
     {
         let mut audio_buffer = vad_state.audio_buffer.write();
-        if audio_buffer.len() < MAX_VAD_AUDIO_SAMPLES {
-            let remaining_capacity = MAX_VAD_AUDIO_SAMPLES - audio_buffer.len();
-            let samples_to_add = samples.len().min(remaining_capacity);
-            audio_buffer.extend_from_slice(&samples[..samples_to_add]);
 
-            if samples_to_add < samples.len()
-                && !vad_state.buffer_limit_warned.swap(true, Ordering::Relaxed)
-            {
-                warn!(
-                    "VAD audio buffer reached limit of {} samples (30 seconds). \
-                     New audio will not be buffered for turn detection until buffer is cleared.",
+        // Calculate how many samples to drop to make room for new samples
+        let new_total = audio_buffer.len() + samples.len();
+        if new_total > MAX_VAD_AUDIO_SAMPLES {
+            let samples_to_drop = new_total - MAX_VAD_AUDIO_SAMPLES;
+            audio_buffer.drain(..samples_to_drop);
+
+            if !vad_state.buffer_limit_warned.swap(true, Ordering::Relaxed) {
+                debug!(
+                    "VAD audio ring buffer at capacity ({} samples / 30 seconds). \
+                     Dropping oldest samples to keep most recent audio for turn detection.",
                     MAX_VAD_AUDIO_SAMPLES
                 );
             }
         }
+
+        // Add all new samples (buffer now has room)
+        audio_buffer.extend(samples.iter().copied());
     }
 
     // Extract complete frames from frame_buffer for VAD processing
@@ -135,16 +180,35 @@ pub async fn process_audio_chunk(
     // Collect events from processing frames
     let mut events = Vec::new();
 
-    // Process frames through VAD (without holding buffer lock)
-    // Note: Using read() instead of write() because SileroVAD::process_audio takes &self
-    // (interior mutability is provided by Arc<Mutex<VADModelManager>>)
+    // Get model reference once (brief lock acquisition, no await while holding)
+    let vad_model = {
+        let vad_guard = vad.read().await;
+        vad_guard.get_model()
+    }; // Lock released here, before any inference awaits
+
+    // Process frames through VAD using the pre-cloned model reference.
+    // This pattern avoids holding the async RwLock across inference awaits,
+    // which would otherwise block other async tasks from accessing the VAD.
     for frame in frames_to_process {
-        let speech_prob = {
-            let vad_guard = vad.read().await;
-            vad_guard.process_audio(&frame).await.map_err(|e| {
+        let inference_start = Instant::now();
+        let frame_len = frame.len();
+        let speech_prob = SileroVAD::process_audio_with_model(Arc::clone(&vad_model), &frame)
+            .await
+            .map_err(|e| {
                 VoiceManagerError::InitializationError(format!("VAD processing error: {}", e))
-            })?
-        };
+            })?;
+        let inference_duration = inference_start.elapsed();
+
+        // Log VAD inference timing and buffer state
+        let current_buffer_len = vad_state.audio_buffer.read().len();
+        debug!(
+            frame_samples = frame_len,
+            inference_ms = inference_duration.as_secs_f64() * 1000.0,
+            speech_prob = speech_prob,
+            buffer_samples = current_buffer_len,
+            buffer_max = MAX_VAD_AUDIO_SAMPLES,
+            "VAD inference completed"
+        );
 
         // Feed to silence tracker and collect events
         if let Some(event) = silence_tracker.process(speech_prob) {
@@ -153,4 +217,26 @@ pub async fn process_audio_chunk(
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that `set_force_error` and `is_force_error` work correctly.
+    #[test]
+    fn test_force_error_flag() {
+        let vad_state = VADState::new(1024, 512);
+
+        // Initially false
+        assert!(!vad_state.is_force_error());
+
+        // Set to true
+        vad_state.set_force_error(true);
+        assert!(vad_state.is_force_error());
+
+        // Set back to false
+        vad_state.set_force_error(false);
+        assert!(!vad_state.is_force_error());
+    }
 }
