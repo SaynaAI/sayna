@@ -42,6 +42,15 @@ pub struct SpeechFinalState {
     /// to run turn detection on the accumulated text. This handle allows
     /// cancellation if new speech arrives.
     pub vad_turn_detection_handle: Option<JoinHandle<()>>,
+
+    /// Whether a speaking turn is currently in progress.
+    ///
+    /// This flag is set to true on the first SpeechStart of a new turn and
+    /// remains true until the turn is confirmed complete (Smart-Turn returns true
+    /// or real speech_final is received). This prevents audio buffer clearing
+    /// during brief pauses mid-turn, which would cause the model to lose context
+    /// and trigger false positives (fixes Pipecat issue #3094).
+    pub turn_in_progress: AtomicBool,
 }
 
 impl SpeechFinalState {
@@ -55,6 +64,7 @@ impl SpeechFinalState {
             last_forced_text: String::new(),
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
+            turn_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -91,6 +101,9 @@ impl SpeechFinalState {
         // Reset timing state
         self.waiting_for_speech_final
             .store(false, Ordering::Release);
+
+        // Reset turn-in-progress flag - turn is complete
+        self.turn_in_progress.store(false, Ordering::Release);
 
         // Conditionally clear fired stats
         if !keep_fired_stats {

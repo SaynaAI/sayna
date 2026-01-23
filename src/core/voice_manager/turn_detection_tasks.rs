@@ -247,9 +247,11 @@ async fn handle_smart_turn_result(
         }
     };
 
-    // Reset silence tracker (always) and optionally clear audio buffer
-    silence_tracker.reset();
+    // Only reset silence tracker and clear audio buffer when turn is confirmed complete.
+    // IMPORTANT: Do NOT reset on Incomplete - this preserves audio context so the model
+    // can distinguish brief pauses from actual turn ends (fixes Pipecat issue #3094).
     if should_clear_audio_buffer {
+        silence_tracker.reset();
         vad_state.clear_audio_buffer();
         debug!("Reset silence tracker and cleared audio buffer after speech_final");
     }

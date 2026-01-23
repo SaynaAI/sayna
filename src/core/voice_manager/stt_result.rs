@@ -245,14 +245,20 @@ impl STTResultProcessor {
     ) {
         match event {
             VADEvent::SpeechStart => {
-                let is_mid_turn = {
+                // Use turn_in_progress to determine if we're mid-turn (not waiting_for_speech_final).
+                // This is more accurate because turn_in_progress remains true during brief pauses
+                // even after silence_tracker resets, preventing audio buffer loss that would cause
+                // the Smart Turn model to produce false positives (fixes Pipecat issue #3094).
+                let is_turn_in_progress = {
                     let mut state = speech_final_state.write();
-                    let is_mid_turn = state.waiting_for_speech_final.load(Ordering::Acquire);
+                    let was_in_progress = state.turn_in_progress.load(Ordering::Acquire);
+                    // Mark that a turn is now in progress
+                    state.turn_in_progress.store(true, Ordering::Release);
                     state.reset_vad_state();
-                    is_mid_turn
+                    was_in_progress
                 };
 
-                if is_mid_turn {
+                if is_turn_in_progress {
                     debug!(
                         "VAD: Speech started mid-turn - resetting VAD state but preserving audio buffer for context"
                     );

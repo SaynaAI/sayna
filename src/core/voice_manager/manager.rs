@@ -296,6 +296,8 @@ impl VoiceManager {
             // VAD-based silence tracking state
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
+            // Turn-in-progress tracking (prevents audio buffer loss mid-turn)
+            turn_in_progress: AtomicBool::new(false),
         }));
 
         // Create bounded channel for VAD processing and spawn worker task
@@ -1219,6 +1221,7 @@ pub mod test_support {
                     last_forced_text: String::with_capacity(1024),
                     vad_turn_end_detected: AtomicBool::new(false),
                     vad_turn_detection_handle: None,
+                    turn_in_progress: AtomicBool::new(false),
                 })),
                 stt_result_processor,
                 vad,
@@ -1299,6 +1302,7 @@ pub mod test_support {
                     last_forced_text: String::with_capacity(1024),
                     vad_turn_end_detected: AtomicBool::new(false),
                     vad_turn_detection_handle: None,
+                    turn_in_progress: AtomicBool::new(false),
                 })),
                 stt_result_processor: components.stt_result_processor,
                 #[cfg(feature = "stt-vad")]
