@@ -21,3 +21,6 @@ mod stubs;
 
 #[cfg(feature = "stt-vad")]
 mod vad_failures;
+
+#[cfg(feature = "stt-vad")]
+mod vad_turn_detection;

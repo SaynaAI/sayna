@@ -82,6 +82,7 @@ impl VoiceManager {
                 vad_turn_end_detected: AtomicBool::new(false),
                 vad_turn_detection_handle: None,
                 turn_in_progress: AtomicBool::new(false),
+                backup_timeout_handle: None,
             })),
             stt_result_processor,
             vad,
@@ -158,6 +159,7 @@ impl VoiceManager {
                 vad_turn_end_detected: AtomicBool::new(false),
                 vad_turn_detection_handle: None,
                 turn_in_progress: AtomicBool::new(false),
+                backup_timeout_handle: None,
             })),
             stt_result_processor: components.stt_result_processor,
             #[cfg(feature = "stt-vad")]

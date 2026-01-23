@@ -38,6 +38,25 @@ pub struct STTProcessingConfig {
     ///
     /// Default: 500ms
     pub duplicate_window_ms: usize,
+
+    /// Silence duration (ms) to wait before retrying Smart-Turn after an Incomplete result.
+    ///
+    /// When Smart-Turn determines the turn is not yet complete, the system waits
+    /// for this additional silence duration before triggering another turn detection
+    /// attempt. This prevents rapid-fire retries while still allowing natural pauses.
+    ///
+    /// Default: 300ms
+    pub retry_silence_duration_ms: u64,
+
+    /// Maximum total silence duration (ms) before forcing a speech_final event.
+    ///
+    /// This acts as a backup timeout: if the user remains silent for this duration
+    /// (regardless of Smart-Turn results), a speech_final event is emitted. This
+    /// prevents indefinite waiting in edge cases where Smart-Turn keeps returning
+    /// Incomplete.
+    ///
+    /// Default: 5000ms (5 seconds)
+    pub backup_silence_timeout_ms: u64,
 }
 
 impl Default for STTProcessingConfig {
@@ -47,6 +66,8 @@ impl Default for STTProcessingConfig {
             vad_silence_duration_ms: 500,
             turn_detection_inference_timeout_ms: 800,
             duplicate_window_ms: 500,
+            retry_silence_duration_ms: 300,
+            backup_silence_timeout_ms: 5000,
         }
     }
 }
@@ -86,6 +107,18 @@ impl STTProcessingConfig {
     /// Set the duplicate window to prevent duplicate speech_final events.
     pub fn set_duplicate_window_ms(mut self, window_ms: usize) -> Self {
         self.duplicate_window_ms = window_ms;
+        self
+    }
+
+    /// Set the retry silence duration for Smart-Turn retries.
+    pub fn set_retry_silence_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.retry_silence_duration_ms = duration_ms;
+        self
+    }
+
+    /// Set the backup silence timeout for forced speech_final.
+    pub fn set_backup_silence_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.backup_silence_timeout_ms = timeout_ms;
         self
     }
 }

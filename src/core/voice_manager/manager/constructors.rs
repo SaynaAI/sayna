@@ -99,6 +99,8 @@ impl VoiceManager {
                         .turn_detection_inference_timeout_ms,
                 )
                 .set_duplicate_window_ms(config.speech_final_config.duplicate_window_ms)
+                .set_retry_silence_duration_ms(config.speech_final_config.retry_silence_duration_ms)
+                .set_backup_silence_timeout_ms(config.speech_final_config.backup_silence_timeout_ms)
         }
 
         #[cfg(not(feature = "stt-vad"))]
@@ -110,6 +112,8 @@ impl VoiceManager {
                         .turn_detection_inference_timeout_ms,
                 )
                 .set_duplicate_window_ms(config.speech_final_config.duplicate_window_ms)
+                .set_retry_silence_duration_ms(config.speech_final_config.retry_silence_duration_ms)
+                .set_backup_silence_timeout_ms(config.speech_final_config.backup_silence_timeout_ms)
         }
     }
 
@@ -185,6 +189,7 @@ impl VoiceManager {
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
             turn_in_progress: AtomicBool::new(false),
+            backup_timeout_handle: None,
         }));
 
         #[cfg(feature = "stt-vad")]

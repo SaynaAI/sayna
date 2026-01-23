@@ -54,6 +54,23 @@ pub struct SpeechFinalConfig {
     ///
     /// Default: 500ms
     pub duplicate_window_ms: usize,
+    /// Silence duration (ms) to wait before retrying Smart-Turn after an Incomplete result.
+    ///
+    /// When Smart-Turn determines the turn is not yet complete, the system waits
+    /// for this additional silence duration before triggering another turn detection
+    /// attempt. This prevents rapid-fire retries while still allowing natural pauses.
+    ///
+    /// Default: 300ms
+    pub retry_silence_duration_ms: u64,
+    /// Maximum total silence duration (ms) before forcing a speech_final event.
+    ///
+    /// This acts as a backup timeout: if the user remains silent for this duration
+    /// (regardless of Smart-Turn results), a speech_final event is emitted. This
+    /// prevents indefinite waiting in edge cases where Smart-Turn keeps returning
+    /// Incomplete.
+    ///
+    /// Default: 5000ms (5 seconds)
+    pub backup_silence_timeout_ms: u64,
 }
 
 impl Default for SpeechFinalConfig {
@@ -61,6 +78,8 @@ impl Default for SpeechFinalConfig {
         Self {
             turn_detection_inference_timeout_ms: 800, // 800ms max for model inference
             duplicate_window_ms: 500,                 // 500ms duplicate prevention window
+            retry_silence_duration_ms: 300,           // 300ms silence before retry
+            backup_silence_timeout_ms: 5000,          // 5s max silence before forced speech_final
         }
     }
 }

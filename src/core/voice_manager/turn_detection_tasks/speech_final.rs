@@ -14,6 +14,7 @@ use crate::core::vad::SilenceTracker;
 use super::super::state::SpeechFinalState;
 use super::super::utils::get_current_time_ms;
 use super::super::vad_processor::VADState;
+use super::backup_timeout::spawn_backup_timeout_task;
 use super::smart_turn::SmartTurnResult;
 
 /// Fire a forced speech_final event.
@@ -64,14 +65,17 @@ pub async fn fire_speech_final(
 /// Handle the result of Smart Turn detection.
 ///
 /// - `Complete`: Fire speech_final, reset silence tracker, clear audio buffer
-/// - `Incomplete`: Reset VAD turn_end state, reset silence tracker
+/// - `Incomplete`: Reset VAD turn_end state, allow TurnEnd retry, start backup timeout
 /// - `Skipped`: Fire speech_final with fallback method, reset tracker, clear buffer
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_smart_turn_result(
     smart_turn_result: SmartTurnResult,
     buffered_text: String,
     speech_final_state: Arc<SyncRwLock<SpeechFinalState>>,
     silence_tracker: Arc<SilenceTracker>,
     vad_state: Arc<VADState>,
+    retry_silence_duration_ms: u64,
+    backup_silence_timeout_ms: u64,
     method_prefix: &str,
     skipped_fallback_method: &str,
 ) {
@@ -98,11 +102,38 @@ pub async fn handle_smart_turn_result(
             true
         }
         SmartTurnResult::Incomplete => {
-            info!("Smart Turn says turn incomplete - resetting VAD state for next attempt");
+            info!("Smart Turn says turn incomplete - enabling retry and starting backup timeout");
+
+            // Clear vad_turn_end_detected to allow TurnEnd to fire again
             {
-                let state = speech_final_state.write();
+                let mut state = speech_final_state.write();
                 state.vad_turn_end_detected.store(false, Ordering::Release);
+
+                // Abort any existing backup timeout before starting a new one
+                if let Some(handle) = state.backup_timeout_handle.take() {
+                    handle.abort();
+                }
+
+                // Spawn backup timeout task if enabled (timeout_ms > 0)
+                if backup_silence_timeout_ms > 0 {
+                    let handle = spawn_backup_timeout_task(
+                        backup_silence_timeout_ms,
+                        buffered_text,
+                        speech_final_state.clone(),
+                        silence_tracker.clone(),
+                        vad_state.clone(),
+                    );
+                    state.backup_timeout_handle = Some(handle);
+                    debug!(
+                        "Started backup timeout task ({}ms)",
+                        backup_silence_timeout_ms
+                    );
+                }
             }
+
+            // Allow SilenceTracker to emit TurnEnd again after additional silence
+            silence_tracker.allow_turn_end_retry(retry_silence_duration_ms);
+
             false
         }
         SmartTurnResult::Skipped => {

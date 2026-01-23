@@ -4,9 +4,11 @@
 //! When `stt-vad` is enabled, this is the SOLE source of `is_speech_final=true` events.
 
 #[cfg(feature = "stt-vad")]
-mod smart_turn;
+pub(crate) mod backup_timeout;
 #[cfg(feature = "stt-vad")]
-mod speech_final;
+pub(crate) mod smart_turn;
+#[cfg(feature = "stt-vad")]
+pub(crate) mod speech_final;
 
 #[cfg(feature = "stt-vad")]
 use parking_lot::RwLock as SyncRwLock;
@@ -48,6 +50,17 @@ pub fn create_vad_turn_detection_task(
     vad_state: Arc<VADState>,
 ) -> JoinHandle<()> {
     let inference_timeout_ms = config.turn_detection_inference_timeout_ms;
+    let retry_silence_duration_ms = config.retry_silence_duration_ms;
+    let backup_silence_timeout_ms = config.backup_silence_timeout_ms;
+
+    // Cancel any existing backup timeout before running Smart-Turn
+    {
+        let mut state = speech_final_state.write();
+        if let Some(handle) = state.backup_timeout_handle.take() {
+            handle.abort();
+            debug!("Cancelled existing backup timeout before Smart-Turn execution");
+        }
+    }
 
     tokio::spawn(async move {
         let should_continue = {
@@ -74,6 +87,8 @@ pub fn create_vad_turn_detection_task(
             speech_final_state,
             silence_tracker,
             vad_state,
+            retry_silence_duration_ms,
+            backup_silence_timeout_ms,
             "vad_",
             "vad_silence_only",
         )

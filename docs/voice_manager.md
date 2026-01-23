@@ -148,7 +148,9 @@ Audio Stream
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `turn_detection_inference_timeout_ms` | 800 | Max time to wait for Smart-Turn inference |
-| `duplicate_window_ms` | 1000 | Window to prevent duplicate final events |
+| `duplicate_window_ms` | 500 | Window to prevent duplicate final events |
+| `retry_silence_duration_ms` | 300 | Silence duration to wait before retrying Smart-Turn after Incomplete |
+| `backup_silence_timeout_ms` | 5000 | Max total silence before forcing speech_final (backup timeout) |
 
 ## Lifecycle Management
 
@@ -198,6 +200,59 @@ Methods to check provider readiness:
 | `is_tts_ready()` | TTS provider connected and ready |
 | `get_stt_provider_info()` | Current STT provider name/details |
 | `get_tts_provider_info()` | Current TTS provider name/details |
+
+## VAD Retry Semantics (stt-vad feature)
+
+When the `stt-vad` feature is enabled, the system uses a two-stage approach: VAD detects silence, then Smart-Turn confirms turn completion. This section documents the retry behavior when Smart-Turn returns "incomplete" (i.e., the model determines the speaker hasn't finished their turn).
+
+### Chosen Behavior: Unlimited Retries with Resettable Timer
+
+The system uses **unlimited retries** - there is no maximum retry count. When Smart-Turn returns `Incomplete`:
+
+1. The `vad_turn_end_detected` flag is reset to `false`
+2. The silence tracker continues running (NOT reset)
+3. The audio buffer is **preserved** for context (per Pipecat issue #3094)
+4. The system waits for the next `TurnEnd` event from VAD
+5. When silence threshold is exceeded again, Smart-Turn runs with the accumulated audio
+
+```
+TurnEnd → Smart-Turn → Incomplete → Reset vad_turn_end_detected → Wait
+                                                                    ↓
+                               ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ←
+                              Next TurnEnd (silence threshold exceeded)
+```
+
+### Rationale
+
+1. **Accuracy over Speed**: Smart-Turn v3 has >90% accuracy for turn detection. False negatives (saying "incomplete" when complete) are rare, so unlimited retries don't cause significant delays in practice.
+
+2. **Audio Context Preservation**: Clearing the audio buffer on `Incomplete` would cause the model to lose context for filler sounds ("um", "ehhh") and thinking pauses. The model is trained to recognize these patterns, so preserving the full audio history improves accuracy.
+
+3. **Natural Timeout via Silence**: The silence tracker's configurable threshold (`silence_duration_ms`, default 500ms) acts as a natural "resettable timer". Each retry requires the user to stop speaking long enough to trigger a new `TurnEnd` event.
+
+4. **Handles Complex Speech Patterns**: Users with longer thinking pauses or who use many filler sounds benefit from this approach. A max-retry cap could cause premature turn finalization mid-thought.
+
+### Backup Timeout Behavior
+
+The backup timeout (`turn_detection_inference_timeout_ms`, default 800ms) applies to Smart-Turn **inference time**, not to the overall retry cycle:
+
+- If Smart-Turn inference takes longer than the timeout, the system fires `speech_final` with fallback method `vad_inference_timeout_fallback`
+- This timeout **does not** reset based on an initial `TurnEnd` timestamp
+- Each Smart-Turn invocation has its own independent inference timeout
+
+### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `vad.silence_duration_ms` | 500 | Silence duration (ms) to trigger TurnEnd |
+| `speech_final.turn_detection_inference_timeout_ms` | 800 | Max time (ms) for Smart-Turn inference per attempt |
+
+### What This Means for Developers
+
+- **No `max_retries` field**: Don't add retry counters to `SpeechFinalState`
+- **No `initial_turn_end_timestamp` field**: Don't track when the first TurnEnd occurred
+- **Audio buffer cleared only on completion**: Only clear after `Complete` or `Skipped` results
+- **Retry rate is naturally limited**: By silence threshold and speech patterns
 
 ## Related Documentation
 

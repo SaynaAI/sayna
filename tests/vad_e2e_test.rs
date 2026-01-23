@@ -77,6 +77,8 @@ fn test_voice_manager_config_speech_final_settings() {
     let speech_final_config = SpeechFinalConfig {
         turn_detection_inference_timeout_ms: 200,
         duplicate_window_ms: 500,
+        retry_silence_duration_ms: 300,
+        backup_silence_timeout_ms: 5000,
     };
 
     let config =

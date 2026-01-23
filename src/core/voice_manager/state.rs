@@ -51,6 +51,13 @@ pub struct SpeechFinalState {
     /// during brief pauses mid-turn, which would cause the model to lose context
     /// and trigger false positives (fixes Pipecat issue #3094).
     pub turn_in_progress: AtomicBool,
+
+    /// Task handle for backup silence timeout.
+    ///
+    /// When Smart-Turn returns Incomplete, a backup timeout is started. If the
+    /// user remains silent for this duration, a speech_final is forced. This
+    /// handle allows cancellation if speech resumes or Smart-Turn runs again.
+    pub backup_timeout_handle: Option<JoinHandle<()>>,
 }
 
 impl SpeechFinalState {
@@ -65,6 +72,7 @@ impl SpeechFinalState {
             vad_turn_end_detected: AtomicBool::new(false),
             vad_turn_detection_handle: None,
             turn_in_progress: AtomicBool::new(false),
+            backup_timeout_handle: None,
         }
     }
 
@@ -79,10 +87,13 @@ impl SpeechFinalState {
     /// Reset VAD-specific state for a new speech segment.
     ///
     /// Call this when speech resumes (VADEvent::SpeechStart or SpeechResumed)
-    /// to clear the VAD turn detection state.
+    /// to clear the VAD turn detection state and cancel any pending backup timeout.
     pub fn reset_vad_state(&mut self) {
         self.vad_turn_end_detected.store(false, Ordering::Release);
         if let Some(handle) = self.vad_turn_detection_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.backup_timeout_handle.take() {
             handle.abort();
         }
     }
