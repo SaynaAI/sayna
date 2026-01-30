@@ -179,7 +179,7 @@ impl STTResultProcessor {
 
             // CRITICAL: Cancel old task when new is_final arrives - this implements the "timer reset"
             // The new is_final indicates the person is still talking, so we cancel the old timer
-            // and start a fresh 2800ms timer below
+            // and start a fresh 1800ms timer below
             if let Some(old_handle) = state.turn_detection_handle.take() {
                 info!(
                     "Smart fallback timer reset: new is_final arrived, cancelling previous timer and starting fresh"
