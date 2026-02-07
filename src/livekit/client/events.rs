@@ -13,7 +13,8 @@ use tracing::{debug, error, info, warn};
 
 use super::{
     AudioCallback, DataCallback, DataMessage, LiveKitClient, LiveKitConfig,
-    ParticipantDisconnectCallback, ParticipantDisconnectEvent,
+    ParticipantConnectCallback, ParticipantConnectEvent, ParticipantDisconnectCallback,
+    ParticipantDisconnectEvent, TrackSubscribedCallback, TrackSubscribedEvent,
 };
 use crate::AppError;
 #[cfg(feature = "noise-filter")]
@@ -25,6 +26,8 @@ impl LiveKitClient {
             let audio_callback = self.audio_callback.clone();
             let data_callback = self.data_callback.clone();
             let participant_disconnect_callback = self.participant_disconnect_callback.clone();
+            let participant_connect_callback = self.participant_connect_callback.clone();
+            let track_subscribed_callback = self.track_subscribed_callback.clone();
             let active_streams = Arc::clone(&self.active_streams);
             let is_connected = Arc::clone(&self.is_connected);
             let config = self.config.clone();
@@ -36,6 +39,8 @@ impl LiveKitClient {
                         &audio_callback,
                         &data_callback,
                         &participant_disconnect_callback,
+                        &participant_connect_callback,
+                        &track_subscribed_callback,
                         &active_streams,
                         &is_connected,
                         &config,
@@ -52,11 +57,14 @@ impl LiveKitClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn restart_event_handler(
         mut room_events: tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
         audio_callback: &Option<AudioCallback>,
         data_callback: &Option<DataCallback>,
         participant_disconnect_callback: &Option<ParticipantDisconnectCallback>,
+        participant_connect_callback: &Option<ParticipantConnectCallback>,
+        track_subscribed_callback: &Option<TrackSubscribedCallback>,
         active_streams: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
         is_connected: &Arc<Mutex<bool>>,
         config: &LiveKitConfig,
@@ -64,6 +72,8 @@ impl LiveKitClient {
         let audio_callback = audio_callback.clone();
         let data_callback = data_callback.clone();
         let participant_disconnect_callback = participant_disconnect_callback.clone();
+        let participant_connect_callback = participant_connect_callback.clone();
+        let track_subscribed_callback = track_subscribed_callback.clone();
         let active_streams = Arc::clone(active_streams);
         let is_connected = Arc::clone(is_connected);
         let config = config.clone();
@@ -76,6 +86,8 @@ impl LiveKitClient {
                     &audio_callback,
                     &data_callback,
                     &participant_disconnect_callback,
+                    &participant_connect_callback,
+                    &track_subscribed_callback,
                     &active_streams,
                     &is_connected,
                     &config,
@@ -89,11 +101,14 @@ impl LiveKitClient {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_room_event(
         event: RoomEvent,
         audio_callback: &Option<AudioCallback>,
         data_callback: &Option<DataCallback>,
         participant_disconnect_callback: &Option<ParticipantDisconnectCallback>,
+        participant_connect_callback: &Option<ParticipantConnectCallback>,
+        track_subscribed_callback: &Option<TrackSubscribedCallback>,
         active_streams: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
         is_connected: &Arc<Mutex<bool>>,
         config: &LiveKitConfig,
@@ -109,6 +124,28 @@ impl LiveKitClient {
                     publication.sid(),
                     participant.identity()
                 );
+
+                // Notify about track subscription regardless of listen_participants filter
+                if let Some(callback) = track_subscribed_callback {
+                    let track_kind = match &track {
+                        RemoteTrack::Audio(_) => "audio",
+                        RemoteTrack::Video(_) => "video",
+                    };
+
+                    let event = TrackSubscribedEvent {
+                        participant_identity: participant.identity().to_string(),
+                        participant_name: Some(participant.name().to_string()),
+                        track_kind: track_kind.to_string(),
+                        track_sid: publication.sid().to_string(),
+                        room_name: config.room_name.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+
+                    callback(event);
+                }
 
                 // Check if we should process this participant's audio
                 if !config.listen_participants.is_empty()
@@ -238,6 +275,20 @@ impl LiveKitClient {
             }
             RoomEvent::ParticipantConnected(participant) => {
                 info!("Participant connected: {}", participant.identity());
+
+                if let Some(callback) = participant_connect_callback {
+                    let event = ParticipantConnectEvent {
+                        participant_identity: participant.identity().to_string(),
+                        participant_name: Some(participant.name().to_string()),
+                        room_name: config.room_name.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+
+                    callback(event);
+                }
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 info!("Participant disconnected: {}", participant.identity());

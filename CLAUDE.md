@@ -226,7 +226,7 @@ See existing implementations for patterns:
 ### WebSocket
 - `/ws` - Real-time voice processing
   - Receives: Config, audio data, speak commands, **clear command**, send_message, sip_transfer
-  - Sends: Ready, STT results, TTS audio, messages, participant events
+  - Sends: Ready, STT results, TTS audio, messages, participant_connected, participant_disconnected, track_subscribed, tts_playback_complete, vad_event, error, sip_transfer_error
   - **Clear command**: Immediately stops TTS and clears audio buffers (fire-and-forget, respects `allow_interruption` setting)
 
 ### Webhooks

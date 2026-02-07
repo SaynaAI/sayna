@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     AudioCallback, DataCallback, LiveKitClient, LiveKitConfig, LiveKitOperation, OperationQueue,
-    ParticipantDisconnectCallback,
+    ParticipantConnectCallback, ParticipantDisconnectCallback, TrackSubscribedCallback,
 };
 use crate::AppError;
 
@@ -30,6 +30,8 @@ pub(super) struct OperationContext {
     pub(super) audio_callback: Option<AudioCallback>,
     pub(super) data_callback: Option<DataCallback>,
     pub(super) participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
+    pub(super) participant_connect_callback: Option<ParticipantConnectCallback>,
+    pub(super) track_subscribed_callback: Option<TrackSubscribedCallback>,
     /// Generation counter - audio operations with lower generation are skipped
     pub(super) audio_generation: Arc<AtomicU64>,
 }
@@ -50,6 +52,8 @@ impl LiveKitClient {
             audio_callback: self.audio_callback.clone(),
             data_callback: self.data_callback.clone(),
             participant_disconnect_callback: self.participant_disconnect_callback.clone(),
+            participant_connect_callback: self.participant_connect_callback.clone(),
+            track_subscribed_callback: self.track_subscribed_callback.clone(),
             audio_generation,
         };
         let stats = Arc::clone(&self.stats);
@@ -219,6 +223,8 @@ impl LiveKitClient {
                             &ctx.audio_callback,
                             &ctx.data_callback,
                             &ctx.participant_disconnect_callback,
+                            &ctx.participant_connect_callback,
+                            &ctx.track_subscribed_callback,
                             &ctx.active_streams,
                             &ctx.is_connected,
                             &ctx.config,

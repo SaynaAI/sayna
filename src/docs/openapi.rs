@@ -23,7 +23,10 @@ use crate::handlers::{
     voices::Voice,
     ws::{
         config::{LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig},
-        messages::{IncomingMessage, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
+        messages::{
+            IncomingMessage, OutgoingMessage, ParticipantConnectedInfo,
+            ParticipantDisconnectedInfo, TrackSubscribedInfo, UnifiedMessage,
+        },
     },
 };
 
@@ -95,7 +98,9 @@ use crate::handlers::{
         IncomingMessage,
         OutgoingMessage,
         UnifiedMessage,
+        ParticipantConnectedInfo,
         ParticipantDisconnectedInfo,
+        TrackSubscribedInfo,
         // Configuration types
         STTWebSocketConfig,
         TTSWebSocketConfig,
