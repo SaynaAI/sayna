@@ -13,10 +13,10 @@ pub fn extract_auth_token(headers: &HeaderMap, uri: &Uri) -> Result<String, Auth
     if let Some(header_value) = headers.get("authorization") {
         match header_value.to_str() {
             Ok(auth_header) => {
-                if let Some(token) = auth_header.strip_prefix("Bearer ") {
-                    if !token.is_empty() {
-                        return Ok(token.to_string());
-                    }
+                if let Some(token) = auth_header.strip_prefix("Bearer ")
+                    && !token.is_empty()
+                {
+                    return Ok(token.to_string());
                 }
             }
             Err(_) => {
