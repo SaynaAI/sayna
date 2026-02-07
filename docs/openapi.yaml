@@ -98,7 +98,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/RemoveParticipantErrorResponse'
       security:
-      - bearer_auth: []
+      - auth: []
   /livekit/participant/mute:
     post:
       tags:
@@ -157,7 +157,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/RemoveParticipantErrorResponse'
       security:
-      - bearer_auth: []
+      - auth: []
   /livekit/rooms:
     get:
       tags:
@@ -191,7 +191,7 @@ paths:
         '500':
           description: LiveKit service not configured or failed to list rooms
       security:
-      - bearer_auth: []
+      - auth: []
   /livekit/rooms/{room_name}:
     get:
       tags:
@@ -236,7 +236,7 @@ paths:
         '500':
           description: LiveKit service not configured or failed to get room details
       security:
-      - bearer_auth: []
+      - auth: []
   /livekit/token:
     post:
       tags:
@@ -282,7 +282,7 @@ paths:
         '500':
           description: LiveKit service not configured, room creation failed, or token generation failed
       security:
-      - bearer_auth: []
+      - auth: []
   /recording/{stream_id}:
     get:
       tags:
@@ -320,7 +320,7 @@ paths:
         '503':
           description: Recording storage not configured or unavailable
       security:
-      - bearer_auth: []
+      - auth: []
   /sip/call:
     post:
       tags:
@@ -360,7 +360,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SIPCallErrorResponse'
       security:
-      - bearer_auth: []
+      - auth: []
   /sip/hooks:
     get:
       tags:
@@ -387,6 +387,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+      security:
+      - auth: []
     post:
       tags:
       - sip
@@ -439,6 +441,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+      security:
+      - auth: []
     delete:
       tags:
       - sip
@@ -490,6 +494,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SipHooksErrorResponse'
+      security:
+      - auth: []
   /sip/transfer:
     post:
       tags:
@@ -552,7 +558,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SIPTransferErrorResponse'
       security:
-      - bearer_auth: []
+      - auth: []
   /speak:
     post:
       tags:
@@ -586,7 +592,7 @@ paths:
         '500':
           description: TTS synthesis failed
       security:
-      - bearer_auth: []
+      - auth: []
   /voices:
     get:
       tags:
@@ -609,7 +615,7 @@ paths:
         '500':
           description: Internal server error
       security:
-      - bearer_auth: []
+      - auth: []
 components:
   schemas:
     DeleteSipHooksRequest:
@@ -2007,11 +2013,11 @@ components:
           description: URL to sample audio
           example: https://example.com/sample.mp3
   securitySchemes:
-    bearer_auth:
+    auth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: JWT token obtained from the authentication service. Required when AUTH_REQUIRED is enabled.
+      bearerFormat: Token
+      description: 'Authentication token for protected endpoints. Can be provided as `Authorization: Bearer <token>` or `?api_key=<token>`. Required when AUTH_REQUIRED is enabled.'
 tags:
 - name: health
   description: Health check endpoints

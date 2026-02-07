@@ -10,6 +10,12 @@ Sayna supports two authentication methods for protecting API endpoints:
 
 Both methods can be configured independently, and you can choose the approach that best fits your deployment requirements.
 
+Token transport methods for protected HTTP endpoints:
+- `Authorization: Bearer <token>`
+- `?api_key=<token>` query parameter
+
+If both are present, the `Authorization` header is used first.
+
 ## Quick Start
 
 ### API Secret (Simplest)
@@ -23,6 +29,9 @@ AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"},{"id":"p
 
 # 3. Use
 curl -H "Authorization: Bearer sk_test_default_123" http://localhost:3001/speak
+
+# 3b. Or use query parameter
+curl "http://localhost:3001/speak?api_key=sk_test_default_123"
 ```
 
 Legacy single-secret support is still available via `AUTH_API_SECRET` with optional `AUTH_API_SECRET_ID`.
@@ -118,7 +127,7 @@ Delegated validation with external auth service for advanced use cases.
 
 1. **Authentication Middleware** (`src/middleware/auth.rs`)
    - Intercepts HTTP requests to protected endpoints
-   - Extracts and validates Authorization header format
+   - Extracts token from `Authorization: Bearer ...` or `?api_key=...`
    - **API Secret Mode**: Direct token comparison with configured secret list; matched id stored in `AuthContext`
    - **JWT Mode**: Buffers request body/headers and calls AuthClient
    - Priority: API secret checked first if configured
@@ -413,7 +422,7 @@ The following API endpoints require authentication when `AUTH_REQUIRED=true`:
 
 ### Making Authenticated Requests
 
-The client authentication flow is identical for both methods - just send a bearer token in the Authorization header.
+The client authentication flow is identical for both methods. You can pass the token in the Authorization header or as an `api_key` query parameter.
 
 #### With API Secret Authentication
 
@@ -427,6 +436,9 @@ curl -X POST http://localhost:3001/speak \
 # List available voices
 curl -X GET http://localhost:3001/voices \
   -H "Authorization: Bearer sk_test_default_123"
+
+# Same request via query parameter
+curl -X GET "http://localhost:3001/voices?api_key=sk_test_default_123"
 ```
 
 The matched secret id is attached to `AuthContext` and logged as `api_secret_id` for auditing.
@@ -445,6 +457,11 @@ curl -X POST http://localhost:3001/speak \
   -H "Authorization: Bearer user-jwt-token-xyz789" \
   -H "Content-Type: application/json" \
   -d '{"text": "Different user"}'
+
+# Or via query parameter
+curl -X POST "http://localhost:3001/speak?api_key=user-jwt-token-xyz789" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Different user"}'
 ```
 
 #### Without Authentication (will fail if auth is enabled)
@@ -453,7 +470,7 @@ curl -X POST http://localhost:3001/speak \
 curl -X POST http://localhost:3001/speak \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}'
-# Returns: 401 Unauthorized - Missing Authorization header
+# Returns: 401 Unauthorized - Missing authentication token
 ```
 
 ## Error Responses
@@ -471,8 +488,8 @@ Authentication errors return JSON responses with the following structure:
 
 | Error Code | HTTP Status | Description |
 |------------|-------------|-------------|
-| `missing_auth_header` | 401 Unauthorized | Authorization header is missing from the request |
-| `invalid_auth_header` | 401 Unauthorized | Authorization header format is invalid (not "Bearer {token}") |
+| `missing_auth_header` | 401 Unauthorized | No token provided in either Authorization header or `api_key` query parameter |
+| `invalid_auth_header` | 401 Unauthorized | Authorization header format is invalid and no valid `api_key` query parameter was provided |
 | `unauthorized` | 401 Unauthorized | Token validation failed (auth service returned 401) |
 | `auth_service_error` | 401 or 502 | Auth service returned an error (see below) |
 | `auth_service_unavailable` | 503 Service Unavailable | Auth service is unreachable or timed out |
@@ -493,14 +510,14 @@ Sayna maps auth service responses to HTTP status codes as follows:
 
 ### Example Error Responses
 
-**Missing Authorization Header:**
+**Missing Token (header/query):**
 ```json
 HTTP/1.1 401 Unauthorized
 Content-Type: application/json
 
 {
   "error": "missing_auth_header",
-  "message": "Missing Authorization header"
+  "message": "Missing authentication token (Authorization header or api_key query parameter)"
 }
 ```
 
@@ -750,7 +767,7 @@ The `iat` claim is a standard JWT field that indicates when the JWT was created.
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| 401 Unauthorized | Missing or invalid token | Include valid `Authorization: Bearer {token}` header |
+| 401 Unauthorized | Missing or invalid token | Include a valid `Authorization: Bearer {token}` header or `?api_key={token}` query parameter |
 | 401 "Invalid API secret" | Token doesn't match any configured API secret | Check token matches one of the configured secrets (case-sensitive) |
 | 500 "Auth required but no method configured" | AUTH_REQUIRED=true but no auth method set | Set either AUTH_API_SECRETS_JSON (or legacy AUTH_API_SECRET) or (AUTH_SERVICE_URL + AUTH_SIGNING_KEY_PATH) |
 | 503 Service Unavailable | Auth service unreachable (JWT mode) | Verify auth service is running and reachable |

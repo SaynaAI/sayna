@@ -210,7 +210,10 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "missing_auth_header");
-        assert_eq!(json["message"], "Missing Authorization header");
+        assert_eq!(
+            json["message"],
+            "Missing authentication token (Authorization header or api_key query parameter)"
+        );
     }
 
     #[tokio::test]
@@ -242,7 +245,10 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_auth_header");
-        assert_eq!(json["message"], "Invalid Authorization header format");
+        assert_eq!(
+            json["message"],
+            "Invalid Authorization header format (expected 'Bearer {token}') and missing api_key query parameter"
+        );
     }
 
     #[tokio::test]
@@ -272,6 +278,75 @@ V/reoL3Jcy/mQ9MrmJx+K1VC
             .method(Method::GET)
             .uri("/test")
             .header("authorization", "Bearer valid-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_service_accepts_api_key_query_param() {
+        let mock_server = MockServer::start().await;
+
+        // Mock successful auth response
+        Mock::given(method("POST"))
+            .and(path("/auth"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test?api_key=valid-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_service_uses_query_param_when_header_invalid() {
+        let mock_server = MockServer::start().await;
+
+        // Mock successful auth response
+        Mock::given(method("POST"))
+            .and(path("/auth"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, _temp_dir) =
+            create_test_state_with_auth(&format!("{}/auth", mock_server.uri())).await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test?api_key=valid-token")
+            .header("authorization", "InvalidFormat")
             .body(Body::empty())
             .unwrap();
 
@@ -494,7 +569,10 @@ mod with_api_secret {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "missing_auth_header");
-        assert_eq!(json["message"], "Missing Authorization header");
+        assert_eq!(
+            json["message"],
+            "Missing authentication token (Authorization header or api_key query parameter)"
+        );
     }
 
     #[tokio::test]
@@ -525,7 +603,10 @@ mod with_api_secret {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_auth_header");
-        assert_eq!(json["message"], "Invalid Authorization header format");
+        assert_eq!(
+            json["message"],
+            "Invalid Authorization header format (expected 'Bearer {token}') and missing api_key query parameter"
+        );
     }
 
     #[tokio::test]
@@ -544,6 +625,65 @@ mod with_api_secret {
             .method(Method::GET)
             .uri("/test")
             .header("authorization", "Bearer my-secret-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body_str, "OK");
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_accepts_api_key_query_param() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test?api_key=my-secret-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body_str, "OK");
+    }
+
+    #[tokio::test]
+    async fn test_api_secret_auth_uses_query_param_when_header_invalid() {
+        let state = create_test_state_with_api_secret("my-secret-token").await;
+
+        let app = Router::new()
+            .route("/test", get(test_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/test?api_key=my-secret-token")
+            .header("authorization", "InvalidFormat")
             .body(Body::empty())
             .unwrap();
 

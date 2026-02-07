@@ -274,7 +274,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPCallErrorCode) -> 
             (status = 500, description = "LiveKit not configured, outbound address missing, or call failed", body = SIPCallErrorResponse)
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "sip"
     )

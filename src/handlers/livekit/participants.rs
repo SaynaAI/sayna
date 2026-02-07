@@ -165,7 +165,7 @@ fn error_response(status: StatusCode, message: &str, code: RemoveParticipantErro
             (status = 500, description = "LiveKit not configured or removal failed", body = RemoveParticipantErrorResponse)
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "livekit"
     )
@@ -402,7 +402,7 @@ pub struct MuteParticipantResponse {
             (status = 500, description = "LiveKit not configured or mute failed", body = RemoveParticipantErrorResponse)
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "livekit"
     )
