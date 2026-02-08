@@ -146,6 +146,40 @@ pub struct ParticipantDisconnectedInfo {
     pub timestamp: u64,
 }
 
+/// Participant connection information
+#[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ParticipantConnectedInfo {
+    /// Participant's unique identity
+    pub identity: String,
+    /// Participant's display name (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Room identifier
+    pub room: String,
+    /// Timestamp when the connection occurred
+    pub timestamp: u64,
+}
+
+/// Track subscription information
+#[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TrackSubscribedInfo {
+    /// Participant's unique identity (owner of the track)
+    pub identity: String,
+    /// Participant's display name (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Track kind: "audio" or "video"
+    pub track_kind: String,
+    /// Track SID (publication identifier)
+    pub track_sid: String,
+    /// Room identifier
+    pub room: String,
+    /// Timestamp when the subscription occurred
+    pub timestamp: u64,
+}
+
 /// WebSocket message types for outgoing messages
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -189,10 +223,24 @@ pub enum OutgoingMessage {
         /// Unified message structure containing text/data from various sources
         message: UnifiedMessage,
     },
+    #[serde(rename = "participant_connected")]
+    ParticipantConnected {
+        /// Information about the participant who connected
+        participant: ParticipantConnectedInfo,
+    },
     #[serde(rename = "participant_disconnected")]
     ParticipantDisconnected {
         /// Information about the participant who disconnected
         participant: ParticipantDisconnectedInfo,
+    },
+    /// Track subscription notification
+    ///
+    /// Emitted when Sayna subscribes to a participant's track in the LiveKit room.
+    /// This indicates that Sayna has started processing the participant's media.
+    #[serde(rename = "track_subscribed")]
+    TrackSubscribed {
+        /// Information about the subscribed track
+        track: TrackSubscribedInfo,
     },
     /// TTS playback completion notification
     #[serde(rename = "tts_playback_complete")]
@@ -529,5 +577,80 @@ mod tests {
         assert!(json.contains(r#""type":"update_config""#));
         assert!(json.contains(r#""silence_duration_ms":300"#));
         assert!(json.contains(r#""threshold":0.5"#));
+    }
+
+    #[test]
+    fn test_participant_connected_serialization() {
+        let msg = OutgoingMessage::ParticipantConnected {
+            participant: ParticipantConnectedInfo {
+                identity: "user-123".to_string(),
+                name: Some("John Doe".to_string()),
+                room: "test-room".to_string(),
+                timestamp: 1700000000000,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"participant_connected""#));
+        assert!(json.contains(r#""identity":"user-123""#));
+        assert!(json.contains(r#""name":"John Doe""#));
+        assert!(json.contains(r#""room":"test-room""#));
+    }
+
+    #[test]
+    fn test_participant_connected_serialization_without_name() {
+        let msg = OutgoingMessage::ParticipantConnected {
+            participant: ParticipantConnectedInfo {
+                identity: "user-456".to_string(),
+                name: None,
+                room: "test-room".to_string(),
+                timestamp: 1700000000000,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"participant_connected""#));
+        assert!(json.contains(r#""identity":"user-456""#));
+        assert!(!json.contains("name"));
+    }
+
+    #[test]
+    fn test_track_subscribed_serialization() {
+        let msg = OutgoingMessage::TrackSubscribed {
+            track: TrackSubscribedInfo {
+                identity: "user-456".to_string(),
+                name: Some("Jane Smith".to_string()),
+                track_kind: "audio".to_string(),
+                track_sid: "TR_abc123".to_string(),
+                room: "test-room".to_string(),
+                timestamp: 1700000000000,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"track_subscribed""#));
+        assert!(json.contains(r#""identity":"user-456""#));
+        assert!(json.contains(r#""track_kind":"audio""#));
+        assert!(json.contains(r#""track_sid":"TR_abc123""#));
+        assert!(json.contains(r#""room":"test-room""#));
+    }
+
+    #[test]
+    fn test_track_subscribed_video_serialization() {
+        let msg = OutgoingMessage::TrackSubscribed {
+            track: TrackSubscribedInfo {
+                identity: "user-789".to_string(),
+                name: None,
+                track_kind: "video".to_string(),
+                track_sid: "TR_def456".to_string(),
+                room: "test-room".to_string(),
+                timestamp: 1700000000000,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"track_subscribed""#));
+        assert!(json.contains(r#""track_kind":"video""#));
+        assert!(!json.contains("name"));
     }
 }

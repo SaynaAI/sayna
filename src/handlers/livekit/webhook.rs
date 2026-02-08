@@ -73,6 +73,9 @@ pub struct SIPHookEvent {
     pub room_prefix: String,
     /// SIP host/domain that matched the webhook configuration
     pub sip_host: String,
+    /// All SIP headers from the participant's attributes (keys have `sip.h.` prefix stripped,
+    /// e.g., `sip.h.to` becomes `to`, `sip.h.x-to-ip` becomes `x-to-ip`)
+    pub sip_headers: HashMap<String, String>,
 }
 
 /// Categorizes SIP webhook forwarding failures by severity and expected action.
@@ -748,6 +751,15 @@ async fn forward_to_sip_hook(
     }
 
     // Step 9: Build SIPHookEvent payload
+    let sip_headers: HashMap<String, String> = participant
+        .attributes
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("sip.h.")
+                .map(|header_name| (header_name.to_string(), v.clone()))
+        })
+        .collect();
+
     let sip_event = SIPHookEvent {
         participant: SIPHookParticipant {
             name: participant.name.clone(),
@@ -762,6 +774,7 @@ async fn forward_to_sip_hook(
         to_phone_number: to_phone_number.clone(),
         room_prefix: room_prefix.clone(),
         sip_host: domain.clone(),
+        sip_headers,
     };
 
     // Step 10: Serialize payload
@@ -956,6 +969,11 @@ mod tests {
     #[test]
     fn test_sip_hook_event_serialization() {
         // Create a SIPHookEvent
+        let mut sip_headers = HashMap::new();
+        sip_headers.insert("to".to_string(), "sip:user@example.com".to_string());
+        sip_headers.insert("from".to_string(), "sip:caller@other.com".to_string());
+        sip_headers.insert("x-to-ip".to_string(), "10.0.0.1:5060".to_string());
+
         let event = SIPHookEvent {
             participant: SIPHookParticipant {
                 name: "SIP User".to_string(),
@@ -970,6 +988,7 @@ mod tests {
             to_phone_number: "+0987654321".to_string(),
             room_prefix: "sip-".to_string(),
             sip_host: "example.com".to_string(),
+            sip_headers,
         };
 
         // Serialize to JSON
@@ -993,8 +1012,14 @@ mod tests {
         assert_eq!(parsed["room_prefix"], "sip-");
         assert_eq!(parsed["sip_host"], "example.com");
 
-        // Verify no extra fields (6 total: participant, room, from_phone_number, to_phone_number, room_prefix, sip_host)
-        assert_eq!(parsed.as_object().unwrap().len(), 6);
+        // Verify sip_headers
+        assert_eq!(parsed["sip_headers"]["to"], "sip:user@example.com");
+        assert_eq!(parsed["sip_headers"]["from"], "sip:caller@other.com");
+        assert_eq!(parsed["sip_headers"]["x-to-ip"], "10.0.0.1:5060");
+        assert_eq!(parsed["sip_headers"].as_object().unwrap().len(), 3);
+
+        // Verify no extra fields (7 total: participant, room, from_phone_number, to_phone_number, room_prefix, sip_host, sip_headers)
+        assert_eq!(parsed.as_object().unwrap().len(), 7);
     }
 
     #[test]
@@ -1013,7 +1038,11 @@ mod tests {
             "from_phone_number": "+9876543210",
             "to_phone_number": "+1234567890",
             "room_prefix": "call-",
-            "sip_host": "test.example.org"
+            "sip_host": "test.example.org",
+            "sip_headers": {
+                "to": "sip:agent@test.example.org",
+                "x-custom": "custom-value"
+            }
         }"#;
 
         // Deserialize
@@ -1030,6 +1059,12 @@ mod tests {
         assert_eq!(event.to_phone_number, "+1234567890");
         assert_eq!(event.room_prefix, "call-");
         assert_eq!(event.sip_host, "test.example.org");
+        assert_eq!(event.sip_headers.len(), 2);
+        assert_eq!(
+            event.sip_headers.get("to").unwrap(),
+            "sip:agent@test.example.org"
+        );
+        assert_eq!(event.sip_headers.get("x-custom").unwrap(), "custom-value");
     }
 
     #[test]

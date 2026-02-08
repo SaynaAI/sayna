@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use super::{DataMessage, LiveKitClient, ParticipantDisconnectEvent};
+use super::{
+    DataMessage, LiveKitClient, ParticipantConnectEvent, ParticipantDisconnectEvent,
+    TrackSubscribedEvent,
+};
 
 impl LiveKitClient {
     /// Set the callback function for handling incoming audio chunks
@@ -85,5 +88,27 @@ impl LiveKitClient {
         F: Fn(ParticipantDisconnectEvent) + Send + Sync + 'static,
     {
         self.participant_disconnect_callback = Some(Arc::new(callback));
+    }
+
+    /// Register a callback to handle participant connection events.
+    ///
+    /// The callback receives information about the connected participant including
+    /// their identity, display name (if available), and the timestamp of connection.
+    pub fn set_participant_connect_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(ParticipantConnectEvent) + Send + Sync + 'static,
+    {
+        self.participant_connect_callback = Some(Arc::new(callback));
+    }
+
+    /// Register a callback to handle track subscription events.
+    ///
+    /// The callback receives information about the subscribed track including
+    /// the participant identity, track kind (audio/video), and track SID.
+    pub fn set_track_subscribed_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(TrackSubscribedEvent) + Send + Sync + 'static,
+    {
+        self.track_subscribed_callback = Some(Arc::new(callback));
     }
 }

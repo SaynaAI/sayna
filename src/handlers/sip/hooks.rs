@@ -159,6 +159,9 @@ where
             (status = 200, description = "List of SIP hooks", body = SipHooksResponse),
             (status = 500, description = "Failed to read hooks cache", body = SipHooksErrorResponse)
         ),
+        security(
+            ("auth" = [])
+        ),
         tag = "sip"
     )
 )]
@@ -211,6 +214,9 @@ pub async fn list_sip_hooks(
             (status = 400, description = "Validation error", body = SipHooksErrorResponse),
             (status = 405, description = "Host defined in application config cannot be modified", body = SipHooksErrorResponse),
             (status = 500, description = "Failed to write hooks cache", body = SipHooksErrorResponse)
+        ),
+        security(
+            ("auth" = [])
         ),
         tag = "sip"
     )
@@ -381,6 +387,9 @@ pub struct DeleteSipHooksRequest {
             (status = 400, description = "Validation error", body = SipHooksErrorResponse),
             (status = 405, description = "Host defined in application config cannot be modified", body = SipHooksErrorResponse),
             (status = 500, description = "Failed to write hooks cache", body = SipHooksErrorResponse)
+        ),
+        security(
+            ("auth" = [])
         ),
         tag = "sip"
     )

@@ -19,12 +19,14 @@ pub mod error_codes {
 /// Authentication error types
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    /// Authorization header is missing from request
-    #[error("Missing Authorization header")]
+    /// Authentication token is missing from request
+    #[error("Missing authentication token (Authorization header or api_key query parameter)")]
     MissingAuthHeader,
 
-    /// Authorization header format is invalid (not "Bearer {token}")
-    #[error("Invalid Authorization header format")]
+    /// Authorization header format is invalid and no query token fallback was provided
+    #[error(
+        "Invalid Authorization header format (expected 'Bearer {{token}}') and missing api_key query parameter"
+    )]
     InvalidAuthHeader,
 
     /// Auth service is unavailable or unreachable
@@ -228,11 +230,11 @@ mod tests {
     fn test_display() {
         assert_eq!(
             AuthError::MissingAuthHeader.to_string(),
-            "Missing Authorization header"
+            "Missing authentication token (Authorization header or api_key query parameter)"
         );
         assert_eq!(
             AuthError::InvalidAuthHeader.to_string(),
-            "Invalid Authorization header format"
+            "Invalid Authorization header format (expected 'Bearer {token}') and missing api_key query parameter"
         );
         assert_eq!(
             AuthError::Unauthorized("invalid token".to_string()).to_string(),
@@ -256,7 +258,10 @@ mod tests {
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
         assert_eq!(body_json["error"], "missing_auth_header");
-        assert_eq!(body_json["message"], "Missing Authorization header");
+        assert_eq!(
+            body_json["message"],
+            "Missing authentication token (Authorization header or api_key query parameter)"
+        );
         assert!(body_json.get("status").is_none()); // status field should not be present
         assert!(body_json.get("error_code").is_none()); // error_code field should not be present
     }
@@ -276,7 +281,10 @@ mod tests {
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
         assert_eq!(body_json["error"], "invalid_auth_header");
-        assert_eq!(body_json["message"], "Invalid Authorization header format");
+        assert_eq!(
+            body_json["message"],
+            "Invalid Authorization header format (expected 'Bearer {token}') and missing api_key query parameter"
+        );
     }
 
     #[test]

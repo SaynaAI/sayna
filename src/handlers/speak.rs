@@ -124,7 +124,7 @@ impl AudioCallback for AudioCollector {
             (status = 500, description = "TTS synthesis failed")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "tts"
     )

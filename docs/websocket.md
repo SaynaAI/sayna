@@ -806,7 +806,104 @@ if (message.type === "participant_disconnected") {
 
 ---
 
-#### 6. Error Message
+#### 6. Participant Connected Message
+
+**Purpose:** Notify when a LiveKit participant joins the room.
+
+**Structure:**
+```json
+{
+  "type": "participant_connected",
+  "participant": {
+    "identity": "user-123",
+    "name": "John Doe",
+    "room": "conversation-room-123",
+    "timestamp": 1700000000000
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"participant_connected"` |
+| `participant.identity` | string | Participant's unique identity |
+| `participant.name` | string | Participant's display name (optional, may be omitted) |
+| `participant.room` | string | Room name where connection occurred |
+| `participant.timestamp` | number | Unix timestamp in milliseconds when connection occurred |
+
+**Important Behavior:**
+- This event is informational only
+- Unlike `participant_disconnected`, this message does **NOT** close the WebSocket connection
+- Use it to track room presence and update participant UI state
+
+**Use Cases:**
+```javascript
+// Update UI when participant joins
+if (message.type === "participant_connected") {
+  const participant = message.participant;
+  console.log(`${participant.identity} joined room ${participant.room} at ${new Date(participant.timestamp)}`);
+  addParticipantToUI(participant);
+}
+```
+
+---
+
+#### 7. Track Subscribed Message
+
+**Purpose:** Notify when Sayna subscribes to a participant's track and begins processing it.
+
+**Structure:**
+```json
+{
+  "type": "track_subscribed",
+  "track": {
+    "identity": "user-456",
+    "name": "Jane Smith",
+    "track_kind": "audio",
+    "track_sid": "TR_abc123",
+    "room": "conversation-room-123",
+    "timestamp": 1700000000000
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"track_subscribed"` |
+| `track.identity` | string | Identity of the participant who owns the track |
+| `track.name` | string | Participant's display name (optional, may be omitted) |
+| `track.track_kind` | string | Track type: `"audio"` or `"video"` |
+| `track.track_sid` | string | LiveKit track publication SID |
+| `track.room` | string | Room name where subscription occurred |
+| `track.timestamp` | number | Unix timestamp in milliseconds when subscription occurred |
+
+**Important Behavior:**
+- Emitted when Sayna subscribes to a track and starts media processing
+- `track_kind` is always `"audio"` or `"video"`
+- Fires regardless of the `listen_participants` filter setting
+
+**Use Cases:**
+```javascript
+// Track media subscriptions for observability and UI state
+if (message.type === "track_subscribed") {
+  const track = message.track;
+  console.log(
+    `Subscribed to ${track.track_kind} track ${track.track_sid} from ${track.identity}`
+  );
+
+  if (track.track_kind === "audio") {
+    markParticipantAudioActive(track.identity);
+  }
+}
+```
+
+---
+
+#### 8. Error Message
 
 **Purpose:** Communicate errors without terminating the connection.
 
@@ -856,7 +953,7 @@ if (message.type === "error") {
 
 ---
 
-#### 7. SIP Transfer Error Message
+#### 9. SIP Transfer Error Message
 
 **Purpose:** Communicate SIP transfer-specific errors, allowing clients to handle transfer failures separately from general errors.
 
@@ -901,7 +998,7 @@ if (message.type === "sip_transfer_error") {
 
 ---
 
-#### 8. Binary Audio Message
+#### 10. Binary Audio Message
 
 **Purpose:** Deliver synthesized TTS audio.
 
@@ -2417,7 +2514,7 @@ The Sayna WebSocket API provides a powerful foundation for real-time voice appli
 
 **Message Types:**
 - **Incoming:** config, speak, binary audio, clear, send_message, sip_transfer
-- **Outgoing:** ready, stt_result, tts_playback_complete, message, participant_disconnected, error, sip_transfer_error, binary audio
+- **Outgoing:** ready, stt_result, tts_playback_complete, message, participant_connected, participant_disconnected, track_subscribed, vad_event, error, sip_transfer_error, binary audio
 
 **Operating Modes:**
 - WebSocket-only: Full STT/TTS control, your app handles audio I/O

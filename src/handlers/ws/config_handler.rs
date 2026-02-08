@@ -26,7 +26,10 @@ use super::{
         LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, TurnDetectConfigUpdate,
         VADConfigUpdate, compute_tts_config_hash,
     },
-    messages::{MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
+    messages::{
+        MessageRoute, OutgoingMessage, ParticipantConnectedInfo, ParticipantDisconnectedInfo,
+        TrackSubscribedInfo, UnifiedMessage,
+    },
     state::ConnectionState,
 };
 
@@ -896,6 +899,12 @@ async fn initialize_livekit_client(
     // Set up participant disconnect callback
     setup_livekit_disconnect_callback(&mut livekit_client, message_tx);
 
+    // Set up participant connect callback
+    setup_livekit_connect_callback(&mut livekit_client, message_tx);
+
+    // Set up track subscribed callback
+    setup_livekit_track_subscribed_callback(&mut livekit_client, message_tx);
+
     // Connect to LiveKit room
     if let Err(e) = livekit_client.connect().await {
         error!("Failed to connect to LiveKit room: {:?}", e);
@@ -1050,6 +1059,70 @@ fn setup_livekit_disconnect_callback(
 
             // Close the WebSocket connection to trigger cleanup
             let _ = message_tx.send(MessageRoute::Close).await;
+        });
+    });
+}
+
+/// Set up LiveKit participant connect callback
+fn setup_livekit_connect_callback(
+    livekit_client: &mut LiveKitClient,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) {
+    let message_tx_clone = message_tx.clone();
+
+    livekit_client.set_participant_connect_callback(move |connect_event| {
+        let message_tx = message_tx_clone.clone();
+
+        tokio::spawn(async move {
+            info!(
+                "Participant {} connected to LiveKit room {}",
+                connect_event.participant_identity, connect_event.room_name
+            );
+
+            let participant_info = ParticipantConnectedInfo {
+                identity: connect_event.participant_identity,
+                name: connect_event.participant_name,
+                room: connect_event.room_name,
+                timestamp: connect_event.timestamp,
+            };
+
+            let outgoing_msg = OutgoingMessage::ParticipantConnected {
+                participant: participant_info,
+            };
+
+            let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
+        });
+    });
+}
+
+/// Set up LiveKit track subscribed callback
+fn setup_livekit_track_subscribed_callback(
+    livekit_client: &mut LiveKitClient,
+    message_tx: &mpsc::Sender<MessageRoute>,
+) {
+    let message_tx_clone = message_tx.clone();
+
+    livekit_client.set_track_subscribed_callback(move |track_event| {
+        let message_tx = message_tx_clone.clone();
+
+        tokio::spawn(async move {
+            info!(
+                "Track subscribed - {} track from participant {} in room {}",
+                track_event.track_kind, track_event.participant_identity, track_event.room_name
+            );
+
+            let track_info = TrackSubscribedInfo {
+                identity: track_event.participant_identity,
+                name: track_event.participant_name,
+                track_kind: track_event.track_kind,
+                track_sid: track_event.track_sid,
+                room: track_event.room_name,
+                timestamp: track_event.timestamp,
+            };
+
+            let outgoing_msg = OutgoingMessage::TrackSubscribed { track: track_info };
+
+            let _ = message_tx.send(MessageRoute::Outgoing(outgoing_msg)).await;
         });
     });
 }

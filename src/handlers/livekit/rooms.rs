@@ -105,7 +105,7 @@ pub struct ListRoomsResponse {
             (status = 500, description = "LiveKit service not configured or failed to list rooms")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "livekit"
     )
@@ -334,7 +334,7 @@ fn participant_kind_to_string(kind: i32) -> String {
             (status = 500, description = "LiveKit service not configured or failed to get room details")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "livekit"
     )

@@ -82,7 +82,7 @@ This mode is useful for:
 
 ## Authentication (Optional)
 
-Sayna supports customer-based authentication that delegates token validation to an external authentication service. When enabled, protected API endpoints require a valid bearer token.
+Sayna supports customer-based authentication that delegates token validation to an external authentication service. When enabled, protected API endpoints require a valid token provided either as `Authorization: Bearer <token>` or as `?api_key=<token>`.
 
 ### Enabling Authentication
 
@@ -106,8 +106,14 @@ openssl rsa -in auth_private_key.pem -pubout -out auth_public_key.pem
 ### Making Authenticated Requests
 
 ```bash
+# Authorization header
 curl -X POST http://localhost:3001/speak \
   -H "Authorization: Bearer your-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world"}'
+
+# Query parameter alternative
+curl -X POST "http://localhost:3001/speak?api_key=your-token-here" \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}'
 ```

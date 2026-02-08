@@ -1,4 +1,4 @@
-use crate::auth::{Auth, filter_headers, match_api_secret_id};
+use crate::auth::{Auth, extract_auth_token, filter_headers, match_api_secret_id};
 use crate::errors::auth_error::AuthError;
 use crate::state::AppState;
 use axum::{
@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// 2. **JWT Mode**: External validation service with signed JWT requests
 ///
 /// The middleware:
-/// 1. Extracts the Authorization header and parses the bearer token
+/// 1. Extracts auth token from `Authorization: Bearer ...` or `?api_key=...`
 /// 2. For API secret mode: compares token directly with configured API secrets
 /// 3. For JWT mode: buffers body, filters headers, and validates with auth service
 /// 4. Inserts an AuthContext into request extensions on successful validation
@@ -53,20 +53,8 @@ pub async fn auth_middleware(
         "Starting authentication validation"
     );
 
-    // Extract the Authorization header
-    let auth_header = request
-        .headers()
-        .get("authorization")
-        .ok_or(AuthError::MissingAuthHeader)?
-        .to_str()
-        .map_err(|_| AuthError::InvalidAuthHeader)?
-        .to_string();
-
-    // Parse the Bearer token
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(AuthError::InvalidAuthHeader)?
-        .to_string();
+    // Extract token from Authorization header or api_key query parameter
+    let token = extract_auth_token(request.headers(), request.uri())?;
 
     // Check authentication mode and validate accordingly
     // Priority: API secret mode first (simpler), then JWT mode

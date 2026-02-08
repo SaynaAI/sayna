@@ -114,7 +114,7 @@ pub struct TokenResponse {
             (status = 500, description = "LiveKit service not configured, room creation failed, or token generation failed")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "livekit"
     )

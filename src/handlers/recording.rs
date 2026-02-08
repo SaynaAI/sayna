@@ -48,7 +48,7 @@ fn build_recording_object_key(prefix: Option<&String>, stream_id: &str) -> Strin
             (status = 503, description = "Recording storage not configured or unavailable")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "recordings"
     )

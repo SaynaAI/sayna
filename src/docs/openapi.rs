@@ -23,7 +23,10 @@ use crate::handlers::{
     voices::Voice,
     ws::{
         config::{LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig},
-        messages::{IncomingMessage, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage},
+        messages::{
+            IncomingMessage, OutgoingMessage, ParticipantConnectedInfo,
+            ParticipantDisconnectedInfo, TrackSubscribedInfo, UnifiedMessage,
+        },
     },
 };
 
@@ -95,7 +98,9 @@ use crate::handlers::{
         IncomingMessage,
         OutgoingMessage,
         UnifiedMessage,
+        ParticipantConnectedInfo,
         ParticipantDisconnectedInfo,
+        TrackSubscribedInfo,
         // Configuration types
         STTWebSocketConfig,
         TTSWebSocketConfig,
@@ -124,17 +129,18 @@ impl utoipa::Modify for SecurityAddon {
             let mut http = utoipa::openapi::security::Http::new(
                 utoipa::openapi::security::HttpAuthScheme::Bearer,
             );
-            http.bearer_format = Some("JWT".to_string());
+            http.bearer_format = Some("Token".to_string());
             http.description = Some(
-                "JWT token obtained from the authentication service. \
+                "Authentication token for protected endpoints. \
+                 Can be provided as `Authorization: Bearer <token>` or `?api_key=<token>`. \
                  Required when AUTH_REQUIRED is enabled."
                     .to_string(),
             );
 
             components.add_security_scheme(
-                "bearer_auth",
+                "auth",
                 utoipa::openapi::security::SecurityScheme::Http(http),
-            )
+            );
         }
     }
 }

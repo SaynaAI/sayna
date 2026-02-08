@@ -37,6 +37,12 @@ pub type DataCallback = Arc<dyn Fn(DataMessage) + Send + Sync>;
 /// Callback type for handling participant disconnection events.
 pub type ParticipantDisconnectCallback = Arc<dyn Fn(ParticipantDisconnectEvent) + Send + Sync>;
 
+/// Callback type for handling participant connection events.
+pub type ParticipantConnectCallback = Arc<dyn Fn(ParticipantConnectEvent) + Send + Sync>;
+
+/// Callback type for handling track subscription events.
+pub type TrackSubscribedCallback = Arc<dyn Fn(TrackSubscribedEvent) + Send + Sync>;
+
 /// LiveKit data message structure.
 #[derive(Debug, Clone)]
 pub struct DataMessage {
@@ -63,6 +69,36 @@ pub struct ParticipantDisconnectEvent {
     pub timestamp: u64,
 }
 
+/// LiveKit participant connect event structure.
+#[derive(Debug, Clone)]
+pub struct ParticipantConnectEvent {
+    /// The participant identity who connected.
+    pub participant_identity: String,
+    /// The participant's display name (if available).
+    pub participant_name: Option<String>,
+    /// Room identifier.
+    pub room_name: String,
+    /// Timestamp when the connection occurred.
+    pub timestamp: u64,
+}
+
+/// LiveKit track subscribed event structure.
+#[derive(Debug, Clone)]
+pub struct TrackSubscribedEvent {
+    /// The participant identity who owns the track.
+    pub participant_identity: String,
+    /// The participant's display name (if available).
+    pub participant_name: Option<String>,
+    /// The track kind: "audio" or "video".
+    pub track_kind: String,
+    /// The track SID (publication SID).
+    pub track_sid: String,
+    /// Room identifier.
+    pub room_name: String,
+    /// Timestamp when the subscription occurred.
+    pub timestamp: u64,
+}
+
 /// Reliable data channel threshold (200 MB) to handle bursty payloads without premature backpressure.
 pub(crate) const RELIABLE_BUFFER_THRESHOLD_BYTES: u64 = 200 * 1024 * 1024;
 
@@ -79,6 +115,8 @@ pub struct LiveKitClient {
     pub(crate) audio_callback: Option<AudioCallback>,
     pub(crate) data_callback: Option<DataCallback>,
     pub(crate) participant_disconnect_callback: Option<ParticipantDisconnectCallback>,
+    pub(crate) participant_connect_callback: Option<ParticipantConnectCallback>,
+    pub(crate) track_subscribed_callback: Option<TrackSubscribedCallback>,
     pub(crate) active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     pub(crate) is_connected: Arc<Mutex<bool>>,
     // Atomic flags for fast status queries
@@ -138,6 +176,8 @@ impl LiveKitClient {
             audio_callback: None,
             data_callback: None,
             participant_disconnect_callback: None,
+            participant_connect_callback: None,
+            track_subscribed_callback: None,
             active_streams: Arc::new(Mutex::new(Vec::new())),
             is_connected: Arc::new(Mutex::new(false)),
             is_connected_atomic: Arc::new(AtomicBool::new(false)),

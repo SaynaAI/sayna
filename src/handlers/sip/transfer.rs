@@ -179,7 +179,7 @@ fn error_response(status: StatusCode, message: &str, code: SIPTransferErrorCode)
             (status = 500, description = "LiveKit not configured or transfer failed", body = SIPTransferErrorResponse)
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "sip"
     )

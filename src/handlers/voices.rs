@@ -543,7 +543,7 @@ async fn fetch_azure_voices(
             (status = 500, description = "Internal server error")
         ),
         security(
-            ("bearer_auth" = [])
+            ("auth" = [])
         ),
         tag = "voices"
     )
