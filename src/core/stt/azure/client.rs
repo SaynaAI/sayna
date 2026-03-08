@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 
 use super::config::AzureSTTConfig;
 use super::messages::{AzureMessage, RecognitionStatus};
+use crate::core::providers::azure::AzureRegion;
 use crate::core::stt::base::{
     BaseSTT, STTConfig, STTError, STTErrorCallback, STTResult, STTResultCallback,
 };
@@ -604,7 +605,12 @@ impl BaseSTT for AzureSTT {
         }
 
         // Create Azure-specific configuration with defaults
-        let azure_config = AzureSTTConfig::from_base(config);
+        let region = config
+            .azure_region
+            .as_deref()
+            .map(|r| r.parse::<AzureRegion>().unwrap_or_default())
+            .unwrap_or_default();
+        let azure_config = AzureSTTConfig::with_region(config, region);
 
         Ok(Self {
             config: Some(azure_config),
@@ -882,6 +888,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            azure_region: None,
         };
 
         let stt = <AzureSTT as BaseSTT>::new(config).unwrap();
@@ -900,6 +907,7 @@ mod tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            azure_region: None,
         };
 
         let result = <AzureSTT as BaseSTT>::new(config);
@@ -922,6 +930,7 @@ mod tests {
             punctuation: false,
             encoding: "linear16".to_string(),
             model: "default".to_string(),
+            azure_region: None,
         };
 
         let stt = <AzureSTT as BaseSTT>::new(config).unwrap();

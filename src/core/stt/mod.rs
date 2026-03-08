@@ -97,6 +97,7 @@ impl std::str::FromStr for STTProvider {
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
 ///         model: "nova-3".to_string(),
+///         azure_region: None,
 ///     };
 ///
 ///     // Create a Deepgram STT provider
@@ -164,6 +165,7 @@ pub fn create_stt_provider(
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
 ///         model: "nova-3".to_string(),
+///         azure_region: None,
 ///     };
 ///
 ///     // Create a Deepgram STT provider using enum
@@ -336,6 +338,7 @@ mod factory_tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("deepgram", config);
@@ -356,6 +359,7 @@ mod factory_tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Deepgram, config);
@@ -374,6 +378,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("elevenlabs", config);
@@ -397,6 +402,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("elevenlabs", config);
@@ -420,6 +426,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider_from_enum(STTProvider::ElevenLabs, config);
@@ -446,6 +453,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("microsoft-azure", config);
@@ -467,6 +475,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         // Test that "azure" shorthand also works
@@ -488,6 +497,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("microsoft-azure", config);
@@ -511,6 +521,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Azure, config);
@@ -556,6 +567,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("cartesia", config);
@@ -577,6 +589,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider("cartesia", config);
@@ -600,6 +613,7 @@ mod factory_tests {
             punctuation: true,
             encoding: "pcm_s16le".to_string(),
             model: "ink-whisper".to_string(),
+            azure_region: None,
         };
 
         let result = create_stt_provider_from_enum(STTProvider::Cartesia, config);
@@ -639,6 +653,7 @@ mod factory_tests {
 ///         channels: 1,
 ///         punctuation: true,
 ///         encoding: "linear16".to_string(),
+///         azure_region: None,
 ///     };
 ///     
 ///     // Create provider using factory function

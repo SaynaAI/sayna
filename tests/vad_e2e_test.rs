@@ -32,6 +32,7 @@ fn test_voice_manager_config_with_vad() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let tts_config = TTSConfig {

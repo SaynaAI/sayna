@@ -186,6 +186,8 @@ pub struct TTSConfig {
     pub pronunciations: Vec<Pronunciation>,
     /// Request pool size for concurrent HTTP requests
     pub request_pool_size: Option<usize>,
+    /// Azure region for Azure Speech Services (e.g., "westus", "eastus")
+    pub azure_region: Option<String>,
 }
 
 impl Default for TTSConfig {
@@ -202,6 +204,7 @@ impl Default for TTSConfig {
             request_timeout: Some(60),
             pronunciations: Vec::new(),
             request_pool_size: Some(4),
+            azure_region: None,
         }
     }
 }

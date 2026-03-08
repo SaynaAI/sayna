@@ -259,7 +259,7 @@ impl ServerConfig {
                 // environment variable or gcloud auth.
                 Ok(self.google_credentials.clone().unwrap_or_default())
             }
-            "microsoft-azure" => {
+            "microsoft-azure" | "azure" => {
                 // Azure Speech Services uses subscription key authentication
                 // The key is tied to a specific Azure region
                 self.azure_speech_subscription_key

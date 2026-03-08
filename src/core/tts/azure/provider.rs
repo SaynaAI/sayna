@@ -253,7 +253,12 @@ impl AzureTTS {
     /// let tts = AzureTTS::new(config)?;
     /// ```
     pub fn new(config: TTSConfig) -> TTSResult<Self> {
-        Self::with_region(config, AzureRegion::default())
+        let region = config
+            .azure_region
+            .as_deref()
+            .map(|r| r.parse::<AzureRegion>().unwrap_or_default())
+            .unwrap_or_default();
+        Self::with_region(config, region)
     }
 
     /// Creates a new Azure TTS provider with a specific region.
@@ -438,6 +443,7 @@ mod tests {
             request_timeout: Some(60),
             pronunciations: Vec::new(),
             request_pool_size: Some(4),
+            azure_region: None,
         }
     }
 

@@ -42,6 +42,7 @@ fn test_create_azure_provider_by_name() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let result = create_stt_provider("microsoft-azure", config);
@@ -558,6 +559,7 @@ async fn test_azure_real_connection() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "microsoft-azure".to_string(),
+        azure_region: None,
     };
 
     let mut stt = AzureSTT::new(config).unwrap();
@@ -621,6 +623,7 @@ async fn test_azure_send_silence_audio() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "microsoft-azure".to_string(),
+        azure_region: None,
     };
 
     // Parse and set region

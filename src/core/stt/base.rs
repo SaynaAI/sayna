@@ -45,6 +45,8 @@ pub struct STTConfig {
     pub encoding: String,
     /// Model to use for transcription
     pub model: String,
+    /// Azure region for Azure Speech Services (e.g., "westus", "eastus")
+    pub azure_region: Option<String>,
 }
 
 impl Default for STTConfig {
@@ -58,6 +60,7 @@ impl Default for STTConfig {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            azure_region: None,
         }
     }
 }
@@ -323,6 +326,7 @@ mod tests {
             channels: 1,
             punctuation: true,
             encoding: "linear16".to_string(),
+            azure_region: None,
         };
 
         let stt = MockSTT::new(config.clone()).unwrap();

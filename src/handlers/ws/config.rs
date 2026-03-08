@@ -92,6 +92,7 @@ impl STTWebSocketConfig {
             punctuation: self.punctuation,
             encoding: self.encoding.clone(),
             model: self.model.clone(),
+            azure_region: None,
         }
     }
 }
@@ -216,6 +217,7 @@ impl TTSWebSocketConfig {
             request_timeout: self.request_timeout.or(defaults.request_timeout),
             pronunciations: self.pronunciations.clone(),
             request_pool_size: defaults.request_pool_size,
+            azure_region: None,
         }
     }
 }

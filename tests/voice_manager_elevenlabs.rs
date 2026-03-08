@@ -19,6 +19,7 @@ fn test_voice_manager_with_elevenlabs_stt() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let tts_config = TTSConfig {
@@ -49,6 +50,7 @@ fn test_voice_manager_elevenlabs_requires_api_key() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let tts_config = TTSConfig::default();
@@ -74,6 +76,7 @@ fn test_voice_manager_elevenlabs_stt_deepgram_tts() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let tts_config = TTSConfig {
@@ -107,6 +110,7 @@ fn test_voice_manager_elevenlabs_different_sample_rates() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let tts_config = TTSConfig {
@@ -144,6 +148,7 @@ fn test_voice_manager_elevenlabs_different_languages() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let tts_config = TTSConfig {

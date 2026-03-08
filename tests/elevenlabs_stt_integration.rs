@@ -36,6 +36,7 @@ fn test_create_elevenlabs_provider_by_name() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let result = create_stt_provider("elevenlabs", config);
@@ -61,6 +62,7 @@ fn test_create_elevenlabs_provider_by_enum() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "".to_string(),
+        azure_region: None,
     };
 
     let result = create_stt_provider_from_enum(STTProvider::ElevenLabs, config);
@@ -283,6 +285,7 @@ async fn test_real_connection() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "elevenlabs".to_string(),
+        azure_region: None,
     };
 
     let mut stt = ElevenLabsSTT::new(config).unwrap();
@@ -339,6 +342,7 @@ async fn test_transcription_with_audio() {
         encoding: "linear16".to_string(),
         model: "".to_string(),
         provider: "elevenlabs".to_string(),
+        azure_region: None,
     };
 
     let mut stt = ElevenLabsSTT::new(config).unwrap();

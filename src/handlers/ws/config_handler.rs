@@ -290,8 +290,16 @@ async fn initialize_voice_manager(
     };
 
     // Create full configs with API keys
-    let stt_config = stt_ws_config.to_stt_config(stt_api_key);
-    let tts_config = tts_ws_config.to_tts_config(tts_api_key);
+    let mut stt_config = stt_ws_config.to_stt_config(stt_api_key);
+    let mut tts_config = tts_ws_config.to_tts_config(tts_api_key);
+
+    // Inject Azure region from server config for Azure providers
+    if matches!(stt_ws_config.provider.to_lowercase().as_str(), "azure" | "microsoft-azure") {
+        stt_config.azure_region = Some(app_state.config.get_azure_speech_region());
+    }
+    if matches!(tts_ws_config.provider.to_lowercase().as_str(), "azure" | "microsoft-azure") {
+        tts_config.azure_region = Some(app_state.config.get_azure_speech_region());
+    }
 
     // Create voice manager configuration
     // VAD is automatically enabled when the stt-vad feature is compiled
