@@ -148,6 +148,7 @@ impl GoogleSTT {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     async fn start_connection(&mut self, config: GoogleSTTConfig) -> Result<(), STTError> {
         let auth_client = self.auth_client.clone().ok_or_else(|| {
             STTError::AuthenticationFailed("Auth client not initialized".to_string())

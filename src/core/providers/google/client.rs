@@ -151,6 +151,7 @@ impl AuthenticatedChannel {
     ///     Ok(())
     /// }
     /// ```
+    #[allow(clippy::result_large_err)]
     pub async fn create_interceptor(
         &self,
     ) -> Result<
@@ -183,6 +184,7 @@ impl AuthenticatedChannel {
     /// # Arguments
     ///
     /// * `auth_header` - The full authorization header value (e.g., "Bearer token123")
+    #[allow(clippy::result_large_err)]
     pub fn create_interceptor_with_header(
         auth_header: String,
     ) -> Result<
