@@ -172,7 +172,10 @@ pub async fn speak_handler(
     let mut tts_config = request.tts_config.to_tts_config(api_key);
 
     // Inject Azure region from server config for Azure providers
-    if matches!(tts_config.provider.to_lowercase().as_str(), "azure" | "microsoft-azure") {
+    if matches!(
+        tts_config.provider.to_lowercase().as_str(),
+        "azure" | "microsoft-azure"
+    ) {
         tts_config.azure_region = Some(state.config.get_azure_speech_region());
     }
 

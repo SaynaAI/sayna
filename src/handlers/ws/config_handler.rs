@@ -294,10 +294,16 @@ async fn initialize_voice_manager(
     let mut tts_config = tts_ws_config.to_tts_config(tts_api_key);
 
     // Inject Azure region from server config for Azure providers
-    if matches!(stt_ws_config.provider.to_lowercase().as_str(), "azure" | "microsoft-azure") {
+    if matches!(
+        stt_ws_config.provider.to_lowercase().as_str(),
+        "azure" | "microsoft-azure"
+    ) {
         stt_config.azure_region = Some(app_state.config.get_azure_speech_region());
     }
-    if matches!(tts_ws_config.provider.to_lowercase().as_str(), "azure" | "microsoft-azure") {
+    if matches!(
+        tts_ws_config.provider.to_lowercase().as_str(),
+        "azure" | "microsoft-azure"
+    ) {
         tts_config.azure_region = Some(app_state.config.get_azure_speech_region());
     }
 

@@ -374,6 +374,7 @@ mod e2e_model_tests {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "".to_string(),
+            azure_region: None,
         };
 
         let tts_config = TTSConfig {
