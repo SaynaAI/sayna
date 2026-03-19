@@ -178,7 +178,11 @@ impl LiveKitRoomHandler {
             }
             LiveKitMediaMode::DataOnly => {
                 grants.can_publish = false;
-                grants.can_subscribe = false;
+                // can_subscribe must remain true so the LiveKit server negotiates a
+                // subscriber PeerConnection.  Without at least one PC the SDK's
+                // wait_pc_connection check times out.  Actual track subscriptions are
+                // prevented by RoomOptions { auto_subscribe: false }.
+                grants.can_subscribe = true;
             }
         }
 
@@ -1105,7 +1109,9 @@ mod tests {
         assert!(grants.room_join);
         assert!(grants.room_admin);
         assert!(!grants.can_publish);
-        assert!(!grants.can_subscribe);
+        // can_subscribe stays true even in DataOnly mode so the subscriber
+        // PeerConnection is created (auto_subscribe=false prevents actual tracks).
+        assert!(grants.can_subscribe);
         assert!(grants.can_publish_data);
     }
 
