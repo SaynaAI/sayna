@@ -885,6 +885,7 @@ if (message.type === "participant_connected") {
 - Emitted when Sayna subscribes to a track and starts media processing
 - `track_kind` is always `"audio"` or `"video"`
 - Fires regardless of the `listen_participants` filter setting
+- Not emitted when the websocket session is configured with `audio=false`
 
 **Use Cases:**
 ```javascript
@@ -1046,22 +1047,28 @@ The configuration message is the most important message in the protocol. It dete
 | Value | Behavior |
 |-------|----------|
 | `true` (default) | Full audio processing enabled. STT and TTS providers initialized. Can stream audio, receive transcriptions, and synthesize speech. |
-| `false` | Audio processing disabled. No STT/TTS providers started. Useful for LiveKit control-only mode where you only need data channels and room management. |
+| `false` | Strict no-media LiveKit mode. No STT/TTS providers started, no local audio is published, and no remote media is subscribed. Useful when you only need data channels and participant lifecycle events. |
 
 **Audio Disabled Mode:**
 When `audio=false`, you can still:
 - Connect to LiveKit rooms
 - Send/receive data channel messages
+- Receive participant connected/disconnected events
 - Manage LiveKit recordings
 - Control room state
+
+When `audio=false`, Sayna will NOT:
+- Publish a local audio track
+- Subscribe to remote media tracks
+- Emit `track_subscribed`
 
 You CANNOT:
 - Stream audio for transcription
 - Use `speak` commands
 - Receive TTS audio
-- Use `clear` commands
 
 Attempting to send audio or speak commands with `audio=false` results in an error message (connection remains open).
+`clear` remains safe to call, but there is no STT/TTS media pipeline to flush in this mode.
 
 ---
 
@@ -1571,9 +1578,10 @@ Sayna's WebSocket API supports multiple integration patterns. Choose based on yo
 3. Receive "ready"
 4. Room created, recording started
 5. Use "send_message" to send data to participants
-6. Receive "message" events from participants
-7. Control recording, room state via commands
-8. Disconnect → room deleted, recording stopped
+6. Receive "message", "participant_connected", and "participant_disconnected" events
+7. No `track_subscribed` events are emitted in this mode
+8. Control recording, room state via commands
+9. Disconnect → room deleted, recording stopped
 ```
 
 **Pros:**

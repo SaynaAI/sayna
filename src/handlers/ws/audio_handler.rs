@@ -218,12 +218,12 @@ pub async fn handle_clear_message(
 ) -> bool {
     debug!("Processing clear command");
 
-    // Fast path: read lock to get both managers
-    let (voice_manager, livekit_client) = {
+    // Fast path: read lock to get voice manager
+    let voice_manager = {
         let state_guard = state.read().await;
 
         // Check if audio processing is enabled for voice manager operations
-        let vm = if state_guard.is_audio_enabled() {
+        if state_guard.is_audio_enabled() {
             match &state_guard.voice_manager {
                 Some(vm) => Some(vm.clone()),
                 None => {
@@ -239,10 +239,7 @@ pub async fn handle_clear_message(
         } else {
             // Audio is disabled, so voice manager operations are not available
             None
-        };
-
-        let lk = state_guard.livekit_client.clone();
-        (vm, lk)
+        }
     };
 
     // Check if we're in a non-interruptible state
@@ -272,21 +269,7 @@ pub async fn handle_clear_message(
             debug!("Successfully cleared TTS and audio buffers");
         }
     } else {
-        debug!("Audio processing disabled - skipping TTS provider clear");
-
-        // If audio is disabled but LiveKit is configured, still clear LiveKit audio
-        if let Some(livekit_manager) = livekit_client {
-            // Use write() to wait for the lock - clear operation is important
-            let client = livekit_manager.write().await;
-            match client.clear_audio().await {
-                Ok(()) => {
-                    debug!("Successfully cleared LiveKit audio buffer (audio disabled mode)");
-                }
-                Err(e) => {
-                    error!("Failed to clear LiveKit audio buffer: {}", e);
-                }
-            }
-        }
+        debug!("Audio processing disabled - skipping clear (no-op in no-media mode)");
     }
 
     debug!("Clear command completed");
@@ -332,6 +315,47 @@ async fn get_voice_manager_if_audio_enabled(
                 }))
                 .await;
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_handle_audio_message_rejects_when_audio_disabled() {
+        let state = Arc::new(RwLock::new(ConnectionState::new()));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing =
+            handle_audio_message(Bytes::from_static(b"test"), &state, &message_tx).await;
+
+        assert!(continue_processing);
+        match message_rx.recv().await {
+            Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
+                assert!(message.contains("Audio processing is disabled"));
+            }
+            Some(_) => panic!("expected disabled-audio error"),
+            None => panic!("expected disabled-audio error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_speak_message_rejects_when_audio_disabled() {
+        let state = Arc::new(RwLock::new(ConnectionState::new()));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing =
+            handle_speak_message("hello".to_string(), None, None, &state, &message_tx).await;
+
+        assert!(continue_processing);
+        match message_rx.recv().await {
+            Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
+                assert!(message.contains("Audio processing is disabled"));
+            }
+            Some(_) => panic!("expected disabled-audio error"),
+            None => panic!("expected disabled-audio error"),
         }
     }
 }

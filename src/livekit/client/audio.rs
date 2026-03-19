@@ -6,9 +6,10 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use livekit::options::TrackPublishOptions;
-use livekit::prelude::{DataPacketKind, Room, RoomEvent, RoomOptions};
+use livekit::prelude::{DataPacketKind, Room, RoomEvent};
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
@@ -464,11 +465,18 @@ impl LiveKitClient {
             return Ok((None, false));
         }
 
-        match Room::connect(&ctx.config.url, &ctx.config.token, RoomOptions::default()).await {
+        match Room::connect(
+            &ctx.config.url,
+            &ctx.config.token,
+            ctx.config.room_options(),
+        )
+        .await
+        {
             Ok((new_room, room_events)) => {
                 // Clear old audio resources
                 *ctx.audio_source.lock().await = None;
                 *ctx.local_track_publication.lock().await = None;
+                ctx.has_audio_source_atomic.store(false, Ordering::Release);
 
                 // Configure data channel threshold on the new room
                 {
@@ -489,11 +497,20 @@ impl LiveKitClient {
                     }
                 }
 
-                // Extract local participant while holding the lock briefly, then store the new room
-                let local_participant = {
+                // Store the new room before any media-specific setup.
+                {
                     let mut room_guard = ctx.room.lock().await;
                     *room_guard = Some(new_room);
+                }
 
+                if !ctx.config.publish_audio {
+                    info!("Successfully reconnected in strict no-media mode");
+                    return Ok((Some(room_events), true));
+                }
+
+                // Extract local participant while holding the lock briefly.
+                let local_participant = {
+                    let room_guard = ctx.room.lock().await;
                     if let Some(room_ref) = &*room_guard {
                         room_ref.local_participant().clone()
                     } else {
@@ -504,7 +521,6 @@ impl LiveKitClient {
                         ));
                     }
                 };
-                // Room lock is now released
 
                 let audio_source_options = AudioSourceOptions {
                     echo_cancellation: false,
@@ -540,6 +556,7 @@ impl LiveKitClient {
                     Ok(publication) => {
                         *ctx.audio_source.lock().await = Some(new_audio_source.clone());
                         *ctx.local_track_publication.lock().await = Some(publication);
+                        ctx.has_audio_source_atomic.store(true, Ordering::Release);
 
                         // Spawn a task to drain queued audio just like in initial setup
                         let audio_queue_clone = Arc::clone(&ctx.audio_queue);
@@ -604,6 +621,7 @@ impl LiveKitClient {
             Err(e) => {
                 error!("Failed to reconnect to LiveKit room: {:?}", e);
                 *ctx.is_connected.lock().await = false;
+                ctx.has_audio_source_atomic.store(false, Ordering::Release);
                 Err(AppError::InternalServerError(format!(
                     "Failed to reconnect: {e:?}"
                 )))

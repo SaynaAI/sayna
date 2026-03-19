@@ -42,7 +42,7 @@ use livekit_api::services::egress::{EgressClient, EgressOutput, RoomCompositeOpt
 use livekit_api::services::room::{CreateRoomOptions, RoomClient};
 use livekit_protocol as proto;
 
-use super::types::LiveKitError;
+use super::types::{LiveKitError, LiveKitMediaMode};
 
 /// Configuration for S3 recording uploads
 #[derive(Debug, Clone)]
@@ -153,20 +153,40 @@ impl LiveKitRoomHandler {
     /// - can_publish_data: Send data messages
     /// - can_update_own_metadata: Update own participant metadata
     /// - room_create: Create new rooms
-    fn token_permissions(&self, room_name: &str, room_admin: bool) -> VideoGrants {
-        VideoGrants {
+    fn token_permissions_with_media_mode(
+        &self,
+        room_name: &str,
+        room_admin: bool,
+        media_mode: LiveKitMediaMode,
+    ) -> VideoGrants {
+        let mut grants = VideoGrants {
             room: room_name.to_string(),
             room_join: true,
             room_admin,
             room_record: true,
             room_list: true,
-            can_publish: true,
-            can_subscribe: true,
             can_publish_data: true,
             can_update_own_metadata: true,
             room_create: true,
             ..Default::default()
+        };
+
+        match media_mode {
+            LiveKitMediaMode::FullMedia => {
+                grants.can_publish = true;
+                grants.can_subscribe = true;
+            }
+            LiveKitMediaMode::DataOnly => {
+                grants.can_publish = false;
+                grants.can_subscribe = false;
+            }
         }
+
+        grants
+    }
+
+    fn token_permissions(&self, room_name: &str, room_admin: bool) -> VideoGrants {
+        self.token_permissions_with_media_mode(room_name, room_admin, LiveKitMediaMode::FullMedia)
     }
 
     /// Generate a JWT token for a regular user
@@ -268,10 +288,27 @@ impl LiveKitRoomHandler {
         identity: &str,
         name: &str,
     ) -> Result<String, LiveKitError> {
+        self.agent_token_with_sip_admin_for_media_mode(
+            room_name,
+            identity,
+            name,
+            LiveKitMediaMode::FullMedia,
+        )
+    }
+
+    /// Generate a JWT token for an agent with SIP admin grants and a websocket-specific
+    /// media policy.
+    pub fn agent_token_with_sip_admin_for_media_mode(
+        &self,
+        room_name: &str,
+        identity: &str,
+        name: &str,
+        media_mode: LiveKitMediaMode,
+    ) -> Result<String, LiveKitError> {
         let token = AccessToken::with_api_key(&self.api_key, &self.api_secret)
             .with_identity(identity)
             .with_name(name)
-            .with_grants(self.token_permissions(room_name, true))
+            .with_grants(self.token_permissions_with_media_mode(room_name, true, media_mode))
             .with_sip_grants(SIPGrants {
                 admin: true,
                 ..Default::default()
@@ -1026,6 +1063,7 @@ mod tests {
         assert!(!grants.room_admin);
         assert!(grants.can_publish);
         assert!(grants.can_subscribe);
+        assert!(grants.can_publish_data);
     }
 
     #[test]
@@ -1044,6 +1082,31 @@ mod tests {
         assert!(grants.room_admin);
         assert!(grants.can_publish);
         assert!(grants.can_subscribe);
+        assert!(grants.can_publish_data);
+    }
+
+    #[test]
+    fn test_token_permissions_data_only() {
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let grants = handler.token_permissions_with_media_mode(
+            "test-room",
+            true,
+            LiveKitMediaMode::DataOnly,
+        );
+
+        assert_eq!(grants.room, "test-room");
+        assert!(grants.room_join);
+        assert!(grants.room_admin);
+        assert!(!grants.can_publish);
+        assert!(!grants.can_subscribe);
+        assert!(grants.can_publish_data);
     }
 
     #[test]
@@ -1089,6 +1152,27 @@ mod tests {
         .unwrap();
 
         let result = handler.agent_token_with_sip_admin("test-room", "test-agent", "Test Agent");
+        assert!(result.is_ok());
+        let token = result.unwrap();
+        assert!(!token.is_empty());
+    }
+
+    #[test]
+    fn test_agent_token_with_sip_admin_generation_data_only() {
+        let handler = LiveKitRoomHandler::new(
+            "http://localhost:7880".to_string(),
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let result = handler.agent_token_with_sip_admin_for_media_mode(
+            "test-room",
+            "test-agent",
+            "Test Agent",
+            LiveKitMediaMode::DataOnly,
+        );
         assert!(result.is_ok());
         let token = result.unwrap();
         assert!(!token.is_empty());

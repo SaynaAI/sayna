@@ -453,17 +453,47 @@ fn test_livekit_ws_config_conversion() {
 
     let livekit_url = "wss://test-livekit.com".to_string();
     let test_token = "test-jwt-token".to_string();
-    let livekit_config =
-        livekit_ws_config.to_livekit_config(test_token.clone(), &tts_ws_config, &livekit_url);
+    let livekit_config = livekit_ws_config.to_livekit_config(
+        test_token.clone(),
+        true,
+        Some(&tts_ws_config),
+        &livekit_url,
+    );
     assert_eq!(livekit_config.url, "wss://test-livekit.com");
     assert_eq!(livekit_config.token, test_token);
     assert_eq!(livekit_config.room_name, "test-room");
+    assert!(livekit_config.publish_audio);
+    assert!(livekit_config.subscribe_audio);
     assert_eq!(livekit_config.sample_rate, 22050);
     assert_eq!(livekit_config.channels, 1);
     assert_eq!(
         livekit_config.enable_noise_filter,
         cfg!(feature = "noise-filter")
     );
+}
+
+#[test]
+fn test_livekit_ws_config_conversion_data_only() {
+    let livekit_ws_config = LiveKitWebSocketConfig {
+        room_name: "test-room".to_string(),
+        enable_recording: false,
+        sayna_participant_identity: None,
+        sayna_participant_name: None,
+        listen_participants: vec![],
+    };
+
+    let livekit_config = livekit_ws_config.to_livekit_config(
+        "test-token".to_string(),
+        false,
+        None,
+        "wss://test-livekit.com",
+    );
+
+    assert!(!livekit_config.publish_audio);
+    assert!(!livekit_config.subscribe_audio);
+    assert_eq!(livekit_config.sample_rate, 24000);
+    assert_eq!(livekit_config.channels, 1);
+    assert!(!livekit_config.enable_noise_filter);
 }
 
 #[test]
@@ -490,7 +520,8 @@ fn test_livekit_config_with_empty_listen_participants() {
 
     let livekit_config = livekit_ws_config.to_livekit_config(
         "test-token".to_string(),
-        &tts_ws_config,
+        true,
+        Some(&tts_ws_config),
         "wss://test.com",
     );
 
@@ -524,7 +555,8 @@ fn test_livekit_config_with_listen_participants() {
 
     let livekit_config = livekit_ws_config.to_livekit_config(
         "test-token".to_string(),
-        &tts_ws_config,
+        true,
+        Some(&tts_ws_config),
         "wss://test.com",
     );
 

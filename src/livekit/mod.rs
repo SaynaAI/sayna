@@ -27,6 +27,8 @@
 //!         url: "wss://your-livekit-server.com".to_string(),
 //!         token: "your-jwt-token".to_string(),
 //!         room_name: "your-room".to_string(),
+//!         publish_audio: true,
+//!         subscribe_audio: true,
 //!         sample_rate: 24000,
 //!         channels: 1,
 //!         enable_noise_filter: cfg!(feature = "noise-filter"),
@@ -80,6 +82,7 @@ pub use manager::LiveKitManager;
 pub use operations::{LiveKitOperation, OperationQueue};
 pub use room_handler::LiveKitRoomHandler;
 pub use sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
+pub(crate) use types::LiveKitMediaMode;
 pub use types::{
     AudioFrameInfo, ConnectionStatus, LiveKitConfig, LiveKitError, ParticipantInfo, RoomInfo,
 };
@@ -108,6 +111,8 @@ mod tests {
             url: "wss://test.example.com".to_string(),
             token: "test-token".to_string(),
             room_name: "test-room".to_string(),
+            publish_audio: true,
+            subscribe_audio: true,
             sample_rate: 24000,
             channels: 1,
             enable_noise_filter: cfg!(feature = "noise-filter"),
@@ -116,6 +121,7 @@ mod tests {
 
         assert_eq!(config.url, "wss://test.example.com");
         assert_eq!(config.token, "test-token");
+        assert_eq!(config.media_mode(), LiveKitMediaMode::FullMedia);
         assert_eq!(config.enable_noise_filter, cfg!(feature = "noise-filter"));
     }
 

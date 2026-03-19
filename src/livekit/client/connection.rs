@@ -5,7 +5,7 @@
 
 use std::sync::atomic::Ordering;
 
-use livekit::prelude::{DataPacketKind, Room, RoomOptions};
+use livekit::prelude::{DataPacketKind, Room};
 use tracing::{debug, error, info, warn};
 
 use super::{LiveKitClient, LiveKitOperation, RELIABLE_BUFFER_THRESHOLD_BYTES};
@@ -16,7 +16,13 @@ impl LiveKitClient {
     pub async fn connect(&mut self) -> Result<(), AppError> {
         info!("Connecting to LiveKit room with URL: {}", self.config.url);
 
-        match Room::connect(&self.config.url, &self.config.token, RoomOptions::default()).await {
+        match Room::connect(
+            &self.config.url,
+            &self.config.token,
+            self.config.room_options(),
+        )
+        .await
+        {
             Ok((room, room_events)) => {
                 *self.room.lock().await = Some(room);
                 self.room_events = Some(room_events);
@@ -25,13 +31,7 @@ impl LiveKitClient {
 
                 info!("Successfully connected to LiveKit room");
 
-                self.configure_data_channel_threshold().await;
-
-                self.setup_audio_publishing().await?;
-                self.start_event_handler().await?;
-                self.start_operation_worker().await;
-
-                info!("LiveKit client initialization sequence completed");
+                self.bootstrap_connected_room().await?;
                 Ok(())
             }
             Err(e) => {
@@ -127,5 +127,25 @@ impl LiveKitClient {
                 );
             }
         }
+    }
+
+    async fn bootstrap_connected_room(&mut self) -> Result<(), AppError> {
+        self.configure_data_channel_threshold().await;
+
+        if self.config.publish_audio {
+            self.setup_audio_publishing().await?;
+        } else {
+            info!("LiveKit connected in strict no-media mode; skipping audio publishing");
+        }
+
+        self.start_event_handler().await?;
+        self.start_operation_worker().await;
+
+        info!(
+            publish_audio = self.config.publish_audio,
+            subscribe_audio = self.config.subscribe_audio,
+            "LiveKit client initialization sequence completed"
+        );
+        Ok(())
     }
 }

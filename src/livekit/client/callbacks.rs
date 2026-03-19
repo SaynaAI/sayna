@@ -28,6 +28,8 @@ impl LiveKitClient {
     /// #     url: "wss://test.com".to_string(),
     /// #     token: "token".to_string(),
     /// #     room_name: "test-room".to_string(),
+    /// #     publish_audio: true,
+    /// #     subscribe_audio: true,
     /// #     sample_rate: 24000,
     /// #     channels: 1,
     /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
@@ -60,9 +62,11 @@ impl LiveKitClient {
     /// #     url: "wss://test.com".to_string(),
     /// #     token: "token".to_string(),
     /// #     room_name: "test-room".to_string(),
+    /// #     publish_audio: false,
+    /// #     subscribe_audio: false,
     /// #     sample_rate: 24000,
     /// #     channels: 1,
-    /// #     enable_noise_filter: cfg!(feature = "noise-filter"),
+    /// #     enable_noise_filter: false,
     /// #     listen_participants: vec![],
     /// # });
     /// client.set_data_callback(|data_message: DataMessage| {

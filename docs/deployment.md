@@ -262,7 +262,8 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 
 ### C. Text/Data-Only Sessions
 - Start Sayna with normal audio credentials but send a WebSocket `config` message where `"audio": false`.
-- Lets you keep LiveKit messaging/data-plane behavior (including `/livekit/token`) while skipping STT/TTS provider initialization, ideal for environments without audio API keys.
+- This creates a strict no-media LiveKit session: data messaging and participant connect/disconnect events still work, but Sayna does not publish audio, does not subscribe to remote media, and does not emit `track_subscribed`.
+- Useful when you need LiveKit room control and data-plane behavior without per-session STT/TTS initialization.
 
 ### D. Custom Cache Strategies
 - **Filesystem cache** (recommended for production): set `CACHE_PATH` to a mounted volume so `sayna init` persists VAD/turn-detection assets and TTS audio across restarts.

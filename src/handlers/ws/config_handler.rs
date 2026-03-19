@@ -17,7 +17,7 @@ use crate::{
         tts::AudioData,
         voice_manager::{VoiceManager, VoiceManagerConfig},
     },
-    livekit::LiveKitClient,
+    livekit::{LiveKitClient, LiveKitMediaMode},
     state::AppState,
 };
 
@@ -158,6 +158,7 @@ pub async fn handle_config_message(
 
             match initialize_livekit_client(
                 livekit_ws_config,
+                audio_enabled,
                 tts_ws_config.as_ref(),
                 &app_state.config.livekit_url,
                 voice_manager.as_ref(),
@@ -211,7 +212,13 @@ pub async fn handle_config_message(
             sayna_participant_name: sayna_name,
         }))
         .await;
-    info!("Voice manager ready and configured");
+    if audio_enabled {
+        info!("WebSocket connection ready with audio pipeline enabled");
+    } else if livekit_client.is_some() {
+        info!("WebSocket connection ready in strict no-media LiveKit mode");
+    } else {
+        info!("WebSocket connection ready with audio disabled");
+    }
 
     true
 }
@@ -703,6 +710,7 @@ async fn register_final_tts_callback(
 #[allow(clippy::too_many_arguments)]
 async fn initialize_livekit_client(
     livekit_ws_config: LiveKitWebSocketConfig,
+    audio_enabled: bool,
     tts_config: Option<&TTSWebSocketConfig>,
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
@@ -719,9 +727,13 @@ async fn initialize_livekit_client(
     String,         // Sayna participant name
 )> {
     info!(
+        audio_enabled,
         "Setting up LiveKit client with URL: {}, room: {}",
-        livekit_url, livekit_ws_config.room_name
+        livekit_url,
+        livekit_ws_config.room_name
     );
+
+    let media_mode = LiveKitMediaMode::from_audio_enabled(audio_enabled);
 
     // Get room handler or return error
     let room_handler = match room_handler {
@@ -841,10 +853,11 @@ async fn initialize_livekit_client(
         .unwrap_or("Sayna AI");
 
     // Generate agent token for AI participant with custom identity and name
-    let agent_token = match room_handler.agent_token_with_sip_admin(
+    let agent_token = match room_handler.agent_token_with_sip_admin_for_media_mode(
         &livekit_ws_config.room_name,
         sayna_identity,
         sayna_name,
+        media_mode,
     ) {
         Ok(token) => token,
         Err(e) => {
@@ -884,26 +897,12 @@ async fn initialize_livekit_client(
         None
     };
 
-    // Use default TTS config for LiveKit audio parameters when TTS is not configured
-    let default_tts_config = TTSWebSocketConfig {
-        provider: "deepgram".to_string(),
-        voice_id: None,
-        speaking_rate: None,
-        audio_format: None,
-        sample_rate: Some(24000), // Default sample rate for LiveKit
-        connection_timeout: None,
-        request_timeout: None,
-        model: "".to_string(),
-        pronunciations: Vec::new(),
-    };
-
-    let tts_config_for_livekit = tts_config.unwrap_or(&default_tts_config);
     let livekit_config =
-        livekit_ws_config.to_livekit_config(agent_token, tts_config_for_livekit, livekit_url);
+        livekit_ws_config.to_livekit_config(agent_token, audio_enabled, tts_config, livekit_url);
     let mut livekit_client = LiveKitClient::new(livekit_config);
 
     // Set up audio callback to forward to STT processing
-    if let Some(vm) = voice_manager {
+    if audio_enabled && let Some(vm) = voice_manager {
         setup_livekit_audio_callback(&mut livekit_client, vm, message_tx);
     }
 
@@ -916,8 +915,10 @@ async fn initialize_livekit_client(
     // Set up participant connect callback
     setup_livekit_connect_callback(&mut livekit_client, message_tx);
 
-    // Set up track subscribed callback
-    setup_livekit_track_subscribed_callback(&mut livekit_client, message_tx);
+    // Set up track subscribed callback only for audio-enabled sessions.
+    if audio_enabled {
+        setup_livekit_track_subscribed_callback(&mut livekit_client, message_tx);
+    }
 
     // Connect to LiveKit room
     if let Err(e) = livekit_client.connect().await {
@@ -930,8 +931,11 @@ async fn initialize_livekit_client(
         return None;
     }
 
-    // Wait for audio source to be available
-    wait_for_livekit_audio(&livekit_client).await;
+    if audio_enabled {
+        wait_for_livekit_audio(&livekit_client).await;
+    } else {
+        info!("LiveKit client ready in strict no-media mode; skipping audio source wait");
+    }
 
     // Get the operation queue for non-blocking operations
     let operation_queue = livekit_client.get_operation_queue();
@@ -943,7 +947,11 @@ async fn initialize_livekit_client(
         register_audio_clear_callback(vm, &livekit_client_arc, operation_queue.as_ref()).await;
     }
 
-    info!("LiveKit client connected and ready");
+    info!(
+        publish_audio = audio_enabled,
+        subscribe_audio = audio_enabled,
+        "LiveKit client connected and ready"
+    );
     Some((
         livekit_client_arc,
         operation_queue,

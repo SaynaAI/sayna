@@ -7,10 +7,11 @@
 //!
 //! ### Connection Flow
 //! 1. Client connects to `/ws` endpoint
-//! 2. Client sends configuration message to initialize STT and TTS providers
-//! 3. Server responds with "ready" message when both providers are connected
-//! 4. Client can then send audio data, speak commands, or flush commands
-//! 5. Server sends back STT results and TTS audio data
+//! 2. Client sends configuration message to initialize either the STT/TTS pipeline
+//!    or a strict no-media LiveKit session
+//! 3. Server responds with "ready" when the requested session mode is configured
+//! 4. Client can then send audio data, speak commands, or LiveKit data messages
+//! 5. Server sends back STT results, TTS audio, and LiveKit lifecycle/message events
 //!
 //! ### Message Types
 //!
@@ -23,10 +24,12 @@
 //! - **Binary messages** - Raw audio data for transcription
 //!
 //! **Outgoing Messages:**
-//! - `{"type": "ready"}` - Voice providers are ready for use
+//! - `{"type": "ready"}` - Session is ready for use
 //! - `{"type": "stt_result", "transcript": "...", "is_final": true, "confidence": 0.95}` - STT result
 //! - `{"type": "message", "message": {...}}` - Unified message from various sources (LiveKit, etc.)
+//! - `{"type": "participant_connected", "participant": {...}}` - LiveKit participant connected to room
 //! - `{"type": "participant_disconnected", "participant": {...}}` - LiveKit participant disconnected from room
+//! - `{"type": "track_subscribed", "track": {...}}` - LiveKit media subscription event (audio-enabled sessions only)
 //! - `{"type": "tts_playback_complete", "timestamp": 1234567890}` - TTS audio generation completed
 //! - `{"type": "error", "message": "error description"}` - Error occurred
 //! - **Binary messages** - Raw TTS audio data (optimized for performance)
@@ -250,16 +253,19 @@
 //!   sendAudio(mockAudio);
 //! }, 1000);
 //!
-//! // Example: Configuration for LiveKit-only mode (no audio processing)
+//! // Example: configuration for strict no-media LiveKit mode
 //! const livekitOnlyConfig = {
 //!   type: 'config',
-//!   audio: false, // Disable audio processing - only use LiveKit for messaging
+//!   audio: false, // Strict no-media: data messages and participant events only
 //!   // stt_config and tts_config are not required when audio=false
 //!   livekit: {
 //!     room_name: 'messaging-room-456',
 //!     listen_participants: []  // Listen to all participants
 //!   }
 //! };
+//! // In this mode, send_message and participant lifecycle events still work,
+//! // but no local audio is published, no remote media is subscribed, and
+//! // track_subscribed is not emitted.
 //! ```
 //!
 //! ## Rust Client Example

@@ -698,10 +698,11 @@ Synthesized audio is streamed as binary frames using the format returned by the 
 - `listen_participants` filters prevent the VoiceManager from processing audio/data for unwanted identities.
 - When `enable_recording=true`, the server starts/stops composite recording via the configured S3 target during connection lifecycle events.
 - `clear` commands flush both WebSocket and LiveKit buffers to keep playback synchronized across transports.
+- With `audio=false`, the websocket session becomes a strict no-media LiveKit participant: data relaying plus participant connect/disconnect events remain enabled, but the server does not publish audio, does not auto-subscribe to remote media, and does not emit `track_subscribed`.
 
 ## Operational Notes & Best Practices
 - Reuse the same `tts_config` when possible; the VoiceManager hashes the configuration and caches rendered audio to eliminate provider round-trips.
-- If you disable `audio` in the `config` message, you can still use LiveKit data relaying and the `/livekit/token` flow for text-only experiences.
+- If you disable `audio` in the `config` message, you still get LiveKit data relaying and participant lifecycle events, but the Sayna websocket session stays in strict no-media mode.
 - The `noise-filter` feature improves transcription quality but increases CPU usage; disable it for ultra-low-latency or resource-constrained deployments.
 - The `stt-vad` feature enables integrated VAD and turn detection for improved end-of-turn timing.
 - Use integration tests in `tests/` (for example `tests/ws_tests.rs`) as references when extending message formats or LiveKit behavior.

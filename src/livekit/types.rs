@@ -1,4 +1,25 @@
+use livekit::prelude::RoomOptions;
 use serde::{Deserialize, Serialize};
+
+/// Media policy for a LiveKit websocket session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveKitMediaMode {
+    /// Full duplex media behavior.
+    FullMedia,
+    /// Strict no-media mode with data-only messaging.
+    DataOnly,
+}
+
+impl LiveKitMediaMode {
+    /// Derive the media mode from the websocket audio flag.
+    pub const fn from_audio_enabled(audio_enabled: bool) -> Self {
+        if audio_enabled {
+            Self::FullMedia
+        } else {
+            Self::DataOnly
+        }
+    }
+}
 
 /// LiveKit configuration for connecting to a room
 #[derive(Debug, Clone)]
@@ -7,9 +28,15 @@ pub struct LiveKitConfig {
     pub token: String,
     /// Room name (extracted from token or provided separately)
     pub room_name: String,
-    /// Sample rate for audio publishing (from TTS config)
+    /// Whether the local participant should publish audio.
+    pub publish_audio: bool,
+    /// Whether the client should subscribe to remote tracks.
+    pub subscribe_audio: bool,
+    /// Sample rate for audio publishing (from TTS config).
+    /// Unused when `publish_audio` is false.
     pub sample_rate: u32,
-    /// Number of audio channels for publishing (typically 1 for mono)
+    /// Number of audio channels for publishing (typically 1 for mono).
+    /// Unused when `publish_audio` is false.
     pub channels: u16,
     /// Enable noise filtering on incoming audio (default: enabled when the `noise-filter`
     /// feature is compiled in). Set to `false` to reduce latency when filtering is
@@ -20,6 +47,24 @@ pub struct LiveKitConfig {
     /// If empty, all participants' audio and data will be processed.
     /// If populated, only participants in this list will be processed.
     pub listen_participants: Vec<String>,
+}
+
+impl LiveKitConfig {
+    /// Return the effective media mode for this config.
+    pub const fn media_mode(&self) -> LiveKitMediaMode {
+        if self.publish_audio || self.subscribe_audio {
+            LiveKitMediaMode::FullMedia
+        } else {
+            LiveKitMediaMode::DataOnly
+        }
+    }
+
+    /// Build room options matching the configured media mode.
+    pub fn room_options(&self) -> RoomOptions {
+        let mut options = RoomOptions::default();
+        options.auto_subscribe = self.subscribe_audio;
+        options
+    }
 }
 
 /// LiveKit connection status

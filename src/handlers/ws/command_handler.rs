@@ -349,3 +349,60 @@ pub async fn handle_sip_transfer(
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_handle_send_message_works_in_audio_disabled_session() {
+        let mut connection_state = ConnectionState::new();
+        connection_state.set_audio_enabled(false);
+
+        let (queue, mut receiver, _audio_generation) = crate::livekit::OperationQueue::new(4);
+        connection_state.livekit_operation_queue = Some(queue);
+
+        let state = Arc::new(RwLock::new(connection_state));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+        let (seen_tx, seen_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            if let Some(queued) = receiver.recv().await {
+                match queued.operation {
+                    LiveKitOperation::SendMessage {
+                        message,
+                        role,
+                        topic,
+                        response_tx,
+                        ..
+                    } => {
+                        let _ = seen_tx.send((message, role, topic));
+                        let _ = response_tx.send(Ok(()));
+                    }
+                    other => panic!("unexpected operation: {:?}", other),
+                }
+            }
+        });
+
+        let continue_processing = handle_send_message(
+            "hello".to_string(),
+            "user".to_string(),
+            Some("chat".to_string()),
+            None,
+            &state,
+            &message_tx,
+        )
+        .await;
+
+        assert!(continue_processing);
+        assert_eq!(
+            seen_rx.await.unwrap(),
+            (
+                "hello".to_string(),
+                "user".to_string(),
+                Some("chat".to_string())
+            )
+        );
+        assert!(message_rx.try_recv().is_err());
+    }
+}

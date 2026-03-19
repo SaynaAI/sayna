@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use livekit::prelude::{LocalTrackPublication, Room};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
@@ -24,6 +24,7 @@ pub(super) struct OperationContext {
     pub(super) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub(super) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     pub(super) is_connected: Arc<Mutex<bool>>,
+    pub(super) has_audio_source_atomic: Arc<AtomicBool>,
     pub(super) config: LiveKitConfig,
     pub(super) local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
     pub(super) active_streams: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -46,6 +47,7 @@ impl LiveKitClient {
             audio_queue: Arc::clone(&self.audio_queue),
             audio_source: Arc::clone(&self.audio_source),
             is_connected: Arc::clone(&self.is_connected),
+            has_audio_source_atomic: Arc::clone(&self.has_audio_source_atomic),
             config: self.config.clone(),
             local_track_publication: Arc::clone(&self.local_track_publication),
             active_streams: Arc::clone(&self.active_streams),

@@ -9,10 +9,21 @@ fn create_test_config() -> LiveKitConfig {
         url: "wss://test-server.com".to_string(),
         token: "mock-jwt-token".to_string(),
         room_name: "test-room".to_string(),
+        publish_audio: true,
+        subscribe_audio: true,
         sample_rate: 24000,
         channels: 1,
         enable_noise_filter: cfg!(feature = "noise-filter"),
         listen_participants: vec![],
+    }
+}
+
+fn create_data_only_test_config() -> LiveKitConfig {
+    LiveKitConfig {
+        publish_audio: false,
+        subscribe_audio: false,
+        enable_noise_filter: false,
+        ..create_test_config()
     }
 }
 
@@ -25,6 +36,32 @@ async fn test_livekit_client_creation() {
     assert!(!client.has_audio_source());
     assert!(!client.has_local_audio_track());
     assert!(!client.has_local_track_publication().await);
+}
+
+#[tokio::test]
+async fn test_livekit_client_creation_data_only() {
+    let config = create_data_only_test_config();
+    let client = LiveKitClient::new(config.clone());
+
+    assert_eq!(
+        config.media_mode(),
+        crate::livekit::LiveKitMediaMode::DataOnly
+    );
+    assert!(!config.room_options().auto_subscribe);
+    assert!(!client.is_connected());
+    assert!(!client.has_audio_source());
+    assert!(!client.has_local_audio_track());
+    assert!(!client.has_local_track_publication().await);
+}
+
+#[test]
+fn test_data_only_room_options_disable_auto_subscribe() {
+    let config = create_data_only_test_config();
+
+    assert!(!config.room_options().auto_subscribe);
+    assert!(!config.publish_audio);
+    assert!(!config.subscribe_audio);
+    assert!(!config.enable_noise_filter);
 }
 
 #[tokio::test]

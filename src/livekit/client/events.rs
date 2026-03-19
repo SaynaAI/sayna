@@ -119,6 +119,15 @@ impl LiveKitClient {
                 publication,
                 participant,
             } => {
+                // Defense-in-depth: auto_subscribe=false should prevent this event, but guard anyway.
+                if !config.subscribe_audio {
+                    debug!(
+                        "Ignoring track subscription in strict no-media mode for participant {}",
+                        participant.identity()
+                    );
+                    return Ok(());
+                }
+
                 info!(
                     "Track subscribed - Track: {:?}, Participant: {:?}",
                     publication.sid(),
