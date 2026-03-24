@@ -529,8 +529,10 @@ impl GoogleTTS {
         // Note: For Google, api_key contains credential source (file path, JSON, or empty for ADC)
         // Empty string is valid for Application Default Credentials
 
-        // Parse credential source to extract project_id
+        // Parse and validate credential source before extracting project_id so
+        // missing/invalid credential files surface the correct error.
         let credential_source = CredentialSource::from_api_key(&config.api_key);
+        let auth_client = TTSGoogleAuthClient::new(credential_source.clone())?;
 
         // Extract project_id from credentials
         let project_id = credential_source.extract_project_id().ok_or_else(|| {
@@ -540,9 +542,6 @@ impl GoogleTTS {
                     .to_string(),
             )
         })?;
-
-        // Create auth client for OAuth2 token management
-        let auth_client = TTSGoogleAuthClient::new(credential_source)?;
 
         // Create Google-specific config from base config
         let google_config = GoogleTTSConfig::from_base_config(config.clone(), project_id);

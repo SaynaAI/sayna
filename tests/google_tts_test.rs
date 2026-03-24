@@ -192,8 +192,8 @@ async fn test_google_tts_creation_with_invalid_json() {
         ..Default::default()
     };
 
-    // Creating provider with invalid JSON credentials should fail
-    // because it lacks a project_id field
+    // Creating provider with invalid JSON credentials should fail during
+    // credential validation before project_id extraction.
     let result = create_tts_provider("google", config);
 
     assert!(result.is_err(), "Should fail with invalid JSON credentials");
@@ -201,8 +201,11 @@ async fn test_google_tts_creation_with_invalid_json() {
     if let Err(e) = result {
         let error_msg = e.to_string();
         assert!(
-            error_msg.contains("project_id") || error_msg.contains("Invalid configuration"),
-            "Error should indicate missing project_id: {error_msg}"
+            error_msg.contains("credential")
+                || error_msg.contains("client_email")
+                || error_msg.contains("project_id")
+                || error_msg.contains("Invalid configuration"),
+            "Error should indicate invalid Google credentials: {error_msg}"
         );
     }
 }

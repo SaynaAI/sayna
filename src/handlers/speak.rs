@@ -108,6 +108,41 @@ impl AudioCallback for AudioCollector {
     }
 }
 
+fn has_request_auth_override(tts_config: &TTSWebSocketConfig) -> bool {
+    tts_config
+        .auth
+        .as_ref()
+        .is_some_and(|auth| !auth.is_empty())
+}
+
+fn is_request_auth_error(error: &TTSError) -> bool {
+    match error {
+        TTSError::InvalidConfiguration(_) => true,
+        TTSError::ConnectionFailed(message)
+        | TTSError::NetworkError(message)
+        | TTSError::ProviderError(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("authentication")
+                || message.contains("authorization")
+                || message.contains("credential")
+                || message.contains("permission denied")
+                || message.contains("unauthorized")
+                || message.contains("forbidden")
+                || message.contains("api error (401")
+                || message.contains("api error (403")
+        }
+        _ => false,
+    }
+}
+
+fn status_for_tts_error(error: &TTSError, has_request_auth_override: bool) -> StatusCode {
+    if has_request_auth_override && is_request_auth_error(error) {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 /// Handler for the /speak endpoint
 #[cfg_attr(
     feature = "openapi",
@@ -136,6 +171,8 @@ pub async fn speak_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SpeakRequest>,
 ) -> Response {
+    let has_request_auth_override = has_request_auth_override(&request.tts_config);
+
     info!(
         "Speak request received - provider: {}, text length: {}",
         request.tts_config.provider,
@@ -195,7 +232,7 @@ pub async fn speak_handler(
         Err(e) => {
             error!("Failed to create TTS provider: {:?}", e);
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status_for_tts_error(&e, has_request_auth_override),
                 Json(serde_json::json!({
                     "error": format!("Failed to create TTS provider: {}", e)
                 })),
@@ -214,7 +251,7 @@ pub async fn speak_handler(
     if let Err(e) = tts_provider.connect().await {
         error!("Failed to connect to TTS provider: {:?}", e);
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status_for_tts_error(&e, has_request_auth_override),
             Json(serde_json::json!({
                 "error": format!("Failed to connect to TTS provider: {}", e)
             })),
@@ -241,7 +278,7 @@ pub async fn speak_handler(
     if let Err(e) = tts_provider.speak(&processed_text, true).await {
         error!("Failed to synthesize speech: {:?}", e);
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status_for_tts_error(&e, has_request_auth_override),
             Json(serde_json::json!({
                 "error": format!("Failed to synthesize speech: {}", e)
             })),
@@ -261,7 +298,7 @@ pub async fn speak_handler(
         Err(e) => {
             error!("TTS synthesis error: {:?}", e);
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status_for_tts_error(&e, has_request_auth_override),
                 Json(serde_json::json!({
                     "error": format!("TTS synthesis error: {}", e)
                 })),

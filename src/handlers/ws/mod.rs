@@ -78,10 +78,13 @@
 //!     sample_rate: 16000,
 //!     channels: 1,
 //!     punctuation: true,
+//!     encoding: 'linear16',
+//!     model: 'nova-3',
 //!     auth: { api_key: 'dg-session-key' }
 //!   },
 //!   tts_config: {
 //!     provider: 'deepgram',
+//!     model: 'aura-asteria-en',
 //!     voice_id: 'aura-asteria-en',
 //!     speaking_rate: 1.0,
 //!     audio_format: 'linear16',

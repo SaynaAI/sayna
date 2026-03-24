@@ -486,6 +486,105 @@ async fn test_speak_endpoint_google_empty_credentials_returns_bad_request() {
 }
 
 #[tokio::test]
+async fn test_speak_endpoint_google_missing_project_id_in_request_auth_returns_bad_request() {
+    let response = send_speak_request(
+        base_config(),
+        json!({
+            "text": "Hello, test.",
+            "tts_config": {
+                "provider": "google",
+                "model": "en-US-Wavenet-D",
+                "voice_id": "en-US-Wavenet-D",
+                "audio_format": "linear16",
+                "sample_rate": 24000,
+                "pronunciations": [],
+                "auth": {
+                    "credentials": {
+                        "type": "authorized_user",
+                        "client_id": "test-client-id.apps.googleusercontent.com",
+                        "client_secret": "test-client-secret",
+                        "refresh_token": "test-refresh-token"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    let error = json["error"].as_str().unwrap().to_ascii_lowercase();
+    assert!(
+        error.contains("project_id")
+            || error.contains("credential")
+            || error.contains("authentication"),
+        "Unexpected error message: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_speak_endpoint_google_missing_request_credential_file_returns_bad_request() {
+    let response = send_speak_request(
+        base_config(),
+        json!({
+            "text": "Hello, test.",
+            "tts_config": {
+                "provider": "google",
+                "model": "en-US-Wavenet-D",
+                "voice_id": "en-US-Wavenet-D",
+                "audio_format": "linear16",
+                "sample_rate": 24000,
+                "pronunciations": [],
+                "auth": {
+                    "credentials": "/definitely/missing/request-creds.json"
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Credential file not found")
+    );
+}
+
+#[tokio::test]
+async fn test_speak_endpoint_server_google_credentials_error_remains_internal_server_error() {
+    let mut config = base_config();
+    config.google_credentials = Some("/definitely/missing/server-creds.json".to_string());
+
+    let response = send_speak_request(
+        config,
+        json!({
+            "text": "Hello, test.",
+            "tts_config": {
+                "provider": "google",
+                "model": "en-US-Wavenet-D",
+                "voice_id": "en-US-Wavenet-D",
+                "audio_format": "linear16",
+                "sample_rate": 24000,
+                "pronunciations": []
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(response).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Credential file not found")
+    );
+}
+
+#[tokio::test]
 async fn test_speak_endpoint_empty_auth_object_falls_back_to_server_auth() {
     let mut config = base_config();
     config.deepgram_api_key = None;
