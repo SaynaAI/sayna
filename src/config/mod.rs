@@ -226,7 +226,8 @@ impl ServerConfig {
     /// * `provider` - The name of the provider (e.g., "deepgram", "elevenlabs")
     ///
     /// # Returns
-    /// * `Result<String, String>` - The API key on success, or an error message on failure
+    /// * `Result<String, String>` - The normalized auth payload string on success,
+    ///   or an error message on failure
     ///
     /// # Example
     /// ```rust,no_run
@@ -239,44 +240,17 @@ impl ServerConfig {
     /// # }
     /// ```
     pub fn get_api_key(&self, provider: &str) -> Result<String, String> {
-        match provider.to_lowercase().as_str() {
-            "deepgram" => {
-                self.deepgram_api_key.as_ref().cloned().ok_or_else(|| {
-                    "Deepgram API key not configured in server environment".to_string()
-                })
+        match crate::core::providers::resolve_provider_auth(provider, None, self) {
+            Ok(resolved) => Ok(resolved.api_key().to_string()),
+            Err(crate::core::providers::ProviderAuthError::UnsupportedProvider { provider }) => {
+                Err(format!("Unsupported provider: {provider}"))
             }
-            "elevenlabs" => self.elevenlabs_api_key.as_ref().cloned().ok_or_else(|| {
-                "ElevenLabs API key not configured in server environment".to_string()
-            }),
-            "google" => {
-                // Google uses credentials that can be:
-                // - Empty string: Use Application Default Credentials (ADC)
-                // - JSON content: Service account credentials inline
-                // - File path: Path to service account JSON file
-                //
-                // If google_credentials is None, return empty string to trigger ADC.
-                // This allows Google STT to work with GOOGLE_APPLICATION_CREDENTIALS
-                // environment variable or gcloud auth.
-                Ok(self.google_credentials.clone().unwrap_or_default())
-            }
-            "microsoft-azure" | "azure" => {
-                // Azure Speech Services uses subscription key authentication
-                // The key is tied to a specific Azure region
-                self.azure_speech_subscription_key
-                    .as_ref()
-                    .cloned()
-                    .ok_or_else(|| {
-                        "Azure Speech subscription key not configured in server environment"
-                            .to_string()
-                    })
-            }
-            "cartesia" => {
-                // Cartesia uses API key authentication for both STT and TTS
-                self.cartesia_api_key.as_ref().cloned().ok_or_else(|| {
-                    "Cartesia API key not configured in server environment".to_string()
-                })
-            }
-            _ => Err(format!("Unsupported provider: {provider}")),
+            Err(crate::core::providers::ProviderAuthError::InvalidAuthInput {
+                message, ..
+            })
+            | Err(crate::core::providers::ProviderAuthError::MissingServerAuth {
+                message, ..
+            }) => Err(message),
         }
     }
 

@@ -16,7 +16,7 @@
 //! ### Message Types
 //!
 //! **Incoming Messages:**
-//! - `{"type": "config", "audio": true, "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers (without API keys) and optionally connect to LiveKit
+//! - `{"type": "config", "audio": true, "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers and optionally connect to LiveKit
 //! - `{"type": "speak", "text": "Hello world", "flush": true, "allow_interruption": true}` - Synthesize speech from text (flush and allow_interruption are optional, both default to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue (ignored if allow_interruption=false until audio finishes)
 //! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
@@ -68,7 +68,7 @@
 //! // Connect to the WebSocket
 //! const ws = new WebSocket('ws://localhost:3000/ws');
 //!
-//! // Configuration for STT and TTS providers (no API keys needed)
+//! // Configuration for STT and TTS providers
 //! const config = {
 //!   type: 'config',
 //!   audio: true, // Enable audio processing (STT/TTS). Defaults to true if not specified.
@@ -77,7 +77,8 @@
 //!     language: 'en-US',
 //!     sample_rate: 16000,
 //!     channels: 1,
-//!     punctuation: true
+//!     punctuation: true,
+//!     auth: { api_key: 'dg-session-key' }
 //!   },
 //!   tts_config: {
 //!     provider: 'deepgram',
@@ -86,7 +87,8 @@
 //!     audio_format: 'linear16',
 //!     sample_rate: 24000,
 //!     connection_timeout: 30,
-//!     request_timeout: 60
+//!     request_timeout: 60,
+//!     auth: { api_key: 'dg-session-key' }
 //!   },
 //!   // Optional: Connect to LiveKit for real-time audio streaming
 //!   livekit: {
@@ -281,7 +283,7 @@
 //!     let (ws_stream, _) = connect_async("ws://localhost:3000/ws/voice").await?;
 //!     let (mut write, mut read) = ws_stream.split();
 //!
-//!     // Send configuration (no API keys needed)
+//!     // Send configuration
 //!     let config = json!({
 //!         "type": "config",
 //!         "audio": true, // Enable audio processing (STT/TTS). Defaults to true if not specified.
@@ -290,7 +292,8 @@
 //!             "language": "en-US",
 //!             "sample_rate": 16000,
 //!             "channels": 1,
-//!             "punctuation": true
+//!             "punctuation": true,
+//!             "auth": { "api_key": "dg-session-key" }
 //!         },
 //!         "tts_config": {
 //!             "provider": "deepgram",
@@ -299,7 +302,8 @@
 //!             "audio_format": "linear16",
 //!             "sample_rate": 24000,
 //!             "connection_timeout": 30,
-//!             "request_timeout": 60
+//!             "request_timeout": 60,
+//!             "auth": { "api_key": "dg-session-key" }
 //!         },
 //!         // Optional: Connect to LiveKit for real-time audio streaming
 //!         "livekit": {

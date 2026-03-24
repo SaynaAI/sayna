@@ -24,7 +24,7 @@ A high-performance real-time voice processing server built in Rust that provides
 ### Prerequisites
 
 - Docker
-- At least one provider API key (optional - can run in audio-disabled mode)
+- At least one provider credential source (server config/env or per-request/session auth override; optional in audio-disabled mode)
 
 ### Run with Docker
 
@@ -61,16 +61,12 @@ For complete Docker documentation including LiveKit integration, see [docs/docke
 
 ### Running Without API Keys (Audio-Disabled Mode)
 
-You can run Sayna without Deepgram or ElevenLabs API keys by using the audio-disabled mode. Simply start the server without configuring the API keys, then send a WebSocket configuration message with `audio_disabled: true`:
+You can run Sayna without provider credentials by using audio-disabled mode. This is useful when you want to exercise the control plane without STT/TTS initialization. Send a WebSocket configuration message with `audio: false`:
 
 ```json
 {
   "type": "config",
-  "config": {
-    "audio_disabled": true,
-    "stt_provider": "deepgram",
-    "tts_provider": "elevenlabs"
-  }
+  "audio": false
 }
 ```
 
@@ -110,12 +106,24 @@ openssl rsa -in auth_private_key.pem -pubout -out auth_public_key.pem
 curl -X POST http://localhost:3001/speak \
   -H "Authorization: Bearer your-token-here" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello world"}'
+  -d '{
+    "text": "Hello world",
+    "tts_config": {
+      "provider": "deepgram",
+      "model": "aura-asteria-en"
+    }
+  }'
 
 # Query parameter alternative
 curl -X POST "http://localhost:3001/speak?api_key=your-token-here" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello world"}'
+  -d '{
+    "text": "Hello world",
+    "tts_config": {
+      "provider": "deepgram",
+      "model": "aura-asteria-en"
+    }
+  }'
 ```
 
 For complete authentication setup and architecture details, see [docs/authentication.md](docs/authentication.md).
@@ -134,15 +142,37 @@ For complete authentication setup and architecture details, see [docs/authentica
 ```json
 {
   "type": "config",
-  "config": {
-    "stt_provider": "deepgram",
-    "tts_provider": "elevenlabs",
-    "audio_disabled": false,
-    "deepgram_model": "nova-2",
-    "elevenlabs_voice_id": "voice_id_here"
+  "audio": true,
+  "stt_config": {
+    "provider": "deepgram",
+    "language": "en-US",
+    "sample_rate": 16000,
+    "channels": 1,
+    "punctuation": true,
+    "encoding": "linear16",
+    "model": "nova-3",
+    "auth": {
+      "api_key": "dg-session-key"
+    }
+  },
+  "tts_config": {
+    "provider": "elevenlabs",
+    "voice_id": "voice_id_here",
+    "model": "eleven_flash_v2_5",
+    "audio_format": "mp3_44100_128",
+    "sample_rate": 44100,
+    "auth": {
+      "api_key": "el-session-key"
+    }
   }
 }
 ```
+
+`stt_config.auth` and `tts_config.auth` are optional. If omitted, or sent as `{}`, Sayna falls back to the server-configured provider credentials. If an auth object is provided, it must be complete for that provider. Current shapes are:
+
+- API key providers: `{ "api_key": "..." }`
+- Google Cloud: `{ "credentials": "/path/to/creds.json" }` or `{ "credentials": { ...service account json... } }`
+- Azure Speech: `{ "api_key": "...", "region": "eastus" }`
 
 **Audio Input**: Binary audio data (16kHz, 16-bit PCM)
 

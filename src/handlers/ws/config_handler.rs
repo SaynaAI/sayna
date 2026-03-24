@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     core::{
+        providers::resolve_provider_auth,
         stt::STTResult,
         tts::AudioData,
         voice_manager::{VoiceManager, VoiceManagerConfig},
@@ -269,10 +270,14 @@ async fn initialize_voice_manager(
         stt_ws_config.provider, tts_ws_config.provider
     );
 
-    // Get API keys from server config
-    let stt_api_key = match app_state.config.get_api_key(&stt_ws_config.provider) {
-        Ok(key) => key,
-        Err(error_msg) => {
+    let stt_auth = match resolve_provider_auth(
+        &stt_ws_config.provider,
+        stt_ws_config.auth.as_ref(),
+        &app_state.config,
+    ) {
+        Ok(auth) => auth,
+        Err(err) => {
+            let error_msg = err.to_string();
             error!("{}", error_msg);
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -283,9 +288,14 @@ async fn initialize_voice_manager(
         }
     };
 
-    let tts_api_key = match app_state.config.get_api_key(&tts_ws_config.provider) {
-        Ok(key) => key,
-        Err(error_msg) => {
+    let tts_auth = match resolve_provider_auth(
+        &tts_ws_config.provider,
+        tts_ws_config.auth.as_ref(),
+        &app_state.config,
+    ) {
+        Ok(auth) => auth,
+        Err(err) => {
+            let error_msg = err.to_string();
             error!("{}", error_msg);
             let _ = message_tx
                 .send(MessageRoute::Outgoing(OutgoingMessage::Error {
@@ -296,23 +306,11 @@ async fn initialize_voice_manager(
         }
     };
 
-    // Create full configs with API keys
-    let mut stt_config = stt_ws_config.to_stt_config(stt_api_key);
-    let mut tts_config = tts_ws_config.to_tts_config(tts_api_key);
-
-    // Inject Azure region from server config for Azure providers
-    if matches!(
-        stt_ws_config.provider.to_lowercase().as_str(),
-        "azure" | "microsoft-azure"
-    ) {
-        stt_config.azure_region = Some(app_state.config.get_azure_speech_region());
-    }
-    if matches!(
-        tts_ws_config.provider.to_lowercase().as_str(),
-        "azure" | "microsoft-azure"
-    ) {
-        tts_config.azure_region = Some(app_state.config.get_azure_speech_region());
-    }
+    // Create full configs with normalized auth applied.
+    let mut stt_config = stt_ws_config.to_stt_config();
+    let mut tts_config = tts_ws_config.to_tts_config();
+    stt_auth.apply_to_stt_config(&mut stt_config);
+    tts_auth.apply_to_tts_config(&mut tts_config);
 
     // Create voice manager configuration
     // VAD is automatically enabled when the stt-vad feature is compiled
@@ -357,7 +355,7 @@ async fn initialize_voice_manager(
     };
 
     // Set up TTS cache
-    let cfg_hash = compute_tts_config_hash(&tts_config);
+    let cfg_hash = compute_tts_config_hash(&tts_config, &tts_auth);
     if let Err(e) = voice_manager
         .set_tts_cache(app_state.cache(), Some(cfg_hash))
         .await

@@ -1,10 +1,14 @@
 use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
+use serde_json::json;
 
-use super::config::{LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig};
+use super::config::{
+    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, compute_tts_config_hash,
+};
 use super::messages::{
     IncomingMessage, MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage,
 };
+use crate::core::providers::{ProviderAuthInput, ResolvedProviderAuth};
 
 #[test]
 fn test_ws_config_serialization() {
@@ -17,6 +21,7 @@ fn test_ws_config_serialization() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "nova-3".to_string(),
+        auth: None,
     };
 
     let json = serde_json::to_string(&stt_ws_config).unwrap();
@@ -35,12 +40,35 @@ fn test_ws_config_serialization() {
         request_timeout: Some(60),
         model: "".to_string(), // Model is in Voice ID for Deepgram
         pronunciations: Vec::new(),
+        auth: None,
     };
 
     let json = serde_json::to_string(&tts_ws_config).unwrap();
     assert!(json.contains("\"provider\":\"deepgram\""));
     assert!(json.contains("\"voice_id\":\"aura-luna-en\""));
     assert!(!json.contains("api_key")); // Should not contain API key
+}
+
+#[test]
+fn test_ws_config_serialization_with_auth() {
+    let stt_ws_config = STTWebSocketConfig {
+        provider: "deepgram".to_string(),
+        language: "en-US".to_string(),
+        sample_rate: 16000,
+        channels: 1,
+        punctuation: true,
+        encoding: "linear16".to_string(),
+        model: "nova-3".to_string(),
+        auth: Some(
+            serde_json::from_value(json!({
+                "api_key": "session-key"
+            }))
+            .unwrap(),
+        ),
+    };
+
+    let json = serde_json::to_string(&stt_ws_config).unwrap();
+    assert!(json.contains("\"auth\":{\"api_key\":\"session-key\"}"));
 }
 
 #[test]
@@ -57,6 +85,7 @@ fn test_incoming_message_serialization() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -68,6 +97,7 @@ fn test_incoming_message_serialization() {
             request_timeout: Some(60),
             model: "".to_string(), // Model is in Voice ID for Deepgram
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: None,
     };
@@ -268,6 +298,72 @@ fn test_incoming_message_serialization() {
 }
 
 #[test]
+fn test_parse_config_message_with_auth() {
+    let json = r#"{
+        "type": "config",
+        "audio": true,
+        "stt_config": {
+            "provider": "google",
+            "language": "en-US",
+            "sample_rate": 16000,
+            "channels": 1,
+            "punctuation": true,
+            "encoding": "linear16",
+            "model": "latest_long",
+            "auth": {
+                "credentials": {
+                    "type": "service_account",
+                    "project_id": "test-project"
+                }
+            }
+        },
+        "tts_config": {
+            "provider": "azure",
+            "voice_id": "en-US-JennyNeural",
+            "speaking_rate": 1.0,
+            "audio_format": "linear16",
+            "sample_rate": 24000,
+            "connection_timeout": 30,
+            "request_timeout": 60,
+            "model": "",
+            "auth": {
+                "api_key": "azure-key",
+                "region": "eastus"
+            }
+        }
+    }"#;
+
+    let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
+
+    let IncomingMessage::Config {
+        stt_config: Some(stt_config),
+        tts_config: Some(tts_config),
+        ..
+    } = parsed
+    else {
+        panic!("Expected Config message");
+    };
+
+    assert_eq!(
+        stt_config
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.fields.get("credentials"))
+            .and_then(|value| value.get("project_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("test-project")
+    );
+    assert_eq!(
+        tts_config
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.fields.get("region"))
+            .and_then(serde_json::Value::as_str),
+        Some("eastus")
+    );
+}
+
+#[test]
 fn test_outgoing_message_serialization() {
     // Test ready message without LiveKit
     let ready_msg = OutgoingMessage::Ready {
@@ -341,13 +437,13 @@ fn test_stt_ws_config_conversion() {
         punctuation: true,
         encoding: "linear16".to_string(),
         model: "nova-3".to_string(),
+        auth: None,
     };
 
-    let api_key = "test_api_key".to_string();
-    let stt_config = stt_ws_config.to_stt_config(api_key.clone());
+    let stt_config = stt_ws_config.to_stt_config();
 
     assert_eq!(stt_config.provider, "deepgram");
-    assert_eq!(stt_config.api_key, api_key);
+    assert!(stt_config.api_key.is_empty());
     assert_eq!(stt_config.language, "en-US");
     assert_eq!(stt_config.sample_rate, 16000);
     assert_eq!(stt_config.channels, 1);
@@ -366,13 +462,13 @@ fn test_tts_ws_config_conversion_with_all_values() {
         request_timeout: Some(120),
         model: "".to_string(), // Model is in Voice ID for Deepgram
         pronunciations: Vec::new(),
+        auth: None,
     };
 
-    let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config();
 
     assert_eq!(tts_config.provider, "deepgram");
-    assert_eq!(tts_config.api_key, api_key);
+    assert!(tts_config.api_key.is_empty());
     assert_eq!(tts_config.voice_id, Some("custom-voice".to_string()));
     assert_eq!(tts_config.speaking_rate, Some(1.5));
     assert_eq!(tts_config.audio_format, Some("wav".to_string()));
@@ -393,13 +489,13 @@ fn test_tts_ws_config_conversion_with_defaults() {
         request_timeout: None,
         model: "".to_string(), // Model is in Voice ID for Deepgram
         pronunciations: Vec::new(),
+        auth: None,
     };
 
-    let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config();
 
     assert_eq!(tts_config.provider, "deepgram");
-    assert_eq!(tts_config.api_key, api_key);
+    assert!(tts_config.api_key.is_empty());
 
     // Should use default values
     assert_eq!(tts_config.voice_id, Some("aura-asteria-en".to_string()));
@@ -408,6 +504,91 @@ fn test_tts_ws_config_conversion_with_defaults() {
     assert_eq!(tts_config.sample_rate, Some(24000));
     assert_eq!(tts_config.connection_timeout, Some(30));
     assert_eq!(tts_config.request_timeout, Some(60));
+}
+
+#[test]
+fn test_tts_ws_config_auth_can_be_applied() {
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "azure".to_string(),
+        voice_id: Some("en-US-JennyNeural".to_string()),
+        speaking_rate: Some(1.0),
+        audio_format: Some("linear16".to_string()),
+        sample_rate: Some(24000),
+        connection_timeout: Some(30),
+        request_timeout: Some(60),
+        model: "".to_string(),
+        pronunciations: Vec::new(),
+        auth: Some(ProviderAuthInput {
+            fields: [("api_key".to_string(), json!("azure-key"))]
+                .into_iter()
+                .collect(),
+        }),
+    };
+
+    let mut tts_config = tts_ws_config.to_tts_config();
+    let resolved_auth = ResolvedProviderAuth::AzureSpeech {
+        api_key: "azure-key".to_string(),
+        region: "eastus".to_string(),
+    };
+    resolved_auth.apply_to_tts_config(&mut tts_config);
+
+    assert_eq!(tts_config.api_key, "azure-key");
+    assert_eq!(tts_config.azure_region.as_deref(), Some("eastus"));
+}
+
+#[test]
+fn test_tts_config_hash_includes_auth_fingerprint() {
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "deepgram".to_string(),
+        voice_id: Some("aura-luna-en".to_string()),
+        speaking_rate: Some(1.0),
+        audio_format: Some("pcm".to_string()),
+        sample_rate: Some(22050),
+        connection_timeout: Some(30),
+        request_timeout: Some(60),
+        model: "aura-luna-en".to_string(),
+        pronunciations: Vec::new(),
+        auth: None,
+    };
+
+    let tts_config = tts_ws_config.to_tts_config();
+    let tenant_one = ResolvedProviderAuth::ApiKey {
+        api_key: "tenant-one-key".to_string(),
+    };
+    let tenant_two = ResolvedProviderAuth::ApiKey {
+        api_key: "tenant-two-key".to_string(),
+    };
+
+    assert_ne!(
+        compute_tts_config_hash(&tts_config, &tenant_one),
+        compute_tts_config_hash(&tts_config, &tenant_two)
+    );
+}
+
+#[test]
+fn test_tts_config_hash_stable_for_same_auth() {
+    let tts_ws_config = TTSWebSocketConfig {
+        provider: "deepgram".to_string(),
+        voice_id: Some("aura-luna-en".to_string()),
+        speaking_rate: Some(1.0),
+        audio_format: Some("pcm".to_string()),
+        sample_rate: Some(22050),
+        connection_timeout: Some(30),
+        request_timeout: Some(60),
+        model: "aura-luna-en".to_string(),
+        pronunciations: Vec::new(),
+        auth: None,
+    };
+
+    let tts_config = tts_ws_config.to_tts_config();
+    let auth = ResolvedProviderAuth::ApiKey {
+        api_key: "shared-key".to_string(),
+    };
+
+    assert_eq!(
+        compute_tts_config_hash(&tts_config, &auth),
+        compute_tts_config_hash(&tts_config, &auth)
+    );
 }
 
 #[test]
@@ -449,6 +630,7 @@ fn test_livekit_ws_config_conversion() {
         request_timeout: Some(60),
         model: "".to_string(),
         pronunciations: Vec::new(),
+        auth: None,
     };
 
     let livekit_url = "wss://test-livekit.com".to_string();
@@ -516,6 +698,7 @@ fn test_livekit_config_with_empty_listen_participants() {
         request_timeout: Some(60),
         model: "".to_string(),
         pronunciations: Vec::new(),
+        auth: None,
     };
 
     let livekit_config = livekit_ws_config.to_livekit_config(
@@ -551,6 +734,7 @@ fn test_livekit_config_with_listen_participants() {
         request_timeout: Some(60),
         model: "".to_string(),
         pronunciations: Vec::new(),
+        auth: None,
     };
 
     let livekit_config = livekit_ws_config.to_livekit_config(
@@ -660,6 +844,7 @@ fn test_incoming_message_config_with_livekit() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -671,6 +856,7 @@ fn test_incoming_message_config_with_livekit() {
             request_timeout: Some(60),
             model: "".to_string(),
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: Some(LiveKitWebSocketConfig {
             room_name: "test-room".to_string(),
@@ -700,6 +886,7 @@ fn test_incoming_message_config_without_livekit() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -711,6 +898,7 @@ fn test_incoming_message_config_without_livekit() {
             request_timeout: Some(60),
             model: "".to_string(),
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: None,
     };
@@ -969,13 +1157,13 @@ fn test_tts_ws_config_conversion_mixed_values() {
         request_timeout: None, // Should use default
         model: "".to_string(), // Model is in Voice ID for Deepgram
         pronunciations: Vec::new(),
+        auth: None,
     };
 
-    let api_key = "test_api_key".to_string();
-    let tts_config = tts_ws_config.to_tts_config(api_key.clone());
+    let tts_config = tts_ws_config.to_tts_config();
 
     assert_eq!(tts_config.provider, "deepgram");
-    assert_eq!(tts_config.api_key, api_key);
+    assert!(tts_config.api_key.is_empty());
     assert_eq!(tts_config.voice_id, Some("custom-voice".to_string()));
     assert_eq!(tts_config.speaking_rate, Some(1.0)); // Default
     assert_eq!(tts_config.audio_format, Some("pcm".to_string()));
@@ -998,6 +1186,7 @@ fn test_config_message_without_livekit_routing() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -1009,6 +1198,7 @@ fn test_config_message_without_livekit_routing() {
             request_timeout: Some(60),
             model: "".to_string(),
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: None, // No LiveKit configuration
     };
@@ -1043,6 +1233,7 @@ fn test_config_message_with_livekit_routing() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -1054,6 +1245,7 @@ fn test_config_message_with_livekit_routing() {
             request_timeout: Some(60),
             model: "".to_string(),
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: Some(LiveKitWebSocketConfig {
             room_name: "test-room".to_string(),
@@ -1294,6 +1486,7 @@ fn test_config_message_audio_default() {
             punctuation: true,
             encoding: "linear16".to_string(),
             model: "nova-3".to_string(),
+            auth: None,
         }),
         tts_config: Some(TTSWebSocketConfig {
             provider: "deepgram".to_string(),
@@ -1305,6 +1498,7 @@ fn test_config_message_audio_default() {
             request_timeout: Some(60),
             model: "".to_string(),
             pronunciations: Vec::new(),
+            auth: None,
         }),
         livekit: None,
     };

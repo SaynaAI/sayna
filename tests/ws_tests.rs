@@ -83,15 +83,16 @@ async fn test_websocket_voice_config() {
         "type": "config",
         "stt_config": {
             "provider": "deepgram",
-            "api_key": "test_key",
             "language": "en-US",
             "sample_rate": 16000,
             "channels": 1,
-            "punctuation": true
+            "punctuation": true,
+            "encoding": "linear16",
+            "model": "nova-3"
         },
         "tts_config": {
             "provider": "deepgram",
-            "api_key": "test_key",
+            "model": "aura-luna-en",
             "voice_id": "aura-luna-en",
             "speaking_rate": 1.0,
             "audio_format": "pcm",
@@ -173,6 +174,120 @@ async fn test_websocket_voice_config() {
         .unwrap();
 
     // Close connection
+    write.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_websocket_config_empty_auth_object_falls_back_to_server_auth() {
+    let config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        livekit_api_key: None,
+        livekit_api_secret: None,
+        port: 0,
+        livekit_url: "ws://localhost:7880".to_string(),
+        livekit_public_url: "http://localhost:7880".to_string(),
+        deepgram_api_key: None,
+        elevenlabs_api_key: Some("test_key".to_string()),
+        google_credentials: None,
+        azure_speech_subscription_key: None,
+        azure_speech_region: None,
+        cartesia_api_key: None,
+        recording_s3_bucket: None,
+        recording_s3_region: None,
+        recording_s3_endpoint: None,
+        recording_s3_access_key: None,
+        recording_s3_secret_key: None,
+        recording_s3_prefix: None,
+        cache_path: None,
+        cache_ttl_seconds: Some(3600),
+        auth_service_url: None,
+        auth_signing_key_path: None,
+        auth_api_secrets: Vec::new(),
+        auth_timeout_seconds: 5,
+        auth_required: false,
+        sip: None,
+    };
+
+    let app_state = AppState::new(config.clone()).await;
+    let ws_routes = routes::ws::create_ws_router().layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        auth_middleware,
+    ));
+    let app = routes::api::create_api_router()
+        .merge(ws_routes)
+        .with_state(app_state);
+
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == ErrorKind::PermissionDenied {
+                eprintln!(
+                    "Skipping test_websocket_config_empty_auth_object_falls_back_to_server_auth: {err}"
+                );
+                return;
+            }
+            panic!("Failed to bind WebSocket test listener: {err}");
+        }
+    };
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
+
+    let config_message = json!({
+        "type": "config",
+        "stt_config": {
+            "provider": "deepgram",
+            "language": "en-US",
+            "sample_rate": 16000,
+            "channels": 1,
+            "punctuation": true,
+            "encoding": "linear16",
+            "model": "nova-3"
+        },
+        "tts_config": {
+            "provider": "deepgram",
+            "model": "aura-luna-en",
+            "voice_id": "aura-luna-en",
+            "speaking_rate": 1.0,
+            "audio_format": "pcm",
+            "sample_rate": 22050,
+            "connection_timeout": 30,
+            "request_timeout": 60,
+            "auth": {}
+        }
+    });
+
+    write
+        .send(Message::Text(config_message.to_string().into()))
+        .await
+        .unwrap();
+
+    let response = read.next().await.unwrap().unwrap();
+
+    match response {
+        Message::Text(text) => {
+            let parsed: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(parsed["type"].as_str(), Some("error"));
+            assert!(
+                parsed["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Missing server auth for provider deepgram"),
+                "Unexpected error message: {}",
+                parsed["message"]
+            );
+        }
+        _ => panic!("Expected text message"),
+    }
+
     write.close().await.unwrap();
 }
 

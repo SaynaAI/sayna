@@ -1010,12 +1010,41 @@ components:
         - type
         properties:
           participant:
+            $ref: '#/components/schemas/ParticipantConnectedInfo'
+            description: Information about the participant who connected
+          type:
+            type: string
+            enum:
+            - participant_connected
+      - type: object
+        required:
+        - participant
+        - type
+        properties:
+          participant:
             $ref: '#/components/schemas/ParticipantDisconnectedInfo'
             description: Information about the participant who disconnected
           type:
             type: string
             enum:
             - participant_disconnected
+      - type: object
+        description: |-
+          Track subscription notification
+
+          Emitted when Sayna subscribes to a participant's track in the LiveKit room.
+          This indicates that Sayna has started processing the participant's media.
+        required:
+        - track
+        - type
+        properties:
+          track:
+            $ref: '#/components/schemas/TrackSubscribedInfo'
+            description: Information about the subscribed track
+          type:
+            type: string
+            enum:
+            - track_subscribed
       - type: object
         description: TTS playback completion notification
         required:
@@ -1097,6 +1126,30 @@ components:
             enum:
             - sip_transfer_error
       description: WebSocket message types for outgoing messages
+    ParticipantConnectedInfo:
+      type: object
+      description: Participant connection information
+      required:
+      - identity
+      - room
+      - timestamp
+      properties:
+        identity:
+          type: string
+          description: Participant's unique identity
+        name:
+          type:
+          - string
+          - 'null'
+          description: Participant's display name (if available)
+        room:
+          type: string
+          description: Room identifier
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp when the connection occurred
+          minimum: 0
     ParticipantDisconnectedInfo:
       type: object
       description: Participant disconnection information
@@ -1206,6 +1259,14 @@ components:
           type: string
           description: Word to replace
           example: API
+    ProviderAuthInput:
+      allOf:
+      - type: object
+        description: Provider-specific auth fields.
+      description: |-
+        Raw provider auth input received from API callers.
+
+        The outer provider field determines how these fields are interpreted.
     RemoveParticipantErrorResponse:
       type: object
       description: |-
@@ -1669,7 +1730,7 @@ components:
           example: tel:+15551234567
     STTWebSocketConfig:
       type: object
-      description: STT configuration for WebSocket messages (without API key)
+      description: STT configuration for WebSocket messages.
       required:
       - provider
       - language
@@ -1679,6 +1740,18 @@ components:
       - encoding
       - model
       properties:
+        auth:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ProviderAuthInput'
+            description: |-
+              Optional provider auth override for this session.
+
+              Examples by provider:
+              - Deepgram / ElevenLabs / Cartesia: `{ "api_key": "..." }`
+              - Google: `{ "credentials": "/path/to/creds.json" }` or
+                `{ "credentials": { ...service account json... } }`
+              - Azure: `{ "api_key": "...", "region": "eastus" }`
         channels:
           type: integer
           format: int32
@@ -1787,10 +1860,10 @@ components:
           example: Hello, world!
         tts_config:
           $ref: '#/components/schemas/TTSWebSocketConfig'
-          description: TTS configuration (without API key)
+          description: TTS configuration, including an optional provider auth override.
     TTSWebSocketConfig:
       type: object
-      description: TTS configuration for WebSocket messages (without API key)
+      description: TTS configuration for WebSocket messages.
       required:
       - provider
       - model
@@ -1801,6 +1874,18 @@ components:
           - 'null'
           description: Audio format preference
           example: linear16
+        auth:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ProviderAuthInput'
+            description: |-
+              Optional provider auth override for this session or request.
+
+              Examples by provider:
+              - Deepgram / ElevenLabs / Cartesia: `{ "api_key": "..." }`
+              - Google: `{ "credentials": "/path/to/creds.json" }` or
+                `{ "credentials": { ...service account json... } }`
+              - Azure: `{ "api_key": "...", "region": "eastus" }`
         connection_timeout:
           type:
           - integer
@@ -1917,6 +2002,38 @@ components:
           type: string
           description: The generated JWT token for LiveKit
           example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+    TrackSubscribedInfo:
+      type: object
+      description: Track subscription information
+      required:
+      - identity
+      - track_kind
+      - track_sid
+      - room
+      - timestamp
+      properties:
+        identity:
+          type: string
+          description: Participant's unique identity (owner of the track)
+        name:
+          type:
+          - string
+          - 'null'
+          description: Participant's display name (if available)
+        room:
+          type: string
+          description: Room identifier
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp when the subscription occurred
+          minimum: 0
+        track_kind:
+          type: string
+          description: 'Track kind: "audio" or "video"'
+        track_sid:
+          type: string
+          description: Track SID (publication identifier)
     TurnDetectConfigUpdate:
       type: object
       description: Turn detection configuration update for runtime adjustments

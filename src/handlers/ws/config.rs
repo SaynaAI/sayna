@@ -1,13 +1,15 @@
 //! WebSocket configuration types and handlers
 //!
 //! This module contains all configuration-related types for WebSocket connections,
-//! including STT, TTS, and LiveKit configurations without API keys.
+//! including STT, TTS, and LiveKit configurations with optional session-scoped
+//! provider authentication overrides.
 
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::{
     core::{
+        providers::{ProviderAuthInput, ResolvedProviderAuth},
         stt::STTConfig,
         tts::{Pronunciation, TTSConfig},
     },
@@ -47,7 +49,7 @@ pub fn default_allow_interruption() -> Option<bool> {
     Some(true)
 }
 
-/// STT configuration for WebSocket messages (without API key)
+/// STT configuration for WebSocket messages.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct STTWebSocketConfig {
@@ -72,20 +74,23 @@ pub struct STTWebSocketConfig {
     /// Model to use for transcription
     #[cfg_attr(feature = "openapi", schema(example = "nova-2"))]
     pub model: String,
+    /// Optional provider auth override for this session.
+    ///
+    /// Examples by provider:
+    /// - Deepgram / ElevenLabs / Cartesia: `{ "api_key": "..." }`
+    /// - Google: `{ "credentials": "/path/to/creds.json" }` or
+    ///   `{ "credentials": { ...service account json... } }`
+    /// - Azure: `{ "api_key": "...", "region": "eastus" }`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProviderAuthInput>,
 }
 
 impl STTWebSocketConfig {
-    /// Convert WebSocket STT config to full STT config with API key
-    ///
-    /// # Arguments
-    /// * `api_key` - The API key to use for this provider
-    ///
-    /// # Returns
-    /// * `STTConfig` - Full STT configuration
-    pub fn to_stt_config(&self, api_key: String) -> STTConfig {
+    /// Convert WebSocket STT config to provider config without injecting auth.
+    pub fn to_stt_config(&self) -> STTConfig {
         STTConfig {
             provider: self.provider.clone(),
-            api_key,
+            api_key: String::new(),
             language: self.language.clone(),
             sample_rate: self.sample_rate,
             channels: self.channels,
@@ -170,7 +175,7 @@ impl LiveKitWebSocketConfig {
     }
 }
 
-/// TTS configuration for WebSocket messages (without API key)
+/// TTS configuration for WebSocket messages.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TTSWebSocketConfig {
@@ -201,23 +206,26 @@ pub struct TTSWebSocketConfig {
     /// Pronunciation replacements to apply before TTS
     #[serde(default)]
     pub pronunciations: Vec<Pronunciation>,
+    /// Optional provider auth override for this session or request.
+    ///
+    /// Examples by provider:
+    /// - Deepgram / ElevenLabs / Cartesia: `{ "api_key": "..." }`
+    /// - Google: `{ "credentials": "/path/to/creds.json" }` or
+    ///   `{ "credentials": { ...service account json... } }`
+    /// - Azure: `{ "api_key": "...", "region": "eastus" }`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProviderAuthInput>,
 }
 
 impl TTSWebSocketConfig {
-    /// Convert WebSocket TTS config to full TTS config with API key and proper defaults
-    ///
-    /// # Arguments
-    /// * `api_key` - The API key to use for this provider
-    ///
-    /// # Returns
-    /// * `TTSConfig` - Full TTS configuration with defaults applied
-    pub fn to_tts_config(&self, api_key: String) -> TTSConfig {
+    /// Convert WebSocket TTS config to provider config without injecting auth.
+    pub fn to_tts_config(&self) -> TTSConfig {
         // Start with defaults
         let defaults = TTSConfig::default();
 
         TTSConfig {
             provider: self.provider.clone(),
-            api_key,
+            api_key: String::new(),
             model: self.model.clone(),
             // Use provided values or fall back to defaults
             voice_id: self.voice_id.clone().or(defaults.voice_id),
@@ -233,8 +241,14 @@ impl TTSWebSocketConfig {
     }
 }
 
-/// Compute TTS configuration hash for caching
-pub fn compute_tts_config_hash(tts_config: &TTSConfig) -> String {
+/// Compute TTS configuration hash for caching.
+///
+/// Includes a stable auth fingerprint so session-scoped credentials do not share
+/// cached audio across tenants.
+pub fn compute_tts_config_hash(
+    tts_config: &TTSConfig,
+    resolved_auth: &ResolvedProviderAuth,
+) -> String {
     let mut s = String::new();
     s.push_str(tts_config.provider.as_str());
     s.push('|');
@@ -251,5 +265,7 @@ pub fn compute_tts_config_hash(tts_config: &TTSConfig) -> String {
     if let Some(rate) = tts_config.speaking_rate {
         s.push_str(&format!("{rate:.3}"));
     }
+    s.push('|');
+    s.push_str(&resolved_auth.cache_fingerprint());
     format!("{:032x}", xxh3_128(s.as_bytes()))
 }

@@ -9,7 +9,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::core::tts::{AudioCallback, AudioData, TTSError, create_tts_provider};
+use crate::core::{
+    providers::{ProviderAuthError, resolve_provider_auth},
+    tts::{AudioCallback, AudioData, TTSError, create_tts_provider},
+};
 use crate::handlers::ws::config::TTSWebSocketConfig;
 use crate::state::AppState;
 
@@ -20,7 +23,7 @@ pub struct SpeakRequest {
     /// The text to synthesize
     #[cfg_attr(feature = "openapi", schema(example = "Hello, world!"))]
     pub text: String,
-    /// TTS configuration (without API key)
+    /// TTS configuration, including an optional provider auth override.
     pub tts_config: TTSWebSocketConfig,
 }
 
@@ -150,34 +153,35 @@ pub async fn speak_handler(
             .into_response();
     }
 
-    // Get API key from config
-    let api_key = match state.config.get_api_key(&request.tts_config.provider) {
-        Ok(key) => key,
-        Err(e) => {
+    let resolved_auth = match resolve_provider_auth(
+        &request.tts_config.provider,
+        request.tts_config.auth.as_ref(),
+        &state.config,
+    ) {
+        Ok(auth) => auth,
+        Err(err) => {
+            let status = match &err {
+                ProviderAuthError::UnsupportedProvider { .. }
+                | ProviderAuthError::InvalidAuthInput { .. } => StatusCode::BAD_REQUEST,
+                ProviderAuthError::MissingServerAuth { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            };
             error!(
-                "Failed to get API key for {}: {}",
-                request.tts_config.provider, e
+                "Failed to resolve provider auth for {}: {}",
+                request.tts_config.provider, err
             );
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(serde_json::json!({
-                    "error": format!("API key not configured for provider: {}", request.tts_config.provider)
+                    "error": err.to_string()
                 })),
             )
                 .into_response();
         }
     };
 
-    // Convert WebSocket config to full TTSConfig with API key
-    let mut tts_config = request.tts_config.to_tts_config(api_key);
-
-    // Inject Azure region from server config for Azure providers
-    if matches!(
-        tts_config.provider.to_lowercase().as_str(),
-        "azure" | "microsoft-azure"
-    ) {
-        tts_config.azure_region = Some(state.config.get_azure_speech_region());
-    }
+    // Convert request config to full TTS config with normalized auth.
+    let mut tts_config = request.tts_config.to_tts_config();
+    resolved_auth.apply_to_tts_config(&mut tts_config);
 
     // Apply pronunciation replacements
     let mut processed_text = request.text.clone();

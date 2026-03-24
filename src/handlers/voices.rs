@@ -2,8 +2,10 @@ use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::core::providers::google::{
-    CredentialSource, GOOGLE_CLOUD_PLATFORM_SCOPE, GoogleAuthClient, TokenProvider,
+use crate::core::providers::{
+    ResolvedProviderAuth,
+    google::{CredentialSource, GOOGLE_CLOUD_PLATFORM_SCOPE, GoogleAuthClient, TokenProvider},
+    resolve_provider_auth,
 };
 use crate::state::AppState;
 
@@ -554,7 +556,9 @@ pub async fn list_voices(
     let mut voices_response = HashMap::new();
 
     // Fetch ElevenLabs voices - skip if not configured
-    if let Ok(api_key) = state.config.get_api_key("elevenlabs") {
+    if let Ok(ResolvedProviderAuth::ApiKey { api_key }) =
+        resolve_provider_auth("elevenlabs", None, &state.config)
+    {
         match fetch_elevenlabs_voices(&api_key).await {
             Ok(voices) => {
                 voices_response.insert("elevenlabs".to_string(), voices);
@@ -568,7 +572,9 @@ pub async fn list_voices(
     }
 
     // Fetch Deepgram voices - skip if not configured
-    if let Ok(api_key) = state.config.get_api_key("deepgram") {
+    if let Ok(ResolvedProviderAuth::ApiKey { api_key }) =
+        resolve_provider_auth("deepgram", None, &state.config)
+    {
         match fetch_deepgram_voices(&api_key).await {
             Ok(voices) => {
                 voices_response.insert("deepgram".to_string(), voices);
@@ -583,7 +589,9 @@ pub async fn list_voices(
 
     // Fetch Google TTS voices - skip if not configured
     // Note: Google returns empty string for ADC which is valid
-    if let Ok(credentials) = state.config.get_api_key("google") {
+    if let Ok(ResolvedProviderAuth::Google { credentials }) =
+        resolve_provider_auth("google", None, &state.config)
+    {
         match fetch_google_voices(&credentials).await {
             Ok(voices) => {
                 voices_response.insert("google".to_string(), voices);
@@ -597,9 +605,10 @@ pub async fn list_voices(
     }
 
     // Fetch Azure TTS voices - skip if not configured
-    if let Ok(subscription_key) = state.config.get_api_key("microsoft-azure") {
-        let region = state.config.get_azure_speech_region();
-        match fetch_azure_voices(&subscription_key, &region).await {
+    if let Ok(ResolvedProviderAuth::AzureSpeech { api_key, region }) =
+        resolve_provider_auth("microsoft-azure", None, &state.config)
+    {
+        match fetch_azure_voices(&api_key, &region).await {
             Ok(voices) => {
                 voices_response.insert("azure".to_string(), voices);
             }

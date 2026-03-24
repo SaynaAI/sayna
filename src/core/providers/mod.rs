@@ -9,8 +9,11 @@
 //! - **google**: Google Cloud authentication and gRPC client infrastructure
 //! - **azure**: Microsoft Azure Speech Services region and authentication infrastructure
 
+pub mod auth;
 pub mod azure;
 pub mod google;
+
+pub use auth::{ProviderAuthError, ProviderAuthInput, ResolvedProviderAuth, resolve_provider_auth};
 
 // Re-export Google Cloud types for convenience
 pub use google::{

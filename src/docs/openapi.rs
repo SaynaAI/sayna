@@ -6,7 +6,7 @@
 
 use utoipa::OpenApi;
 
-use crate::core::tts::Pronunciation;
+use crate::core::{providers::ProviderAuthInput, tts::Pronunciation};
 use crate::handlers::{
     api::HealthResponse,
     livekit::{
@@ -102,6 +102,7 @@ use crate::handlers::{
         ParticipantDisconnectedInfo,
         TrackSubscribedInfo,
         // Configuration types
+        ProviderAuthInput,
         STTWebSocketConfig,
         TTSWebSocketConfig,
         LiveKitWebSocketConfig,
