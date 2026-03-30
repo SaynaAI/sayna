@@ -581,9 +581,8 @@ impl AzureSTT {
             );
 
             if let Err(e) = ws_sink.send(Message::Text(config_message.into())).await {
-                let stt_error = STTError::ConnectionFailed(format!(
-                    "Failed to send speech.config: {e}"
-                ));
+                let stt_error =
+                    STTError::ConnectionFailed(format!("Failed to send speech.config: {e}"));
                 error!("{}", stt_error);
                 let _ = error_tx.send(stt_error);
                 return;
@@ -594,9 +593,8 @@ impl AzureSTT {
             let wav_header = Self::build_wav_riff_header(sample_rate, 16, channels);
             let initial_audio = Self::build_usp_binary_message(&request_id, &wav_header);
             if let Err(e) = ws_sink.send(Message::Binary(initial_audio.into())).await {
-                let stt_error = STTError::ConnectionFailed(format!(
-                    "Failed to send initial WAV header: {e}"
-                ));
+                let stt_error =
+                    STTError::ConnectionFailed(format!("Failed to send initial WAV header: {e}"));
                 error!("{}", stt_error);
                 let _ = error_tx.send(stt_error);
                 return;
