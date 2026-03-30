@@ -33,12 +33,13 @@
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::time::{Instant, interval, timeout};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use super::config::AzureSTTConfig;
 use super::messages::{AzureMessage, RecognitionStatus};
@@ -217,6 +218,134 @@ impl AzureSTT {
         )
     }
 
+    // =========================================================================
+    // USP (Unified Speech Protocol) helpers
+    // =========================================================================
+
+    /// Generate an ISO-8601 UTC timestamp for USP message headers.
+    fn generate_iso8601_timestamp() -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let total_secs = now.as_secs();
+        let millis = now.subsec_millis();
+
+        // Calculate UTC date/time components
+        let days = total_secs / 86400;
+        let time_secs = total_secs % 86400;
+        let hours = time_secs / 3600;
+        let minutes = (time_secs % 3600) / 60;
+        let seconds = time_secs % 60;
+
+        // Days since epoch to Y/M/D (simplified Gregorian)
+        let mut y = 1970i32;
+        let mut remaining_days = days as i32;
+        loop {
+            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            if remaining_days < year_days {
+                break;
+            }
+            remaining_days -= year_days;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 0usize;
+        for &md in &month_days {
+            if remaining_days < md {
+                break;
+            }
+            remaining_days -= md;
+            m += 1;
+        }
+
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            y,
+            m + 1,
+            remaining_days + 1,
+            hours,
+            minutes,
+            seconds,
+            millis,
+        )
+    }
+
+    /// Build a USP text-framed message with path, request ID, and JSON body.
+    fn build_usp_text_message(
+        path: &str,
+        request_id: &str,
+        content_type: &str,
+        body: &str,
+    ) -> String {
+        format!(
+            "path:{}\r\nx-requestid:{}\r\nx-timestamp:{}\r\ncontent-type:{}\r\n\r\n{}",
+            path,
+            request_id,
+            Self::generate_iso8601_timestamp(),
+            content_type,
+            body,
+        )
+    }
+
+    /// Build a USP binary-framed message for audio data.
+    ///
+    /// Format: [2-byte big-endian header length][header bytes][audio payload]
+    fn build_usp_binary_message(request_id: &str, audio_payload: &[u8]) -> Vec<u8> {
+        let header = format!(
+            "path:audio\r\nx-requestid:{}\r\nx-timestamp:{}\r\ncontent-type:audio/x-wav\r\n",
+            request_id,
+            Self::generate_iso8601_timestamp(),
+        );
+        let header_bytes = header.as_bytes();
+        let header_len = header_bytes.len() as u16;
+
+        let mut message = Vec::with_capacity(2 + header_bytes.len() + audio_payload.len());
+        message.extend_from_slice(&header_len.to_be_bytes());
+        message.extend_from_slice(header_bytes);
+        message.extend_from_slice(audio_payload);
+        message
+    }
+
+    /// Build a standard 44-byte WAV RIFF header for streaming PCM audio.
+    fn build_wav_riff_header(sample_rate: u32, bits_per_sample: u16, channels: u16) -> [u8; 44] {
+        let byte_rate = sample_rate * (bits_per_sample as u32 / 8) * channels as u32;
+        let block_align = channels * (bits_per_sample / 8);
+
+        let mut header = [0u8; 44];
+        header[0..4].copy_from_slice(b"RIFF");
+        header[4..8].copy_from_slice(&0u32.to_le_bytes()); // unknown size for streaming
+        header[8..12].copy_from_slice(b"WAVE");
+        header[12..16].copy_from_slice(b"fmt ");
+        header[16..20].copy_from_slice(&16u32.to_le_bytes()); // PCM sub-chunk size
+        header[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM format tag
+        header[22..24].copy_from_slice(&channels.to_le_bytes());
+        header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+        header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+        header[32..34].copy_from_slice(&block_align.to_le_bytes());
+        header[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
+        header[36..40].copy_from_slice(b"data");
+        header[40..44].copy_from_slice(&0u32.to_le_bytes()); // unknown data size
+        header
+    }
+
     /// Handle incoming WebSocket messages from Azure.
     ///
     /// This method parses Azure messages and routes them appropriately:
@@ -337,6 +466,8 @@ impl AzureSTT {
         let content_type = Self::build_content_type(&config);
         let connection_id = self.connection_id.clone();
         let interim_results_enabled = config.interim_results;
+        let sample_rate = config.base.sample_rate;
+        let channels = config.base.channels;
 
         // Start the connection task
         let connection_handle = tokio::spawn(async move {
@@ -412,10 +543,68 @@ impl AzureSTT {
                 connection_id
             );
 
-            // Signal successful connection
-            let _ = connected_tx.send(());
-
             let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+            // === USP Protocol: Generate session-scoped request ID ===
+            let request_id = Uuid::new_v4().simple().to_string();
+
+            // === USP Protocol: Send speech.config as the first message ===
+            let speech_config_body = serde_json::json!({
+                "context": {
+                    "system": {
+                        "name": "SpeechSDK",
+                        "version": "1.0.0",
+                        "build": "Rust",
+                        "lang": "Rust"
+                    },
+                    "os": {
+                        "platform": std::env::consts::OS,
+                        "name": "Sayna",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "audio": {
+                        "source": {
+                            "samplerate": sample_rate,
+                            "bitspersample": 16,
+                            "channelcount": channels
+                        }
+                    }
+                },
+                "recognition": "conversation"
+            });
+
+            let config_message = Self::build_usp_text_message(
+                "speech.config",
+                &request_id,
+                "application/json",
+                &speech_config_body.to_string(),
+            );
+
+            if let Err(e) = ws_sink.send(Message::Text(config_message.into())).await {
+                let stt_error = STTError::ConnectionFailed(format!(
+                    "Failed to send speech.config: {e}"
+                ));
+                error!("{}", stt_error);
+                let _ = error_tx.send(stt_error);
+                return;
+            }
+            debug!("Sent speech.config USP message to Azure");
+
+            // === USP Protocol: Send initial audio message with WAV RIFF header ===
+            let wav_header = Self::build_wav_riff_header(sample_rate, 16, channels);
+            let initial_audio = Self::build_usp_binary_message(&request_id, &wav_header);
+            if let Err(e) = ws_sink.send(Message::Binary(initial_audio.into())).await {
+                let stt_error = STTError::ConnectionFailed(format!(
+                    "Failed to send initial WAV header: {e}"
+                ));
+                error!("{}", stt_error);
+                let _ = error_tx.send(stt_error);
+                return;
+            }
+            debug!("Sent initial WAV RIFF header to Azure");
+
+            // Signal successful connection (after USP handshake)
+            let _ = connected_tx.send(());
 
             // Keep-alive mechanism: Azure connections may timeout during silence
             // Send silence frames every 5 seconds if no audio was sent
@@ -430,8 +619,9 @@ impl AzureSTT {
 
                     // Handle outgoing audio data
                     Some(audio_data) = ws_rx.recv() => {
-                        // Azure expects raw PCM audio as binary messages
-                        let message = Message::Binary(audio_data);
+                        // Wrap audio in USP binary frame
+                        let usp_frame = Self::build_usp_binary_message(&request_id, &audio_data);
+                        let message = Message::Binary(usp_frame.into());
                         if let Err(e) = ws_sink.send(message).await {
                             let stt_error = STTError::NetworkError(format!(
                                 "Failed to send audio to Azure: {e}"
@@ -479,9 +669,10 @@ impl AzureSTT {
                         // Azure may timeout after extended silence (typically 30-60 seconds)
                         if last_audio_time.elapsed() >= Duration::from_secs(5) {
                             // Send a small buffer of silence (32 samples at 16kHz = 2ms)
-                            // This is minimal overhead but keeps the connection alive
+                            // wrapped in USP binary frame
                             let silence_frame = vec![0u8; 64]; // 32 16-bit samples
-                            let message = Message::Binary(silence_frame.into());
+                            let usp_frame = Self::build_usp_binary_message(&request_id, &silence_frame);
+                            let message = Message::Binary(usp_frame.into());
                             if let Err(e) = ws_sink.send(message).await {
                                 let stt_error = STTError::NetworkError(format!(
                                     "Failed to send keep-alive: {e}"
@@ -1118,5 +1309,114 @@ mod tests {
         } else {
             panic!("Expected ConnectionFailed error");
         }
+    }
+
+    // =========================================================================
+    // USP helper tests
+    // =========================================================================
+
+    #[test]
+    fn test_generate_iso8601_timestamp_format() {
+        let ts = AzureSTT::generate_iso8601_timestamp();
+        // Should match: YYYY-MM-DDTHH:MM:SS.mmmZ
+        assert!(ts.ends_with('Z'), "Timestamp must end with Z: {ts}");
+        assert_eq!(ts.len(), 24, "Timestamp length should be 24: {ts}");
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+        assert_eq!(&ts[19..20], ".");
+    }
+
+    #[test]
+    fn test_build_usp_text_message_format() {
+        let msg = AzureSTT::build_usp_text_message(
+            "speech.config",
+            "abc123",
+            "application/json",
+            r#"{"test": true}"#,
+        );
+
+        assert!(msg.starts_with("path:speech.config\r\n"));
+        assert!(msg.contains("x-requestid:abc123\r\n"));
+        assert!(msg.contains("x-timestamp:"));
+        assert!(msg.contains("content-type:application/json\r\n"));
+        // Headers and body separated by \r\n\r\n
+        assert!(msg.contains("\r\n\r\n{\"test\": true}"));
+    }
+
+    #[test]
+    fn test_build_usp_binary_message_format() {
+        let payload = b"hello audio";
+        let msg = AzureSTT::build_usp_binary_message("req123", payload);
+
+        // First 2 bytes are big-endian header length
+        let header_len = u16::from_be_bytes([msg[0], msg[1]]) as usize;
+        assert!(header_len > 0);
+        assert!(msg.len() > 2 + header_len);
+
+        // Extract header string
+        let header_str = std::str::from_utf8(&msg[2..2 + header_len]).unwrap();
+        assert!(header_str.starts_with("path:audio\r\n"));
+        assert!(header_str.contains("x-requestid:req123\r\n"));
+        assert!(header_str.contains("x-timestamp:"));
+        assert!(header_str.contains("content-type:audio/x-wav\r\n"));
+
+        // Payload follows header
+        let extracted_payload = &msg[2 + header_len..];
+        assert_eq!(extracted_payload, payload);
+    }
+
+    #[test]
+    fn test_build_wav_riff_header() {
+        let header = AzureSTT::build_wav_riff_header(16000, 16, 1);
+        assert_eq!(header.len(), 44);
+
+        // RIFF magic
+        assert_eq!(&header[0..4], b"RIFF");
+        // WAVE magic
+        assert_eq!(&header[8..12], b"WAVE");
+        // fmt sub-chunk
+        assert_eq!(&header[12..16], b"fmt ");
+        // PCM format tag = 1
+        assert_eq!(u16::from_le_bytes([header[20], header[21]]), 1);
+        // Channels = 1
+        assert_eq!(u16::from_le_bytes([header[22], header[23]]), 1);
+        // Sample rate = 16000
+        assert_eq!(
+            u32::from_le_bytes([header[24], header[25], header[26], header[27]]),
+            16000
+        );
+        // Byte rate = 16000 * 1 * 2 = 32000
+        assert_eq!(
+            u32::from_le_bytes([header[28], header[29], header[30], header[31]]),
+            32000
+        );
+        // Block align = 1 * 2 = 2
+        assert_eq!(u16::from_le_bytes([header[32], header[33]]), 2);
+        // Bits per sample = 16
+        assert_eq!(u16::from_le_bytes([header[34], header[35]]), 16);
+        // data sub-chunk
+        assert_eq!(&header[36..40], b"data");
+    }
+
+    #[test]
+    fn test_build_wav_riff_header_stereo() {
+        let header = AzureSTT::build_wav_riff_header(48000, 16, 2);
+        // Channels = 2
+        assert_eq!(u16::from_le_bytes([header[22], header[23]]), 2);
+        // Sample rate = 48000
+        assert_eq!(
+            u32::from_le_bytes([header[24], header[25], header[26], header[27]]),
+            48000
+        );
+        // Byte rate = 48000 * 2 * 2 = 192000
+        assert_eq!(
+            u32::from_le_bytes([header[28], header[29], header[30], header[31]]),
+            192000
+        );
+        // Block align = 2 * 2 = 4
+        assert_eq!(u16::from_le_bytes([header[32], header[33]]), 4);
     }
 }
