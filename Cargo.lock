@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "sayna"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "arc-swap",
