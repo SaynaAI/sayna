@@ -9,7 +9,7 @@ Sayna ships as a single Axum binary that can be deployed anywhere you can run co
 - **Provider credentials** for the STT/TTS services you plan to use:
   - `DEEPGRAM_API_KEY` for Deepgram STT/TTS.
   - `ELEVENLABS_API_KEY` for ElevenLabs TTS.
-- Optional: S3-compatible bucket for LiveKit recording egress (`RECORDING_S3_*` variables).
+- Optional: object storage for LiveKit recording egress — Amazon S3 (`RECORDING_S3_*`) or Google Cloud Storage (`RECORDING_GCS_*`). See section 5 for the full backend matrix.
 - Optional: Authentication settings documented in `docs/authentication.md`.
 - Persistent volume (or host path) for `CACHE_PATH` when you want voice outputs and VAD/turn-detection assets to survive container restarts.
 
@@ -82,7 +82,10 @@ Add the relevant variables before starting the container. The most common ones a
 | `LIVEKIT_URL` | Server-to-server WebSocket URL (internal). | `ws://livekit:7880` |
 | `LIVEKIT_PUBLIC_URL` | URL clients should dial (returned via APIs). | `https://rtc.yourdomain.com` |
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Credentials used to mint LiveKit tokens in `/livekit/token` and during WebSocket LiveKit bring-up. | `lk_key` / `lk_secret` |
-| `RECORDING_S3_*` | Bucket configuration for LiveKit recordings (bucket, region, endpoint, access key, secret key). | `recordings`, `us-east-1`, etc. |
+| `RECORDING_BACKEND` | Recording storage backend: `s3` or `gcs`. | `s3` |
+| `RECORDING_PREFIX` | Object key prefix; recordings land at `{prefix}/{stream_id}/audio.ogg`. | `recordings/prod` |
+| `RECORDING_S3_*` | S3 / S3-compatible bucket vars: `BUCKET`, `REGION`, `ACCESS_KEY`, `SECRET_KEY`, optional `ENDPOINT` and `FORCE_PATH_STYLE`. | `recordings`, `us-east-1`, etc. |
+| `RECORDING_GCS_*` | GCS bucket vars: `BUCKET` plus exactly one of `CREDENTIALS_PATH` or `CREDENTIALS_JSON`. | `recordings`, `/etc/sayna/sa.json` |
 
 Set `AUTH_REQUIRED` plus either `AUTH_API_SECRETS_JSON` (preferred) or `AUTH_SERVICE_URL`/`AUTH_SIGNING_KEY_PATH` only if you follow the separate authentication guide. Legacy `AUTH_API_SECRET` is still supported with optional `AUTH_API_SECRET_ID`.
 
@@ -142,11 +145,17 @@ services:
       LIVEKIT_PUBLIC_URL: https://rtc.example.com
       LIVEKIT_API_KEY: lk_key
       LIVEKIT_API_SECRET: lk_secret
+      # Recording backend (Amazon S3 in this example):
+      RECORDING_BACKEND: s3
+      RECORDING_PREFIX: recordings/prod
       RECORDING_S3_BUCKET: sayna-egress
       RECORDING_S3_REGION: us-east-1
-      RECORDING_S3_ENDPOINT: https://s3.amazonaws.com
       RECORDING_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       RECORDING_S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # ── or, for Google Cloud Storage: ──
+      # RECORDING_BACKEND: gcs
+      # RECORDING_GCS_BUCKET: sayna-egress
+      # RECORDING_GCS_CREDENTIALS_PATH: /etc/sayna/gcs-sa.json
     volumes:
       - sayna-cache:/data/cache
 
@@ -257,7 +266,9 @@ Store `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_API_KEY`, `LIVEKIT_API_
 
 ### B. LiveKit Mirroring With Recording
 - Provide `LIVEKIT_URL`, `LIVEKIT_PUBLIC_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
-- Configure `RECORDING_S3_*` so LiveKit recording egress can persist files.
+- Configure exactly one storage backend so LiveKit recording egress can persist files:
+  - **Amazon S3 / S3-compatible:** `RECORDING_BACKEND=s3` plus the `RECORDING_S3_*` variables.
+  - **Google Cloud Storage:** `RECORDING_BACKEND=gcs`, `RECORDING_GCS_BUCKET`, and one of `RECORDING_GCS_CREDENTIALS_PATH` or `RECORDING_GCS_CREDENTIALS_JSON`.
 - Set `"enable_recording": true` and include a session-level `stream_id` to control the `{server_prefix}/{stream_id}/audio.ogg` recording path. Omit `stream_id` to let the server generate one.
 
 ### C. Text/Data-Only Sessions

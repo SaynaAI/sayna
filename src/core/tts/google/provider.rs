@@ -620,12 +620,10 @@ impl GoogleTTS {
 
         // Iterate over audio in chunks
         for chunk in audio_data.chunks(chunk_size) {
-            let duration_ms = if bytes_per_sample > 0 {
-                let samples = chunk.len() / bytes_per_sample;
-                Some((samples * 1000 / sample_rate) as u32)
-            } else {
-                None
-            };
+            let duration_ms = chunk
+                .len()
+                .checked_div(bytes_per_sample)
+                .map(|samples| (samples * 1000 / sample_rate) as u32);
 
             let audio = AudioData {
                 data: chunk.to_vec(),

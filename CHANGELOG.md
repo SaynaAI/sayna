@@ -2,6 +2,48 @@
 
 All notable changes to Sayna will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Google Cloud Storage** support for LiveKit Egress recording uploads and the
+  `GET /recording/{stream_id}` download endpoint. The same configuration drives
+  both sides via a backend-agnostic `RecordingConfig` so operators no longer
+  duplicate credentials between Sayna and LiveKit Egress.
+
+### Changed (BREAKING)
+
+- The `recording:` configuration block has been re-shaped around a discriminated
+  backend so half-configured deployments fail loudly at parse time instead of at
+  request time. **Migration:**
+
+  | Old (≤ 0.1.14) | New |
+  | --- | --- |
+  | `recording.s3_bucket` | `recording.backend.bucket` (under `type: s3`) |
+  | `recording.s3_region` | `recording.backend.region` |
+  | `recording.s3_access_key` | `recording.backend.access_key` |
+  | `recording.s3_secret_key` | `recording.backend.secret_key` |
+  | `recording.s3_endpoint` | `recording.backend.endpoint` (now optional) |
+  | `recording.s3_prefix` | `recording.prefix` |
+  | (always-on) `force_path_style` | `recording.backend.force_path_style` (now configurable, default `false`) |
+
+  Equivalent environment variables: keep `RECORDING_S3_BUCKET`, `RECORDING_S3_REGION`,
+  `RECORDING_S3_ACCESS_KEY`, `RECORDING_S3_SECRET_KEY`, `RECORDING_S3_ENDPOINT`;
+  rename `RECORDING_S3_PREFIX` to `RECORDING_PREFIX`; new optional
+  `RECORDING_S3_FORCE_PATH_STYLE` and `RECORDING_BACKEND={s3|gcs}`.
+
+  For Google Cloud Storage, set `RECORDING_BACKEND=gcs`, `RECORDING_GCS_BUCKET`,
+  and exactly one of `RECORDING_GCS_CREDENTIALS_PATH` /
+  `RECORDING_GCS_CREDENTIALS_JSON`.
+
+- `force_path_style` is now configurable (default: `false`, AWS-style). Previous
+  releases hard-coded path-style addressing, which is the wrong default for
+  AWS S3. **MinIO and Cloudflare R2 users must set `force_path_style: true`
+  explicitly.**
+
+- `recording.s3_endpoint` was previously required; the new `endpoint` field is
+  optional and falls back to the AWS S3 default when omitted.
+
 ## [0.1.13] - 2026-03-24
 
 ### Miscellaneous

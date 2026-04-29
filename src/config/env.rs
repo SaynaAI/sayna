@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use super::parse_auth_api_secrets_json;
+use super::recording::RecordingYaml;
 use super::sip::{SipConfig, SipHookConfig};
 use super::utils::parse_bool;
 use super::validation::{validate_auth_api_secrets, validate_auth_required, validate_jwt_auth};
@@ -52,13 +53,12 @@ impl ServerConfig {
         // Cartesia API key (used for both STT and TTS)
         let cartesia_api_key = env::var("CARTESIA_API_KEY").ok();
 
-        // LiveKit recording S3 configuration
-        let recording_s3_bucket = env::var("RECORDING_S3_BUCKET").ok();
-        let recording_s3_region = env::var("RECORDING_S3_REGION").ok();
-        let recording_s3_endpoint = env::var("RECORDING_S3_ENDPOINT").ok();
-        let recording_s3_access_key = env::var("RECORDING_S3_ACCESS_KEY").ok();
-        let recording_s3_secret_key = env::var("RECORDING_S3_SECRET_KEY").ok();
-        let recording_s3_prefix = env::var("RECORDING_S3_PREFIX").ok();
+        // Recording storage configuration is fully driven by environment
+        // variables here (no YAML overlay). RecordingYaml::resolve handles
+        // backend discrimination, validation and credential loading.
+        let recording = RecordingYaml::default()
+            .resolve()
+            .map_err(|e| format!("Invalid recording configuration: {e}"))?;
 
         // Cache configuration
         let cache_path = env::var("CACHE_PATH").ok().map(PathBuf::from);
@@ -123,12 +123,7 @@ impl ServerConfig {
             azure_speech_subscription_key,
             azure_speech_region,
             cartesia_api_key,
-            recording_s3_bucket,
-            recording_s3_region,
-            recording_s3_endpoint,
-            recording_s3_access_key,
-            recording_s3_secret_key,
-            recording_s3_prefix,
+            recording,
             cache_path,
             cache_ttl_seconds,
             auth_service_url,
@@ -270,7 +265,17 @@ mod tests {
             env::remove_var("SIP_OUTBOUND_ADDRESS");
             env::remove_var("SIP_OUTBOUND_AUTH_USERNAME");
             env::remove_var("SIP_OUTBOUND_AUTH_PASSWORD");
-            env::remove_var("RECORDING_S3_PREFIX");
+            env::remove_var("RECORDING_BACKEND");
+            env::remove_var("RECORDING_PREFIX");
+            env::remove_var("RECORDING_S3_BUCKET");
+            env::remove_var("RECORDING_S3_REGION");
+            env::remove_var("RECORDING_S3_ENDPOINT");
+            env::remove_var("RECORDING_S3_ACCESS_KEY");
+            env::remove_var("RECORDING_S3_SECRET_KEY");
+            env::remove_var("RECORDING_S3_FORCE_PATH_STYLE");
+            env::remove_var("RECORDING_GCS_BUCKET");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_PATH");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_JSON");
         }
     }
 
@@ -520,41 +525,38 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_from_env_recording_s3_prefix() {
+    fn test_from_env_recording_s3_full() {
         cleanup_env_vars();
 
         unsafe {
-            env::set_var("SIP_ROOM_PREFIX", "sip-"); // Required if SIP vars present
-            env::set_var("RECORDING_S3_PREFIX", "recordings/production");
+            env::set_var("RECORDING_PREFIX", "recordings/production");
+            env::set_var("RECORDING_S3_BUCKET", "my-bucket");
+            env::set_var("RECORDING_S3_REGION", "us-west-2");
+            env::set_var("RECORDING_S3_ACCESS_KEY", "ak");
+            env::set_var("RECORDING_S3_SECRET_KEY", "sk");
         }
 
         let config = ServerConfig::from_env().expect("Should load config");
-        assert_eq!(
-            config.recording_s3_prefix,
-            Some("recordings/production".to_string())
-        );
+        let recording = config.recording.expect("recording should be configured");
+        assert_eq!(recording.prefix, "recordings/production");
+        match recording.backend {
+            super::super::recording::RecordingBackend::S3(s3) => {
+                assert_eq!(s3.bucket, "my-bucket");
+                assert_eq!(s3.region, "us-west-2");
+            }
+            other => panic!("expected S3 backend, got {other:?}"),
+        }
 
         cleanup_env_vars();
     }
 
     #[test]
     #[serial]
-    fn test_from_env_recording_s3_prefix_empty_string() {
+    fn test_from_env_recording_disabled_when_unset() {
         cleanup_env_vars();
 
-        unsafe {
-            env::set_var("RECORDING_S3_PREFIX", "");
-        }
-
         let config = ServerConfig::from_env().expect("Should load config");
-        assert_eq!(config.recording_s3_prefix, Some(String::new()));
-
-        unsafe {
-            env::remove_var("RECORDING_S3_PREFIX");
-        }
-
-        let config_without_prefix = ServerConfig::from_env().expect("Should load config");
-        assert_eq!(config_without_prefix.recording_s3_prefix, None);
+        assert!(config.recording.is_none());
 
         cleanup_env_vars();
     }

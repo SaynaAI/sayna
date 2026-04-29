@@ -70,15 +70,36 @@ Minimal multi-secret example:
 AUTH_API_SECRETS_JSON='[{"id":"default","secret":"sk_test_default_123"}]'
 ```
 
-### S3 Recording (Optional)
+### Recording Storage (Optional)
+
+The same configuration drives both LiveKit Egress uploads and Sayna's
+`GET /recording/{stream_id}` download endpoint. Pick one backend.
+
+Common variables:
 
 | Variable | Description |
 |----------|-------------|
-| `RECORDING_S3_BUCKET` | S3 bucket name |
-| `RECORDING_S3_REGION` | S3 region |
-| `RECORDING_S3_ENDPOINT` | S3 endpoint URL |
-| `RECORDING_S3_ACCESS_KEY` | S3 access key |
-| `RECORDING_S3_SECRET_KEY` | S3 secret key |
+| `RECORDING_BACKEND` | `s3` or `gcs` (auto-detected from the `RECORDING_<S3\|GCS>_*` vars when unset) |
+| `RECORDING_PREFIX`  | Object key prefix; `{prefix}/{stream_id}/audio.ogg` |
+
+Amazon S3 (or S3-compatible: MinIO, Cloudflare R2):
+
+| Variable | Description |
+|----------|-------------|
+| `RECORDING_S3_BUCKET` | Bucket name |
+| `RECORDING_S3_REGION` | Region |
+| `RECORDING_S3_ACCESS_KEY` | Access key |
+| `RECORDING_S3_SECRET_KEY` | Secret key |
+| `RECORDING_S3_ENDPOINT` | Optional custom endpoint URL |
+| `RECORDING_S3_FORCE_PATH_STYLE` | `true` for MinIO/R2 (default: `false`) |
+
+Google Cloud Storage (provide exactly one credentials variable):
+
+| Variable | Description |
+|----------|-------------|
+| `RECORDING_GCS_BUCKET` | Bucket name |
+| `RECORDING_GCS_CREDENTIALS_PATH` | Path to a service-account JSON file |
+| `RECORDING_GCS_CREDENTIALS_JSON` | Inline service-account JSON (alternative to the path) |
 
 ## Docker Compose
 

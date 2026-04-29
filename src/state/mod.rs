@@ -4,11 +4,10 @@ use crate::auth::AuthClient;
 use crate::config::ServerConfig;
 use crate::core::CoreState;
 use crate::core::cache::store::CacheStore;
-use crate::livekit::room_handler::{LiveKitRoomHandler, RecordingConfig};
+use crate::livekit::room_handler::LiveKitRoomHandler;
 use crate::livekit::sip_handler::{DispatchConfig, LiveKitSipHandler, TrunkConfig};
 use crate::utils::req_manager::ReqManager;
 use object_store::ObjectStore;
-use object_store::aws::AmazonS3Builder;
 
 mod sip_hooks_state;
 
@@ -36,41 +35,18 @@ impl AppState {
     pub async fn new(config: ServerConfig) -> Arc<Self> {
         let core_state = CoreState::new(&config).await;
 
-        // Initialize LiveKit room handler if API keys are available
+        // Initialize LiveKit room handler if API keys are available.
+        // The recording configuration is shared with the download path below;
+        // the same `RecordingConfig` builds both the LiveKit Egress upload
+        // proto and the local `Arc<dyn ObjectStore>` reader.
         let livekit_room_handler = if let (Some(api_key), Some(api_secret)) =
             (&config.livekit_api_key, &config.livekit_api_secret)
         {
-            // Build recording config if all S3 settings are present
-            let recording_config = if let (
-                Some(bucket),
-                Some(region),
-                Some(endpoint),
-                Some(access_key),
-                Some(secret_key),
-            ) = (
-                &config.recording_s3_bucket,
-                &config.recording_s3_region,
-                &config.recording_s3_endpoint,
-                &config.recording_s3_access_key,
-                &config.recording_s3_secret_key,
-            ) {
-                Some(RecordingConfig {
-                    bucket: bucket.clone(),
-                    region: region.clone(),
-                    endpoint: endpoint.clone(),
-                    access_key: access_key.clone(),
-                    secret_key: secret_key.clone(),
-                    prefix: config.recording_s3_prefix.clone().unwrap_or_default(),
-                })
-            } else {
-                None
-            };
-
             match LiveKitRoomHandler::new(
                 config.livekit_url.clone(),
                 api_key.clone(),
                 api_secret.clone(),
-                recording_config,
+                config.recording.clone(),
             ) {
                 Ok(handler) => Some(Arc::new(handler)),
                 Err(e) => {
@@ -82,58 +58,38 @@ impl AppState {
             None
         };
 
-        // Initialize object store for recording downloads if all credentials are provided
-        let (object_store, recording_bucket) = if let (
-            Some(bucket),
-            Some(region),
-            Some(endpoint),
-            Some(access_key),
-            Some(secret_key),
-        ) = (
-            &config.recording_s3_bucket,
-            &config.recording_s3_region,
-            &config.recording_s3_endpoint,
-            &config.recording_s3_access_key,
-            &config.recording_s3_secret_key,
-        ) {
-            let mut builder = AmazonS3Builder::new()
-                .with_bucket_name(bucket)
-                .with_region(region)
-                .with_endpoint(endpoint)
-                .with_access_key_id(access_key)
-                .with_secret_access_key(secret_key);
-
-            if endpoint.starts_with("http://") {
-                builder = builder.with_allow_http(true);
-            }
-
-            match builder.build() {
-                Ok(store) => {
+        // Initialize the object store reader for the /recording/{stream_id}
+        // download endpoint. Failure to construct the store is non-fatal —
+        // recording uploads can still succeed via LiveKit Egress, only
+        // downloads through Sayna become unavailable.
+        let (object_store, recording_bucket): (Option<Arc<dyn ObjectStore>>, Option<String>) =
+            match config.recording.as_ref() {
+                Some(recording) => match recording.build_object_store() {
+                    Ok(store) => {
+                        tracing::info!(
+                            backend = recording.backend_kind(),
+                            bucket = recording.bucket(),
+                            "Recording object store initialized"
+                        );
+                        (Some(store), Some(recording.bucket().to_string()))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            backend = recording.backend_kind(),
+                            bucket = recording.bucket(),
+                            error = ?e,
+                            "Failed to initialize recording object store; downloads will be unavailable"
+                        );
+                        (None, None)
+                    }
+                },
+                None => {
                     tracing::info!(
-                        "Recording object store initialized for bucket={} endpoint={}",
-                        bucket,
-                        endpoint
+                        "Recording storage not configured; recording downloads disabled"
                     );
-                    (
-                        Some(Arc::new(store) as Arc<dyn ObjectStore>),
-                        Some(bucket.clone()),
-                    )
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to initialize recording object store for bucket={} endpoint={}: {:?}",
-                        bucket,
-                        endpoint,
-                        e
-                    );
-                    tracing::info!("Recording downloads will be unavailable");
                     (None, None)
                 }
-            }
-        } else {
-            tracing::info!("Recording storage not configured; recording downloads disabled");
-            (None, None)
-        };
+            };
 
         // Initialize auth client if JWT-based auth is configured
         // Note: API secret auth doesn't need a client - it's handled directly in middleware
@@ -299,12 +255,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -339,12 +290,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,

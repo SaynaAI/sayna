@@ -33,11 +33,15 @@ use std::path::PathBuf;
 
 mod env;
 mod merge;
+pub mod recording;
 mod sip;
 mod utils;
 mod validation;
 mod yaml;
 
+pub use recording::{
+    GcsBackend, RecordingBackend, RecordingConfig, RecordingConfigError, S3Backend,
+};
 pub use sip::{SipConfig, SipHookConfig};
 
 /// API secret authentication entry with a client identifier
@@ -53,7 +57,7 @@ pub struct AuthApiSecret {
 /// - Server settings (host, port)
 /// - LiveKit integration settings
 /// - Provider API keys (Deepgram, ElevenLabs, Google, Azure)
-/// - Recording configuration (S3)
+/// - Recording storage configuration (S3 or GCS)
 /// - Cache settings
 /// - Authentication settings
 /// - SIP configuration
@@ -86,15 +90,11 @@ pub struct ServerConfig {
     /// Cartesia API key for both STT (ink-whisper model) and TTS (sonic-3 model)
     pub cartesia_api_key: Option<String>,
 
-    // LiveKit recording configuration
-    pub recording_s3_bucket: Option<String>,
-    pub recording_s3_region: Option<String>,
-    pub recording_s3_endpoint: Option<String>,
-    pub recording_s3_access_key: Option<String>,
-    pub recording_s3_secret_key: Option<String>,
-    /// Optional S3 path prefix for recordings.
-    /// Combined with stream_id to form full path: `{prefix}/{stream_id}/audio.ogg`
-    pub recording_s3_prefix: Option<String>,
+    /// Recording storage configuration. `None` ⇒ recording uploads and downloads
+    /// are disabled. The shape ([`RecordingConfig`]) is backend-agnostic: callers
+    /// build either an `Arc<dyn ObjectStore>` for the download endpoint or a
+    /// LiveKit `EncodedFileOutput` for Egress through the same value.
+    pub recording: Option<RecordingConfig>,
 
     // Cache configuration (filesystem or memory)
     pub cache_path: Option<PathBuf>, // if None, use in-memory cache
@@ -312,12 +312,17 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: Some("recordings/base".to_string()),
+            recording: Some(RecordingConfig {
+                prefix: "recordings/base".to_string(),
+                backend: RecordingBackend::S3(S3Backend {
+                    bucket: "b".to_string(),
+                    region: "r".to_string(),
+                    access_key: "ak".to_string(),
+                    secret_key: "sk".to_string(),
+                    endpoint: None,
+                    force_path_style: false,
+                }),
+            }),
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -332,8 +337,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "test-deepgram-key");
         assert_eq!(
-            config.recording_s3_prefix,
-            Some("recordings/base".to_string())
+            config.recording.as_ref().map(|r| r.prefix.as_str()),
+            Some("recordings/base")
         );
     }
 
@@ -352,12 +357,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -388,12 +388,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -427,12 +422,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -466,12 +456,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -511,12 +496,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: Some("http://auth.example.com".to_string()),
@@ -543,12 +523,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -577,12 +552,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -612,12 +582,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -646,12 +611,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -690,12 +650,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -728,12 +683,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -765,12 +715,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -802,12 +747,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -844,12 +784,7 @@ mod tests {
             azure_speech_subscription_key: Some("test-azure-key".to_string()),
             azure_speech_region: Some("westus2".to_string()),
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -880,12 +815,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -919,12 +849,7 @@ mod tests {
             azure_speech_subscription_key: Some("test-key".to_string()),
             azure_speech_region: Some("westeurope".to_string()),
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -953,12 +878,7 @@ mod tests {
             azure_speech_subscription_key: None,
             azure_speech_region: None,
             cartesia_api_key: None,
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
@@ -991,7 +911,17 @@ mod tests {
             env::remove_var("AUTH_API_SECRET");
             env::remove_var("AUTH_API_SECRET_ID");
             env::remove_var("AUTH_TIMEOUT_SECONDS");
-            env::remove_var("RECORDING_S3_PREFIX");
+            env::remove_var("RECORDING_BACKEND");
+            env::remove_var("RECORDING_PREFIX");
+            env::remove_var("RECORDING_S3_BUCKET");
+            env::remove_var("RECORDING_S3_REGION");
+            env::remove_var("RECORDING_S3_ENDPOINT");
+            env::remove_var("RECORDING_S3_ACCESS_KEY");
+            env::remove_var("RECORDING_S3_SECRET_KEY");
+            env::remove_var("RECORDING_S3_FORCE_PATH_STYLE");
+            env::remove_var("RECORDING_GCS_BUCKET");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_PATH");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_JSON");
         }
     }
 

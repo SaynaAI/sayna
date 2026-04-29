@@ -17,13 +17,12 @@ fn is_valid_stream_id(stream_id: &str) -> bool {
     !stream_id.is_empty() && !stream_id.contains("..") && !stream_id.contains('/')
 }
 
-fn build_recording_object_key(prefix: Option<&String>, stream_id: &str) -> String {
-    match prefix {
-        Some(prefix) if !prefix.trim().is_empty() => {
-            let normalized_prefix = prefix.trim_end_matches('/');
-            format!("{}/{}/audio.ogg", normalized_prefix, stream_id)
-        }
-        _ => format!("{}/audio.ogg", stream_id),
+fn build_recording_object_key(prefix: &str, stream_id: &str) -> String {
+    let trimmed = prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        format!("{stream_id}/audio.ogg")
+    } else {
+        format!("{trimmed}/{stream_id}/audio.ogg")
     }
 }
 
@@ -95,8 +94,13 @@ pub async fn download_recording(
         }
     };
 
-    let object_key =
-        build_recording_object_key(state.config.recording_s3_prefix.as_ref(), &stream_id);
+    let prefix = state
+        .config
+        .recording
+        .as_ref()
+        .map(|r| r.prefix.as_str())
+        .unwrap_or_default();
+    let object_key = build_recording_object_key(prefix, &stream_id);
 
     let object_path = match ObjectPath::parse(object_key.clone()) {
         Ok(path) => path,
@@ -183,22 +187,21 @@ mod tests {
 
     #[test]
     fn test_build_key_with_prefix() {
-        let prefix = "recordings".to_string();
-        let key = build_recording_object_key(Some(&prefix), "abc123");
+        let key = build_recording_object_key("recordings", "abc123");
         assert_eq!(key, "recordings/abc123/audio.ogg");
     }
 
     #[test]
     fn test_build_key_without_prefix() {
-        let key = build_recording_object_key(None, "abc123");
-        assert_eq!(key, "abc123/audio.ogg");
+        assert_eq!(build_recording_object_key("", "abc123"), "abc123/audio.ogg");
     }
 
     #[test]
     fn test_build_key_with_trailing_slash() {
-        let prefix = "recordings/".to_string();
-        let key = build_recording_object_key(Some(&prefix), "abc123");
-        assert_eq!(key, "recordings/abc123/audio.ogg");
+        assert_eq!(
+            build_recording_object_key("recordings/", "abc123"),
+            "recordings/abc123/audio.ogg"
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+use super::recording::RecordingYaml;
+
 /// Complete YAML configuration structure
 ///
 /// This structure represents the full configuration that can be loaded from a YAML file.
@@ -24,12 +26,15 @@ use std::path::PathBuf;
 ///   elevenlabs_api_key: "your-elevenlabs-key"
 ///
 /// recording:
-///   s3_bucket: "my-bucket"
-///   s3_region: "us-west-2"
-///   s3_prefix: "recordings/production"
-///   s3_endpoint: "https://s3.amazonaws.com"
-///   s3_access_key: "access-key"
-///   s3_secret_key: "secret-key"
+///   prefix: "recordings/production"
+///   backend:
+///     type: s3                                # or "gcs"
+///     bucket: "my-bucket"
+///     region: "us-west-2"
+///     access_key: "access-key"
+///     secret_key: "secret-key"
+///     endpoint: "https://s3.amazonaws.com"   # optional
+///     force_path_style: false                # optional, defaults to false
 ///
 /// cache:
 ///   path: "/var/cache/sayna"
@@ -109,18 +114,6 @@ pub struct ProvidersYaml {
     pub azure_speech_region: Option<String>,
     /// Cartesia API key for STT (ink-whisper model)
     pub cartesia_api_key: Option<String>,
-}
-
-/// Recording S3 configuration from YAML
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
-pub struct RecordingYaml {
-    pub s3_bucket: Option<String>,
-    pub s3_region: Option<String>,
-    pub s3_endpoint: Option<String>,
-    pub s3_access_key: Option<String>,
-    pub s3_secret_key: Option<String>,
-    pub s3_prefix: Option<String>,
 }
 
 /// Cache configuration from YAML
@@ -233,12 +226,14 @@ providers:
   elevenlabs_api_key: "el-key"
 
 recording:
-  s3_bucket: "my-recordings"
-  s3_region: "us-east-1"
-  s3_prefix: "test-prefix"
-  s3_endpoint: "https://s3.amazonaws.com"
-  s3_access_key: "access"
-  s3_secret_key: "secret"
+  prefix: "test-prefix"
+  backend:
+    type: s3
+    bucket: "my-recordings"
+    region: "us-east-1"
+    endpoint: "https://s3.amazonaws.com"
+    access_key: "access"
+    secret_key: "secret"
 
 cache:
   path: "/tmp/cache"
@@ -269,14 +264,15 @@ auth:
             config.providers.as_ref().unwrap().deepgram_api_key,
             Some("dg-key".to_string())
         );
-        assert_eq!(
-            config.recording.as_ref().unwrap().s3_bucket,
-            Some("my-recordings".to_string())
-        );
-        assert_eq!(
-            config.recording.as_ref().unwrap().s3_prefix,
-            Some("test-prefix".to_string())
-        );
+        let recording = config.recording.as_ref().unwrap();
+        assert_eq!(recording.prefix, Some("test-prefix".to_string()));
+        match recording.backend.as_ref().expect("backend present") {
+            super::super::recording::RecordingBackendYaml::S3(s3) => {
+                assert_eq!(s3.bucket, Some("my-recordings".to_string()));
+                assert_eq!(s3.region, Some("us-east-1".to_string()));
+            }
+            other => panic!("unexpected backend variant: {other:?}"),
+        }
         assert_eq!(
             config.cache.as_ref().unwrap().path,
             Some("/tmp/cache".to_string())
@@ -358,21 +354,37 @@ cache:
     fn test_yaml_config_recording_prefix_only() {
         let yaml = r#"
 recording:
-  s3_prefix: "recordings/production"
+  prefix: "recordings/production"
 "#;
 
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
 
         let recording = config.recording.expect("recording should be present");
-        assert_eq!(
-            recording.s3_prefix,
-            Some("recordings/production".to_string())
-        );
-        assert!(recording.s3_bucket.is_none());
-        assert!(recording.s3_region.is_none());
-        assert!(recording.s3_endpoint.is_none());
-        assert!(recording.s3_access_key.is_none());
-        assert!(recording.s3_secret_key.is_none());
+        assert_eq!(recording.prefix, Some("recordings/production".to_string()));
+        assert!(recording.backend.is_none());
+    }
+
+    #[test]
+    fn test_yaml_config_recording_gcs_backend() {
+        let yaml = r#"
+recording:
+  prefix: "recordings/prod"
+  backend:
+    type: gcs
+    bucket: "g-bucket"
+    credentials_path: "/etc/sayna/sa.json"
+"#;
+
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let recording = config.recording.expect("recording should be present");
+        match recording.backend.as_ref().expect("backend") {
+            super::super::recording::RecordingBackendYaml::Gcs(gcs) => {
+                assert_eq!(gcs.bucket.as_deref(), Some("g-bucket"));
+                assert_eq!(gcs.credentials_path.as_deref(), Some("/etc/sayna/sa.json"));
+                assert!(gcs.credentials_json.is_none());
+            }
+            other => panic!("unexpected backend variant: {other:?}"),
+        }
     }
 
     #[test]

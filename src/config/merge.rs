@@ -129,40 +129,14 @@ pub fn merge_config(
             .and_then(|p| p.cartesia_api_key.clone())
     );
 
-    // Recording S3 configuration
-    let recording_s3_bucket = get_optional!(
-        "RECORDING_S3_BUCKET",
-        yaml.recording.as_ref().and_then(|r| r.s3_bucket.clone())
-    );
-
-    let recording_s3_region = get_optional!(
-        "RECORDING_S3_REGION",
-        yaml.recording.as_ref().and_then(|r| r.s3_region.clone())
-    );
-
-    let recording_s3_endpoint = get_optional!(
-        "RECORDING_S3_ENDPOINT",
-        yaml.recording.as_ref().and_then(|r| r.s3_endpoint.clone())
-    );
-
-    let recording_s3_access_key = get_optional!(
-        "RECORDING_S3_ACCESS_KEY",
-        yaml.recording
-            .as_ref()
-            .and_then(|r| r.s3_access_key.clone())
-    );
-
-    let recording_s3_secret_key = get_optional!(
-        "RECORDING_S3_SECRET_KEY",
-        yaml.recording
-            .as_ref()
-            .and_then(|r| r.s3_secret_key.clone())
-    );
-
-    let recording_s3_prefix = get_optional!(
-        "RECORDING_S3_PREFIX",
-        yaml.recording.as_ref().and_then(|r| r.s3_prefix.clone())
-    );
+    // Recording configuration: pass YAML through to RecordingYaml::resolve which
+    // discriminates the backend, applies env-var fallbacks and validates fields.
+    let recording = yaml
+        .recording
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .map_err(|e| format!("Invalid recording configuration: {e}"))?;
 
     // Cache configuration
     let cache_path = yaml
@@ -266,12 +240,7 @@ pub fn merge_config(
         azure_speech_subscription_key,
         azure_speech_region,
         cartesia_api_key,
-        recording_s3_bucket,
-        recording_s3_region,
-        recording_s3_endpoint,
-        recording_s3_access_key,
-        recording_s3_secret_key,
-        recording_s3_prefix,
+        recording,
         cache_path,
         cache_ttl_seconds,
         auth_service_url,
@@ -451,7 +420,17 @@ mod tests {
             env::remove_var("SIP_OUTBOUND_ADDRESS");
             env::remove_var("SIP_OUTBOUND_AUTH_USERNAME");
             env::remove_var("SIP_OUTBOUND_AUTH_PASSWORD");
-            env::remove_var("RECORDING_S3_PREFIX");
+            env::remove_var("RECORDING_BACKEND");
+            env::remove_var("RECORDING_PREFIX");
+            env::remove_var("RECORDING_S3_BUCKET");
+            env::remove_var("RECORDING_S3_REGION");
+            env::remove_var("RECORDING_S3_ENDPOINT");
+            env::remove_var("RECORDING_S3_ACCESS_KEY");
+            env::remove_var("RECORDING_S3_SECRET_KEY");
+            env::remove_var("RECORDING_S3_FORCE_PATH_STYLE");
+            env::remove_var("RECORDING_GCS_BUCKET");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_PATH");
+            env::remove_var("RECORDING_GCS_CREDENTIALS_JSON");
         }
     }
 
@@ -674,52 +653,114 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_merge_recording_prefix_yaml_overrides_env() {
+    fn test_merge_recording_yaml_s3_overrides_env() {
         cleanup_env_vars();
 
         let yaml = YamlConfig {
-            recording: Some(super::super::yaml::RecordingYaml {
-                s3_prefix: Some("yaml-prefix".to_string()),
-                ..Default::default()
+            recording: Some(super::super::recording::RecordingYaml {
+                prefix: Some("yaml-prefix".to_string()),
+                backend: Some(super::super::recording::RecordingBackendYaml::S3(
+                    super::super::recording::S3BackendYaml {
+                        bucket: Some("yaml-bucket".to_string()),
+                        region: Some("yaml-region".to_string()),
+                        access_key: Some("yaml-ak".to_string()),
+                        secret_key: Some("yaml-sk".to_string()),
+                        ..Default::default()
+                    },
+                )),
             }),
             ..Default::default()
         };
 
+        // SAFETY: serialized via #[serial]
         unsafe {
-            env::set_var("RECORDING_S3_PREFIX", "env-prefix");
+            env::set_var("RECORDING_PREFIX", "env-prefix");
+            env::set_var("RECORDING_S3_BUCKET", "env-bucket");
+            env::set_var("RECORDING_S3_REGION", "env-region");
+            env::set_var("RECORDING_S3_ACCESS_KEY", "env-ak");
+            env::set_var("RECORDING_S3_SECRET_KEY", "env-sk");
         }
 
         let config = merge_config(Some(yaml)).unwrap();
-
-        assert_eq!(config.recording_s3_prefix, Some("yaml-prefix".to_string()));
+        let recording = config.recording.expect("recording should be configured");
+        assert_eq!(recording.prefix, "yaml-prefix");
+        match recording.backend {
+            super::super::recording::RecordingBackend::S3(s3) => {
+                assert_eq!(s3.bucket, "yaml-bucket");
+                assert_eq!(s3.region, "yaml-region");
+            }
+            other => panic!("expected S3, got {other:?}"),
+        }
 
         cleanup_env_vars();
     }
 
     #[test]
     #[serial]
-    fn test_merge_recording_prefix_env_only() {
+    fn test_merge_recording_env_only_s3() {
         cleanup_env_vars();
 
+        // SAFETY: serialized via #[serial]
         unsafe {
-            env::set_var("RECORDING_S3_PREFIX", "env-only");
+            env::set_var("RECORDING_PREFIX", "env-only");
+            env::set_var("RECORDING_S3_BUCKET", "env-bucket");
+            env::set_var("RECORDING_S3_REGION", "us-east-1");
+            env::set_var("RECORDING_S3_ACCESS_KEY", "ak");
+            env::set_var("RECORDING_S3_SECRET_KEY", "sk");
         }
 
         let config = merge_config(None).unwrap();
-
-        assert_eq!(config.recording_s3_prefix, Some("env-only".to_string()));
+        let recording = config.recording.expect("recording should be configured");
+        assert_eq!(recording.prefix, "env-only");
+        assert_eq!(recording.bucket(), "env-bucket");
 
         cleanup_env_vars();
     }
 
     #[test]
     #[serial]
-    fn test_merge_recording_prefix_none_when_unset() {
+    fn test_merge_recording_none_when_unset() {
+        cleanup_env_vars();
+        let config = merge_config(None).unwrap();
+        assert!(config.recording.is_none());
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_merge_recording_partial_yaml_falls_back_to_env() {
         cleanup_env_vars();
 
-        let config = merge_config(None).unwrap();
+        // YAML picks the backend variant but leaves credentials to environment.
+        let yaml = YamlConfig {
+            recording: Some(super::super::recording::RecordingYaml {
+                prefix: Some("yaml-prefix".to_string()),
+                backend: Some(super::super::recording::RecordingBackendYaml::S3(
+                    super::super::recording::S3BackendYaml {
+                        bucket: Some("yaml-bucket".to_string()),
+                        ..Default::default()
+                    },
+                )),
+            }),
+            ..Default::default()
+        };
 
-        assert_eq!(config.recording_s3_prefix, None);
+        // SAFETY: serialized via #[serial]
+        unsafe {
+            env::set_var("RECORDING_S3_REGION", "us-east-1");
+            env::set_var("RECORDING_S3_ACCESS_KEY", "ak");
+            env::set_var("RECORDING_S3_SECRET_KEY", "sk");
+        }
+
+        let config = merge_config(Some(yaml)).unwrap();
+        let recording = config.recording.expect("recording configured");
+        match recording.backend {
+            super::super::recording::RecordingBackend::S3(s3) => {
+                assert_eq!(s3.bucket, "yaml-bucket"); // from YAML
+                assert_eq!(s3.region, "us-east-1"); // from ENV
+            }
+            other => panic!("expected S3, got {other:?}"),
+        }
 
         cleanup_env_vars();
     }

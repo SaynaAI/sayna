@@ -68,7 +68,10 @@ Sayna is a high-performance, real-time voice server built with Rust, Axum, and T
 | `LIVEKIT_URL` | Internal LiveKit WebSocket URL (used by the server). | `ws://localhost:7880` |
 | `LIVEKIT_PUBLIC_URL` | URL the client should dial; returned in `/livekit/token` responses and WebSocket `ready`. | `http://localhost:7880` |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Credentials for generating LiveKit tokens on the server side. | – |
-| `RECORDING_S3_*` | Bucket, region, endpoint, access key, and secret for LiveKit recording egress. Recording is skipped if any are missing. | – |
+| `RECORDING_BACKEND` | Storage backend for recordings: `s3` or `gcs`. Auto-detected from the `RECORDING_<S3\|GCS>_*` vars when unset. | – |
+| `RECORDING_PREFIX` | Object key prefix; recordings are stored at `{prefix}/{stream_id}/audio.ogg`. | – |
+| `RECORDING_S3_*` | S3 / S3-compatible bucket vars: `BUCKET`, `REGION`, `ACCESS_KEY`, `SECRET_KEY`, optional `ENDPOINT`, `FORCE_PATH_STYLE`. Recording is skipped if any required field is missing. | – |
+| `RECORDING_GCS_*` | GCS bucket vars: `BUCKET` plus exactly one of `CREDENTIALS_PATH` or `CREDENTIALS_JSON`. | – |
 | `CACHE_PATH` | Filesystem path for persisted audio cache. Falls back to in-memory cache when unset. | In-memory |
 | `CACHE_TTL_SECONDS` | TTL for cached TTS payloads. | 30 days |
 | `AUTH_*` | Optional authentication variables; see `docs/authentication.md`. | – |

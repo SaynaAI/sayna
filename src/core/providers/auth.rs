@@ -311,7 +311,7 @@ fn write_canonical_json(value: &Value, output: &mut String) {
         Value::Object(values) => {
             output.push('{');
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_unstable_by_key(|(left, _)| *left);
 
             for (index, (key, value)) in entries.iter().enumerate() {
                 if index > 0 {
@@ -349,12 +349,7 @@ mod tests {
             azure_speech_subscription_key: Some("azure-server-key".to_string()),
             azure_speech_region: Some("westeurope".to_string()),
             cartesia_api_key: Some("cartesia-server-key".to_string()),
-            recording_s3_bucket: None,
-            recording_s3_region: None,
-            recording_s3_endpoint: None,
-            recording_s3_access_key: None,
-            recording_s3_secret_key: None,
-            recording_s3_prefix: None,
+            recording: None,
             cache_path: None,
             cache_ttl_seconds: Some(3600),
             auth_service_url: None,
