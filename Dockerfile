@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG RUST_VERSION=1.88.0
+ARG RUST_VERSION=1.95.0
 ARG CARGO_BUILD_FEATURES="--all-features"
 ARG ONNX_VERSION=1.23.2
 
