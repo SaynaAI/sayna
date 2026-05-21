@@ -13,12 +13,13 @@ This guide walks you through everything you need to integrate Sayna's WebSocket 
 3. [Session Lifecycle](#session-lifecycle)
 4. [Message Protocol](#message-protocol)
 5. [Configuration](#configuration)
-6. [Use Case Patterns](#use-case-patterns)
-7. [Audio Processing](#audio-processing)
-8. [LiveKit Integration](#livekit-integration)
-9. [Error Handling](#error-handling)
-10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
+6. [Loading Indicator](#loading-indicator)
+7. [Use Case Patterns](#use-case-patterns)
+8. [Audio Processing](#audio-processing)
+9. [LiveKit Integration](#livekit-integration)
+10. [Error Handling](#error-handling)
+11. [Best Practices](#best-practices)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -199,6 +200,7 @@ This is where your application logic runs. You can:
 - Stream binary audio frames for transcription
 - Send `speak` commands for text-to-speech
 - Send `clear` commands to interrupt TTS playback
+- Send `loading_start` / `loading_stop` commands to control the loading indicator audio
 - Send `send_message` commands for LiveKit data channels
 - Receive STT transcription results
 - Receive TTS audio chunks
@@ -421,7 +423,77 @@ If `allow_interruption: false` was set on the most recent speak command, the cle
 
 ---
 
-#### 5. Send Message
+#### 5. Loading Start Message
+
+**Purpose:** Begin looping the configured loading indicator audio into the LiveKit room.
+
+**Structure:**
+```json
+{
+  "type": "loading_start"
+}
+```
+
+**Behavior:**
+- Starts the configured loading clip on a continuous, seamless loop on a dedicated `"loading-audio"` LiveKit track, separate from the `"tts-audio"` speech track.
+- If a loop is already running, the command is an idempotent no-op (the loop continues uninterrupted).
+- The loading clip must have been supplied via the `loading_audio` object in the `config` message. See [Loading Indicator](#loading-indicator) for configuration and authoring guidance.
+
+**Response Behavior:**
+- The loading start command is **fire-and-forget** — no response message is sent on success (mirrors `clear`).
+- Failures are reported with an `error` message.
+
+**Errors** (emitted as `{"type": "error", "message": "..."}`):
+- No `config` message has been received yet
+- Audio is disabled (`audio: false`)
+- No LiveKit room is configured for the session
+- `loading_audio` was not configured, or failed to decode
+- The loading track failed to publish
+
+**Loop Control:**
+- The loop is controlled **exclusively** by `loading_start` and `loading_stop`. The `speak` and `clear` commands do **not** affect it — they act only on the speech (STT/TTS) pipeline.
+- The loop also stops automatically on session teardown / disconnect (resource cleanup).
+
+**Use Cases:**
+```javascript
+// User finished speaking; application starts background work (LLM/tool calls)
+{"type": "loading_start"}
+// ... the human in the room hears the looping sound while the application is busy ...
+```
+
+---
+
+#### 6. Loading Stop Message
+
+**Purpose:** Stop the loading indicator loop with a short fade-out.
+
+**Structure:**
+```json
+{
+  "type": "loading_stop"
+}
+```
+
+**Behavior:**
+- Stops the loading loop with a short fade-out (~30 ms) so playback ends without an audible click.
+- Idempotent and always silent: stopping when nothing is playing, or when there is no LiveKit room, is a harmless no-op and **never** an error (mirrors `clear`).
+
+**Response Behavior:**
+- The loading stop command is **fire-and-forget** — no response message is sent.
+
+**Required Client Guidance:**
+Because `speak` does **not** stop the loop, and the loading track and TTS track are independent and can be audible at the same time, applications **must send `loading_stop` before (or together with) `speak`** in the normal "thinking finished, now answer" flow. Otherwise the loading sound is heard underneath the spoken answer.
+
+**Use Cases:**
+```javascript
+// Application finished its background work; stop the loading sound, then answer
+{"type": "loading_stop"}
+{"type": "speak", "text": "Here is what I found..."}
+```
+
+---
+
+#### 7. Send Message
 
 **Purpose:** Send custom messages through LiveKit data channel to other participants.
 
@@ -474,7 +546,7 @@ If `allow_interruption: false` was set on the most recent speak command, the cle
 
 ---
 
-#### 6. SIP Transfer Message
+#### 8. SIP Transfer Message
 
 **Purpose:** Transfer an active SIP call to another phone number using SIP REFER.
 
@@ -1434,6 +1506,105 @@ Response:
 ```
 
 Use the token to connect to LiveKit room from web browsers or mobile apps using LiveKit SDKs.
+
+---
+
+## Loading Indicator
+
+The loading indicator is a short audio clip the server plays on a continuous, seamless loop into the LiveKit room while your application is busy ("thinking") and cannot yet answer. It is the audio equivalent of a spinner: it signals to the human participant that the agent is still working, instead of leaving the room silent.
+
+The loading audio plays on its **own dedicated, second published LiveKit audio track** (`"loading-audio"`), separate from the speech track (`"tts-audio"`), so it never interferes with text-to-speech output.
+
+The feature has three parts:
+1. **Configuration** — the `config` message gains an optional `loading_audio` object. The server decodes and validates the clip once and holds it for the session.
+2. **`loading_start`** — begins looping the clip into the room.
+3. **`loading_stop`** — stops the loop with a short fade-out.
+
+The server only implements the mechanism. The *cadence* — when and how often the loading sound plays — is entirely your application's concern.
+
+### Loading Audio Configuration
+
+To use the loading indicator, include a `loading_audio` object in the `config` message:
+
+```json
+{
+  "type": "config",
+  "audio": true,
+  "stt_config": { ... },
+  "tts_config": { ... },
+  "livekit": {
+    "room_name": "conversation-room-123"
+  },
+  "loading_audio": {
+    "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEA...",
+    "format": "wav",
+    "volume": 0.3
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `data` | string | Yes | Base64-encoded audio bytes — either a complete WAV file or raw PCM. |
+| `format` | string | No | `"wav"` or `"pcm"`. If omitted, the server auto-detects: bytes beginning with the `RIFF`/`WAVE` signature are treated as WAV, otherwise as raw PCM. |
+| `sample_rate` | integer | Conditional | Sample rate in Hz. **Required for raw PCM** (which has no header). Ignored for WAV (the header is authoritative). Accepted range: 8000–48000 Hz. |
+| `channels` | integer | No | Channel count for raw PCM only: `1` (mono) or `2` (stereo). Defaults to `1`. Ignored for WAV. |
+| `volume` | number | No | Playback volume of the loading audio, from `0.0` (silent) to `1.0` (the clip's authored level). Default `1.0`. Out-of-range values are clamped. Applied as amplitude scaling of the clip's samples at config time. |
+
+**Audio Requirements:**
+
+- **Only 16-bit PCM is supported** — a 16-bit integer WAV, or raw 16-bit little-endian PCM. Other bit depths and float formats are rejected.
+- Decoded duration must be between ~250 ms and ~10 s (**1–4 s recommended**).
+- Decoded size is capped (~1.9 MB).
+
+**WAV vs. raw PCM:**
+
+- **WAV** — supply a complete 16-bit integer WAV file. The header is authoritative, so `sample_rate` and `channels` in the config are ignored.
+- **Raw PCM** — supply interleaved 16-bit little-endian PCM with no header. You **must** provide `sample_rate`; `channels` defaults to `1`.
+
+**Behavioral rules:**
+
+- `loading_audio` is processed only when `audio` is `true` **and** a `livekit` configuration is present in the same `config` message. If supplied without those, the server emits an `error` message explaining the requirement and continues the session **without** loading capability.
+- A decode or validation failure of `loading_audio` is **non-fatal**: the server emits an `error` message and the session continues normally — only the loading feature is unavailable. STT, TTS, and LiveKit are unaffected.
+- Existing clients that omit `loading_audio` are completely unaffected — the field is purely additive and optional.
+
+### Controlling the Loop
+
+The loop is controlled with the [`loading_start`](#5-loading-start-message) and [`loading_stop`](#6-loading-stop-message) commands, documented in the Incoming Messages section.
+
+- `loading_start` begins the loop (idempotent — a no-op if already looping).
+- `loading_stop` stops the loop with a short fade-out (idempotent and always silent).
+- The loop is controlled **exclusively** by these two commands. The `speak` and `clear` commands do **not** affect it — they act only on the speech (STT/TTS) pipeline.
+- The loop also stops automatically on session teardown / disconnect.
+
+**Required client guidance:** Because `speak` does not stop the loop, and the loading track and TTS track are independent and can be audible at the same time, **send `loading_stop` before (or together with) `speak`** in the normal "thinking finished, now answer" flow. Otherwise the loading sound is heard underneath the spoken answer.
+
+### Authoring the Clip
+
+The server plays the clip **as supplied** (apart from the `volume` scaling and the stop fade-out): it does not resample, crossfade, or re-time it. Author the clip carefully:
+
+- **Short** — ideally 1–4 s.
+- **Seamless** — the start and end amplitudes must match so the clip loops without an audible click. A clip whose start and end amplitudes differ may click at the loop point.
+- **Quiet** — author the clip at a low level so it sits under, rather than competes with, speech.
+- **16-bit PCM** — a 16-bit integer WAV or raw 16-bit little-endian PCM.
+
+Loudness can be controlled in two ways: by authoring the clip quietly, and by setting the `volume` field (which scales the clip's sample amplitudes at config time). A LiveKit publisher cannot adjust a track's output volume after the fact, so these are the only loudness controls available.
+
+### Separate Track Behavior
+
+The loading audio is published on its own LiveKit audio track (`"loading-audio"`), independent of the speech track (`"tts-audio"`). An audio-enabled session with `loading_audio` configured therefore publishes **two** audio tracks from the Sayna agent participant. See [LiveKit Integration](livekit_integration.md#published-audio-tracks) for details, including how the loading track appears in room-composite recordings.
+
+After a LiveKit publisher-timeout reconnect, an in-progress loop stops (the old audio source is gone). The client must re-send `loading_start` to resume the loop.
+
+### Typical Interaction Flow
+
+1. Open `/ws`. Send `config` with `audio: true`, an STT config, a TTS config, a `livekit` config, **and** a `loading_audio` object. Receive `ready`.
+2. The user speaks; the server emits `stt_result` messages. The application starts its background work (LLM/tool calls).
+3. The application sends `loading_start` — the human in the room hears the looping sound.
+4. The application finishes its work, sends `loading_stop`, then sends `speak` with the answer text. Sending `loading_stop` first is the application's responsibility.
+5. Repeat per turn.
 
 ---
 

@@ -18,14 +18,14 @@ use crate::{
         tts::AudioData,
         voice_manager::{VoiceManager, VoiceManagerConfig},
     },
-    livekit::{LiveKitClient, LiveKitMediaMode},
+    livekit::{LiveKitClient, LiveKitMediaMode, LoadingClip, decode_loading_clip},
     state::AppState,
 };
 
 use super::{
     config::{
-        LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, TurnDetectConfigUpdate,
-        VADConfigUpdate, compute_tts_config_hash,
+        LiveKitWebSocketConfig, LoadingAudioConfig, STTWebSocketConfig, TTSWebSocketConfig,
+        TurnDetectConfigUpdate, VADConfigUpdate, compute_tts_config_hash,
     },
     messages::{
         MessageRoute, OutgoingMessage, ParticipantConnectedInfo, ParticipantDisconnectedInfo,
@@ -70,6 +70,7 @@ fn resolve_stream_id(stream_id: Option<String>) -> String {
 /// * `stt_ws_config` - STT provider configuration
 /// * `tts_ws_config` - TTS provider configuration
 /// * `livekit_ws_config` - Optional LiveKit configuration
+/// * `loading_audio` - Optional loading-indicator audio configuration
 /// * `state` - Connection state to update
 /// * `message_tx` - Channel for sending response messages
 /// * `app_state` - Application state containing API keys
@@ -83,6 +84,7 @@ pub async fn handle_config_message(
     stt_ws_config: Option<STTWebSocketConfig>,
     tts_ws_config: Option<TTSWebSocketConfig>,
     livekit_ws_config: Option<LiveKitWebSocketConfig>,
+    loading_audio: Option<LoadingAudioConfig>,
     state: &Arc<RwLock<ConnectionState>>,
     message_tx: &mpsc::Sender<MessageRoute>,
     app_state: &Arc<AppState>,
@@ -112,6 +114,40 @@ pub async fn handle_config_message(
         state_guard.stream_id = Some(stream_id.clone());
     }
     debug!(stream_id = %stream_id, "Stored stream_id in connection state");
+
+    // Decode the optional loading-indicator audio clip (non-fatal on failure).
+    let loading_clip = match loading_audio {
+        None => None,
+        Some(cfg) => {
+            if !audio_enabled || livekit_ws_config.is_none() {
+                let _ = message_tx
+                    .send(MessageRoute::Outgoing(OutgoingMessage::Error {
+                        message:
+                            "loading_audio requires audio to be enabled and a livekit configuration"
+                                .to_string(),
+                    }))
+                    .await;
+                None
+            } else {
+                match decode_loading_clip(
+                    &cfg.data,
+                    cfg.format.as_deref(),
+                    cfg.sample_rate,
+                    cfg.channels,
+                    cfg.volume,
+                ) {
+                    Ok(clip) => Some(clip),
+                    Err(message) => {
+                        error!("Failed to decode loading_audio: {}", message);
+                        let _ = message_tx
+                            .send(MessageRoute::Outgoing(OutgoingMessage::Error { message }))
+                            .await;
+                        None
+                    }
+                }
+            }
+        }
+    };
 
     // Initialize voice manager if audio is enabled
     let voice_manager = if audio_enabled {
@@ -161,6 +197,7 @@ pub async fn handle_config_message(
                 livekit_ws_config,
                 audio_enabled,
                 tts_ws_config.as_ref(),
+                loading_clip,
                 &app_state.config.livekit_url,
                 voice_manager.as_ref(),
                 message_tx,
@@ -703,6 +740,8 @@ async fn register_final_tts_callback(
 /// Initialize LiveKit client and set up callbacks
 ///
 /// # Arguments
+/// * `loading_clip` - Optional decoded loading-indicator audio clip. When present,
+///   it is registered on the client before connecting so `loading_start` can use it.
 /// * `auth_id` - Optional tenant identifier. If provided, enforced via room metadata
 ///   to prevent cross-tenant room access.
 #[allow(clippy::too_many_arguments)]
@@ -710,6 +749,7 @@ async fn initialize_livekit_client(
     livekit_ws_config: LiveKitWebSocketConfig,
     audio_enabled: bool,
     tts_config: Option<&TTSWebSocketConfig>,
+    loading_clip: Option<LoadingClip>,
     livekit_url: &str,
     voice_manager: Option<&Arc<VoiceManager>>,
     message_tx: &mpsc::Sender<MessageRoute>,
@@ -898,6 +938,11 @@ async fn initialize_livekit_client(
     let livekit_config =
         livekit_ws_config.to_livekit_config(agent_token, audio_enabled, tts_config, livekit_url);
     let mut livekit_client = LiveKitClient::new(livekit_config);
+
+    // Register the loading-indicator audio clip before connecting, if supplied.
+    if let Some(clip) = loading_clip {
+        livekit_client.set_loading_audio_clip(clip);
+    }
 
     // Set up audio callback to forward to STT processing
     if audio_enabled && let Some(vm) = voice_manager {

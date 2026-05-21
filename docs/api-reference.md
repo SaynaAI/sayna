@@ -544,7 +544,7 @@ This enables efficient trunk management without manual provisioning.
 1. Connect via WebSocket and immediately send a `config` message.
 2. The server initializes providers (and LiveKit, if requested) and replies with `ready`.
 3. Stream audio frames as binary messages that match the declared STT sample rate/encoding.
-4. Use `speak`, `clear`, or `send_message` commands to drive TTS and LiveKit data.
+4. Use `speak`, `clear`, `loading_start`, `loading_stop`, or `send_message` commands to drive TTS, the loading indicator, and LiveKit data.
 5. Close the socket when finished; the server also closes when a fatal `error` is emitted.
 
 #### Incoming Messages
@@ -560,6 +560,7 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 | `stt_config` | object | Conditional | Required when `audio=true`. See table below. |
 | `tts_config` | object | Conditional | Required when `audio=true`. Same schema as the REST `tts_config`. |
 | `livekit` | object | No | LiveKit options; omitted for WebSocket-only sessions. |
+| `loading_audio` | object | No | Optional loading indicator clip. Processed only when `audio=true` and `livekit` is present; a decode failure is non-fatal. See table below. |
 
 **STT configuration**
 
@@ -583,6 +584,20 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 | `sayna_participant_name` | string | Override for the agent display name (default `Sayna AI`). |
 | `listen_participants` | array<string> | Restrict audio/data processing to specific participant identities (empty list listens to all). |
 
+**`loading_audio` configuration**
+
+Decoded once at config time; the validated clip is held for the session and played on a dedicated `"loading-audio"` LiveKit track via the `loading_start` / `loading_stop` commands. Only 16-bit PCM is supported.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `data` | string | Yes | Base64-encoded audio bytes: a complete WAV file or raw PCM. |
+| `format` | string | No | `wav` or `pcm`. Auto-detected from the `RIFF`/`WAVE` signature when omitted. |
+| `sample_rate` | integer | Conditional | Sample rate in Hz (8000–48000). Required for raw PCM; ignored for WAV. |
+| `channels` | integer | No | Channel count for raw PCM (`1` or `2`, default `1`); ignored for WAV. |
+| `volume` | number | No | Playback volume `0.0`–`1.0` (default `1.0`); out-of-range values are clamped. |
+
+See [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference for authoring guidance and limits.
+
 ##### `speak`
 Queues text for synthesis.
 
@@ -599,6 +614,20 @@ Immediately clears queued audio and LiveKit buffers. Useful for interruptions.
 | Field | Type | Description |
 | --- | --- | --- |
 | `type` | string | `clear`. |
+
+##### `loading_start`
+Begins looping the configured loading indicator clip on a dedicated `"loading-audio"` LiveKit track. Requires `audio=true`, an active LiveKit room, and a `loading_audio` clip supplied in `config`. Fire-and-forget on success; idempotent if the loop is already running; failures emit an `error` message.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | string | `loading_start`. |
+
+##### `loading_stop`
+Stops the loading indicator loop with a short fade-out. Fire-and-forget; idempotent and always silent — stopping when nothing is playing is never an error. The loop is controlled only by `loading_start` / `loading_stop`; `speak` and `clear` do not affect it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | string | `loading_stop`. |
 
 ##### `send_message`
 Publishes a LiveKit data message (if LiveKit is configured) and also feeds the VoiceManager message bus.

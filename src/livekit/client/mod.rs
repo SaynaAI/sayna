@@ -9,6 +9,7 @@ mod audio;
 mod callbacks;
 mod connection;
 mod events;
+mod loading_audio;
 mod messaging;
 mod operation_worker;
 
@@ -27,6 +28,7 @@ use tracing::warn;
 
 pub(crate) use super::operations::{LiveKitOperation, OperationQueue, QueueStats};
 pub(crate) use super::types::LiveKitConfig;
+use crate::livekit::loading_clip::LoadingClip;
 
 /// Callback type for handling incoming audio chunks.
 pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -125,6 +127,22 @@ pub struct LiveKitClient {
     pub(crate) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     pub(crate) local_audio_track: Option<LocalAudioTrack>,
     pub(crate) local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    /// Decoded loading-indicator clip; `None` when the feature is unused.
+    pub(crate) loading_clip: Option<Arc<LoadingClip>>,
+    /// Dedicated audio source feeding the "loading-audio" track.
+    pub(crate) loading_audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+    /// Handle keeping the "loading-audio" track published.
+    pub(crate) loading_audio_track: Option<LocalAudioTrack>,
+    /// Publication of the dedicated "loading-audio" track.
+    pub(crate) loading_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    /// Running loading-audio loop handle and its cancellation token, if active.
+    ///
+    /// Wrapped in `Arc` so the operation worker's `OperationContext` can hold a
+    /// clone and cancel the loop from `process_reconnect` (the running loop's
+    /// audio source dies with the pre-reconnect room). Visibility is
+    /// `pub(super)` because [`loading_audio::LoadingLoopHandle`] is an internal
+    /// type only used within the `client` submodule.
+    pub(super) loading_loop: Arc<Mutex<Option<loading_audio::LoadingLoopHandle>>>,
     pub(crate) _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     pub(crate) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub(crate) operation_queue: Option<OperationQueue>,
@@ -185,6 +203,11 @@ impl LiveKitClient {
             audio_source: Arc::new(Mutex::new(None)),
             local_audio_track: None,
             local_track_publication: Arc::new(Mutex::new(None)),
+            loading_clip: None,
+            loading_audio_source: Arc::new(Mutex::new(None)),
+            loading_audio_track: None,
+            loading_track_publication: Arc::new(Mutex::new(None)),
+            loading_loop: Arc::new(Mutex::new(None)),
             _audio_buffer_pool: Arc::new(Mutex::new(
                 (0..4)
                     .map(|_| Vec::with_capacity(buffer_capacity))
@@ -234,12 +257,51 @@ impl LiveKitClient {
     pub(crate) fn has_room_events(&self) -> bool {
         self.room_events.is_some()
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_loading_clip(&self) -> bool {
+        self.loading_clip.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_audio_source(&self) -> bool {
+        self.loading_audio_source.lock().await.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_loading_audio_track(&self) -> bool {
+        self.loading_audio_track.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_track_publication(&self) -> bool {
+        self.loading_track_publication.lock().await.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_loop(&self) -> bool {
+        self.loading_loop.lock().await.is_some()
+    }
 }
 
 impl Drop for LiveKitClient {
     fn drop(&mut self) {
         if self.operation_worker_handle.is_some() {
             warn!("LiveKitClient dropped without explicit disconnect call");
+        }
+
+        // Backstop for the loading-audio loop. `disconnect` is the normal
+        // teardown path, but session cleanup may skip it if the LiveKit write
+        // lock cannot be acquired in time. A buffered `NativeAudioSource` keeps
+        // accepting frames even after the room is gone, so the loop would never
+        // observe a `capture_frame` error and never self-terminate. Cancelling
+        // the token and aborting the task here keeps the loop from being
+        // orphaned regardless of how the client is dropped.
+        if let Ok(mut guard) = self.loading_loop.try_lock()
+            && let Some(loading) = guard.take()
+        {
+            loading.token.cancel();
+            loading.handle.abort();
         }
     }
 }

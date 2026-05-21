@@ -606,6 +606,43 @@ impl LiveKitClient {
 
                         info!("Successfully reconnected and re-published audio track");
 
+                        // Stop any in-progress loading-audio loop: its audio source died with the
+                        // pre-reconnect room. A buffered `NativeAudioSource` keeps accepting frames
+                        // even after its room is gone, so the loop cannot detect the reconnect on
+                        // its own — cancel and abort it here. Clearing `loading_loop` lets a later
+                        // `loading_start` spawn a fresh loop on the re-published track; the client
+                        // must re-send `loading_start` to resume the loading sound.
+                        if let Some(loading) = ctx.loading_loop.lock().await.take() {
+                            loading.token.cancel();
+                            loading.handle.abort();
+                        }
+
+                        // Re-publish the loading-audio track if a loading clip is configured
+                        // (non-fatal). The re-published `LocalAudioTrack` handle is intentionally
+                        // dropped here: `OperationContext` carries no `loading_audio_track` field,
+                        // and the publication alone keeps the track alive — mirroring how the TTS
+                        // track is re-published above.
+                        if let Some(clip) = &ctx.loading_clip {
+                            *ctx.loading_audio_source.lock().await = None;
+                            *ctx.loading_track_publication.lock().await = None;
+                            match super::loading_audio::publish_loading_audio_track(
+                                &local_participant,
+                                clip.sample_rate(),
+                                clip.channels(),
+                            )
+                            .await
+                            {
+                                Ok((source, _track, publication)) => {
+                                    *ctx.loading_audio_source.lock().await = Some(source);
+                                    *ctx.loading_track_publication.lock().await = Some(publication);
+                                    info!("Re-published loading audio track after reconnect");
+                                }
+                                Err(e) => warn!(
+                                    "Failed to re-publish loading audio track after reconnect (non-fatal): {e:?}"
+                                ),
+                            }
+                        }
+
                         // Return room_events for event handler restart and success flag
                         Ok((Some(room_events), true))
                     }

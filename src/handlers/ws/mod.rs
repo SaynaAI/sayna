@@ -19,6 +19,8 @@
 //! - `{"type": "config", "audio": true, "stt_config": {...}, "tts_config": {...}, "livekit": {...}}` - Initialize voice providers and optionally connect to LiveKit
 //! - `{"type": "speak", "text": "Hello world", "flush": true, "allow_interruption": true}` - Synthesize speech from text (flush and allow_interruption are optional, both default to true)
 //! - `{"type": "clear"}` - Clear pending TTS audio and clear queue (ignored if allow_interruption=false until audio finishes)
+//! - `{"type": "loading_start"}` - Begin looping the configured loading-indicator audio into the LiveKit room (requires audio enabled and a LiveKit room)
+//! - `{"type": "loading_stop"}` - Stop the loading-indicator audio loop (no-op when no LiveKit room is configured)
 //! - `{"type": "send_message", "message": "Hello LiveKit!", "role": "user", "topic": "chat"}` - Send custom text message through LiveKit (topic is optional)
 //! - `{"type": "sip_transfer", "transfer_to": "+1234567890"}` - Transfer active SIP call to another phone number
 //! - **Binary messages** - Raw audio data for transcription
@@ -435,6 +437,7 @@ pub mod config;
 pub mod config_handler;
 pub mod error;
 pub mod handler;
+pub mod loading_handler;
 pub mod messages;
 pub mod processor;
 pub mod state;

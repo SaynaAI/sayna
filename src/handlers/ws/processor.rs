@@ -12,6 +12,7 @@ use super::{
     audio_handler::{handle_clear_message, handle_speak_message},
     command_handler::{handle_send_message, handle_sip_transfer},
     config_handler::{handle_config_message, handle_update_config_message},
+    loading_handler::{handle_loading_start_message, handle_loading_stop_message},
     messages::{IncomingMessage, MessageRoute},
     state::ConnectionState,
 };
@@ -48,9 +49,18 @@ pub async fn handle_incoming_message(
             stt_config,
             tts_config,
             livekit,
+            loading_audio,
         } => {
             handle_config_message(
-                stream_id, audio, stt_config, tts_config, livekit, state, message_tx, app_state,
+                stream_id,
+                audio,
+                stt_config,
+                tts_config,
+                livekit,
+                loading_audio,
+                state,
+                message_tx,
+                app_state,
             )
             .await
         }
@@ -72,5 +82,7 @@ pub async fn handle_incoming_message(
         IncomingMessage::UpdateConfig { vad, turn_detect } => {
             handle_update_config_message(vad, turn_detect, message_tx, app_state).await
         }
+        IncomingMessage::LoadingStart => handle_loading_start_message(state, message_tx).await,
+        IncomingMessage::LoadingStop => handle_loading_stop_message(state).await,
     }
 }

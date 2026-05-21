@@ -17,15 +17,16 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [Configuration](#configuration)
-3. [Inbound Webhooks (LiveKit → Sayna)](#inbound-webhooks-livekit--sayna)
-4. [SIP Configuration & Auto-Provisioning](#sip-configuration--auto-provisioning)
-5. [Outbound SIP Calls](#outbound-sip-calls)
-6. [Outbound Webhooks (Sayna → Downstream)](#outbound-webhooks-sayna--downstream)
-7. [Webhook Signing](#webhook-signing)
-8. [Testing & Development](#testing--development)
-9. [Operations & Troubleshooting](#operations--troubleshooting)
-10. [Security Considerations](#security-considerations)
+2. [Published Audio Tracks](#published-audio-tracks)
+3. [Configuration](#configuration)
+4. [Inbound Webhooks (LiveKit → Sayna)](#inbound-webhooks-livekit--sayna)
+5. [SIP Configuration & Auto-Provisioning](#sip-configuration--auto-provisioning)
+6. [Outbound SIP Calls](#outbound-sip-calls)
+7. [Outbound Webhooks (Sayna → Downstream)](#outbound-webhooks-sayna--downstream)
+8. [Webhook Signing](#webhook-signing)
+9. [Testing & Development](#testing--development)
+10. [Operations & Troubleshooting](#operations--troubleshooting)
+11. [Security Considerations](#security-considerations)
 
 ---
 
@@ -88,6 +89,23 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 7. **Payload Signing**: Generates HMAC-SHA256 signature with timestamp and event ID
 8. **Asynchronous Forwarding**: Spawns background task to POST to customer webhook
 9. **Connection Reuse**: Uses cached HTTP/2 connection pool for efficient delivery
+
+---
+
+## Published Audio Tracks
+
+When a WebSocket session is audio-enabled and joins a LiveKit room, the Sayna agent participant publishes synthesized speech on a single audio track named `"tts-audio"`.
+
+If that session's `config` message also includes a `loading_audio` object (see [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference), the agent participant publishes a **second** audio track named `"loading-audio"`, carrying the loading indicator sound. In that case the agent publishes **two** audio tracks:
+
+| Track name | Carries |
+|------------|---------|
+| `"tts-audio"` | Synthesized speech (text-to-speech output). |
+| `"loading-audio"` | The loading indicator clip, looped while the calling application is busy. |
+
+The two tracks are independent and can be audible at the same time. LiveKit client SDKs automatically play every subscribed audio track, so participants hear both without any extra client-side handling.
+
+**Recordings:** Because `"loading-audio"` is a real published track, it is included in room-composite egress recordings alongside `"tts-audio"`. This is correct behavior — the recording faithfully reflects what the human participant heard.
 
 ---
 

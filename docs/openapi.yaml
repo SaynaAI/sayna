@@ -661,6 +661,11 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/LiveKitWebSocketConfig'
               description: Optional LiveKit configuration for real-time audio streaming
+          loading_audio:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LoadingAudioConfig'
+              description: Optional loading-indicator audio configuration.
           stream_id:
             type:
             - string
@@ -791,6 +796,24 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/VADConfigUpdate'
               description: VAD configuration updates (silence threshold, etc.)
+      - type: object
+        description: Begin looping the configured loading-indicator audio into the LiveKit room.
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - loading_start
+      - type: object
+        description: Stop the loading-indicator audio loop (with a short fade-out).
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - loading_stop
       description: WebSocket message types for incoming messages
     ListRoomsResponse:
       type: object
@@ -858,6 +881,44 @@ components:
           - 'null'
           description: Sayna AI participant display name (defaults to "Sayna AI")
           example: Sayna AI
+    LoadingAudioConfig:
+      type: object
+      description: Loading-indicator audio configuration supplied in the `config` message.
+      required:
+      - data
+      properties:
+        channels:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Channel count for raw PCM (1 = mono, 2 = stereo); defaults to 1. Ignored for WAV.
+          example: 1
+          minimum: 0
+        data:
+          type: string
+          description: Base64-encoded audio bytes — a complete WAV file or raw 16-bit PCM.
+        format:
+          type:
+          - string
+          - 'null'
+          description: 'Audio format: "wav" or "pcm". If omitted, the server auto-detects.'
+          example: wav
+        sample_rate:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Sample rate in Hz. Required for raw PCM; ignored for WAV (header is authoritative).
+          example: 16000
+          minimum: 0
+        volume:
+          type:
+          - number
+          - 'null'
+          format: float
+          description: Playback volume from 0.0 (silent) to 1.0 (authored level). Default 1.0; out-of-range clamped.
+          example: 0.3
     MuteParticipantRequest:
       type: object
       description: |-
