@@ -56,3 +56,14 @@ jobs:
           cargo build --locked --all-features
           cargo test --locked --all-features
           echo "::endgroup::"
+
+      # The `livekit_native_*` tests construct real libwebrtc `NativeAudioSource`
+      # objects. libwebrtc's global runtime intermittently segfaults under the
+      # heavy thread concurrency of the full unit-test binary, so those tests are
+      # `#[ignore]`d out of the run above and executed here in their own isolated,
+      # single-threaded process instead.
+      - name: Test LiveKit native audio (isolated)
+        run: |
+          echo "::group::Running libwebrtc-native loading-audio tests in isolation"
+          cargo test --locked --all-features --lib -- --ignored --test-threads=1 livekit_native_
+          echo "::endgroup::"

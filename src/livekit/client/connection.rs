@@ -92,7 +92,13 @@ impl LiveKitClient {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
         }
 
-        // Tear down the loading-audio loop: cancel, await with timeout, abort as backstop.
+        // Tear down the loading-audio loop: cancel, await with timeout, abort as
+        // backstop. Unlike `process_reconnect`, `disconnect` does not co-hold the
+        // `loading_loop` and `loading_audio_source` locks: its `&mut self` receiver
+        // gives it exclusive access to the client (no concurrent `&self`
+        // `start_loading_audio` / `stop_loading_audio`), and the operation worker
+        // was already shut down above — so nothing can spawn or rebind a loop while
+        // these fields are torn down.
         if let Some(loading) = self.loading_loop.lock().await.take() {
             loading.token.cancel();
             let abort = loading.handle.abort_handle();
@@ -114,8 +120,11 @@ impl LiveKitClient {
         *self.local_track_publication.lock().await = None;
         self.has_audio_source_atomic.store(false, Ordering::Release);
 
-        // Clear loading-audio resources only after the loop has been awaited,
-        // so no stray fade-out frame is captured into a half-torn-down source.
+        // Clear the loading-audio resources only after the loop task has been
+        // awaited/aborted above. The loop owns its own `Arc` clone of the
+        // source, so clearing these fields never frees it mid-capture — but
+        // awaiting first keeps teardown deterministic: the loop has provably
+        // stopped before its source/track/publication are dropped here.
         *self.loading_audio_source.lock().await = None;
         self.loading_audio_track = None;
         *self.loading_track_publication.lock().await = None;

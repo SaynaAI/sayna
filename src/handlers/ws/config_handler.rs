@@ -139,6 +139,9 @@ pub async fn handle_config_message(
                     Ok(clip) => Some(clip),
                     Err(message) => {
                         error!("Failed to decode loading_audio: {}", message);
+                        // Retain the reason so a later `loading_start` can
+                        // report it again clearly.
+                        state.write().await.loading_audio_error = Some(message.clone());
                         let _ = message_tx
                             .send(MessageRoute::Outgoing(OutgoingMessage::Error { message }))
                             .await;

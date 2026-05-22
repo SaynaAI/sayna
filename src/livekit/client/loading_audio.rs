@@ -240,29 +240,25 @@ impl LiveKitClient {
             ));
         }
 
-        let source = {
-            let guard = self.loading_audio_source.lock().await;
-            guard.as_ref().map(Arc::clone)
-        };
-        let source = match source {
-            Some(source) => source,
-            None => {
-                return Err(AppError::BadRequest(
-                    "loading audio is not available for this session".to_string(),
-                ));
-            }
-        };
-
+        // No loading clip was configured for this session.
         let clip = match &self.loading_clip {
             Some(clip) => Arc::clone(clip),
             None => {
                 return Err(AppError::BadRequest(
-                    "loading audio is not available for this session".to_string(),
+                    "no loading audio was configured for this session".to_string(),
                 ));
             }
         };
 
+        // Hold `loading_loop` across the whole start, and read
+        // `loading_audio_source` while still holding it. A concurrent reconnect
+        // (`process_reconnect`) tears down the loop and clears the loading
+        // source under this same `loading_loop` guard, so taking the lock first
+        // guarantees this loop binds to the current source — never a stale,
+        // dead pre-reconnect one. Lock order is always `loading_loop` then
+        // `loading_audio_source`.
         let mut loop_guard = self.loading_loop.lock().await;
+
         // A finished handle is stale and is replaced; a live one means the loop
         // is already running, so starting again is an idempotent no-op.
         if let Some(existing) = loop_guard.as_ref()
@@ -271,6 +267,22 @@ impl LiveKitClient {
             debug!("Loading audio loop already running; start request ignored");
             return Ok(());
         }
+
+        // A clip was configured but the dedicated "loading-audio" track failed
+        // to publish (or a reconnect is mid-rebuild), so there is no source to
+        // feed frames into.
+        let source = {
+            let guard = self.loading_audio_source.lock().await;
+            guard.as_ref().map(Arc::clone)
+        };
+        let source = match source {
+            Some(source) => source,
+            None => {
+                return Err(AppError::BadRequest(
+                    "the loading audio track is unavailable; it failed to publish".to_string(),
+                ));
+            }
+        };
 
         let token = CancellationToken::new();
         // Isolation invariant: the spawned loop owns only its dedicated audio
@@ -321,13 +333,17 @@ async fn run_loading_loop(
 ) {
     let sample_rate = clip.sample_rate();
     let channels = clip.channels();
-    let samples_per_channel = (sample_rate / 100) as usize;
     let frame_len = loading_frame_len(sample_rate, channels);
 
     if frame_len == 0 || clip.samples().is_empty() {
         warn!("Loading audio clip has no playable frames; loop not started");
         return;
     }
+
+    // Per-channel sample count for one 10 ms frame. Derived from `frame_len`
+    // (the all-channels length) so `loading_frame_len` stays the single source
+    // of truth for the 10 ms math. `channels >= 1` here because `frame_len != 0`.
+    let samples_per_channel = frame_len / channels as usize;
 
     let mut frame_buf: Vec<i16> = vec![0; frame_len];
     let mut cursor: usize = 0;
@@ -521,15 +537,17 @@ mod tests {
         }
     }
 
+    // Constructs a real libwebrtc `NativeAudioSource`. libwebrtc's global
+    // runtime intermittently segfaults under the full unit-test binary's
+    // concurrency, so this test is `#[ignore]`d from the default run and
+    // executed isolated by a dedicated CI step (see `.github/workflows/ci.yml`).
+    // Run locally with:
+    //   cargo test --all-features --lib -- --ignored --test-threads=1 livekit_native_
     #[tokio::test]
-    async fn test_run_loading_loop_exits_cleanly_when_precancelled() {
-        // A 500 ms 16 kHz mono clip, well above the minimum duration.
-        let samples: Vec<i16> = (0..8_000).map(|i| (i % 1000) as i16).collect();
-        let data = crate::livekit::loading_clip::raw_pcm_to_base64(&samples);
-        let clip = Arc::new(
-            crate::livekit::decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(1), None)
-                .expect("raw PCM clip should decode"),
-        );
+    #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+    async fn livekit_native_run_loop_exits_when_precancelled() {
+        // The canonical 500 ms 16 kHz mono test clip, well above the minimum duration.
+        let clip = Arc::new(crate::livekit::loading_clip::make_test_loading_clip());
 
         let source = Arc::new(NativeAudioSource::new(
             AudioSourceOptions {

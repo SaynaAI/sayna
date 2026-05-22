@@ -290,13 +290,16 @@ impl Drop for LiveKitClient {
             warn!("LiveKitClient dropped without explicit disconnect call");
         }
 
-        // Backstop for the loading-audio loop. `disconnect` is the normal
-        // teardown path, but session cleanup may skip it if the LiveKit write
-        // lock cannot be acquired in time. A buffered `NativeAudioSource` keeps
-        // accepting frames even after the room is gone, so the loop would never
-        // observe a `capture_frame` error and never self-terminate. Cancelling
-        // the token and aborting the task here keeps the loop from being
-        // orphaned regardless of how the client is dropped.
+        // Best-effort backstop for the loading-audio loop. `disconnect` is the
+        // normal teardown path, but session cleanup may skip it if the LiveKit
+        // write lock cannot be acquired in time. A buffered `NativeAudioSource`
+        // keeps accepting frames even after the room is gone, so the loop would
+        // never observe a `capture_frame` error and never self-terminate.
+        // Cancelling the token and aborting the task here reaps the loop on the
+        // common drop paths. `try_lock` is used because `Drop` cannot block; if
+        // it loses a momentary race for the `loading_loop` lock, the loop is
+        // left for that lock holder's own teardown (`disconnect` / reconnect) to
+        // reap.
         if let Ok(mut guard) = self.loading_loop.try_lock()
             && let Some(loading) = guard.take()
         {

@@ -47,22 +47,31 @@ pub async fn handle_loading_start_message(
     debug!("Processing loading_start command");
 
     // Snapshot the state we need, then drop the read lock immediately.
-    let (audio_enabled, livekit_client) = {
+    let (audio_enabled, livekit_client, loading_audio_error) = {
         let state_guard = state.read().await;
         (
             state_guard.is_audio_enabled(),
             state_guard.livekit_client.clone(),
+            state_guard.loading_audio_error.clone(),
         )
     };
 
     // Audio must be enabled. This also covers the "no config received yet" case,
-    // since audio defaults to disabled.
+    // since audio defaults to disabled until a config message sets it.
     if !audio_enabled {
         send_error(
             message_tx,
             "Loading indicator requires audio to be enabled. Send a config message with audio=true first.",
         )
         .await;
+        return true;
+    }
+
+    // The `loading_audio` supplied in the config message failed to decode.
+    // The reason was already reported once at config time; report it again
+    // clearly here rather than a generic "not available".
+    if let Some(reason) = loading_audio_error {
+        send_error(message_tx, reason).await;
         return true;
     }
 
@@ -82,13 +91,24 @@ pub async fn handle_loading_start_message(
     // `start_loading_audio` takes `&self`, so a read lock is sufficient.
     let client_guard = livekit_client.read().await;
     if let Err(e) = client_guard.start_loading_audio().await {
-        let message = match e {
-            AppError::BadRequest(m)
-            | AppError::InternalServerError(m)
+        // Surface the inner message verbatim: `start_loading_audio` already
+        // produces end-user-facing strings, so the `AppError` `Display` prefix
+        // ("Bad request: ", etc.) would only add noise for the client.
+        //
+        // A `BadRequest` (no clip configured, or the track failed to publish)
+        // is a normal client-side condition, not a server fault — log it
+        // quietly; only genuine server faults warrant `error!`.
+        let (message, is_client_error) = match e {
+            AppError::BadRequest(m) => (m, true),
+            AppError::InternalServerError(m)
             | AppError::NotFound(m)
-            | AppError::Unauthorized(m) => m,
+            | AppError::Unauthorized(m) => (m, false),
         };
-        error!("Failed to start loading-indicator audio: {}", message);
+        if is_client_error {
+            debug!("loading_start rejected: {message}");
+        } else {
+            error!("Failed to start loading-indicator audio: {message}");
+        }
         send_error(message_tx, message).await;
     } else {
         debug!("Loading-indicator audio started");
@@ -135,6 +155,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_loading_start_message_rejects_when_audio_disabled() {
+        // A fresh ConnectionState has audio disabled, which is also the state
+        // before any config message — so this covers both the no-config-yet
+        // case and a config received with audio=false.
         let state = Arc::new(RwLock::new(ConnectionState::new()));
         let (message_tx, mut message_rx) = mpsc::channel(4);
 
@@ -147,6 +170,30 @@ mod tests {
             }
             Some(_) => panic!("expected audio-disabled error"),
             None => panic!("expected audio-disabled error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_loading_start_message_reports_decode_error() {
+        // loading_audio was supplied in the config message but failed to
+        // decode. loading_start must replay the original decode reason, not a
+        // generic "not available" message.
+        let mut state_inner = ConnectionState::new();
+        state_inner.set_audio_enabled(true);
+        state_inner.loading_audio_error =
+            Some("loading_audio.data is not valid base64".to_string());
+        let state = Arc::new(RwLock::new(state_inner));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing = handle_loading_start_message(&state, &message_tx).await;
+
+        assert!(continue_processing);
+        match message_rx.recv().await {
+            Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
+                assert_eq!(message, "loading_audio.data is not valid base64");
+            }
+            Some(_) => panic!("expected the original decode-failure error"),
+            None => panic!("expected the original decode-failure error"),
         }
     }
 
@@ -168,6 +215,48 @@ mod tests {
             }
             Some(_) => panic!("expected missing-LiveKit error"),
             None => panic!("expected missing-LiveKit error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_loading_start_message_forwards_missing_clip_error() {
+        // Handler-level missing-clip case: audio is enabled and a connected
+        // LiveKit client is present, but no loading clip was configured. The
+        // handler must forward `start_loading_audio`'s specific BadRequest
+        // message verbatim rather than swallow it or send a generic error.
+        use crate::livekit::{LiveKitClient, LiveKitConfig};
+
+        let client = LiveKitClient::new(LiveKitConfig {
+            url: "wss://test-server.com".to_string(),
+            token: "mock-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            publish_audio: true,
+            subscribe_audio: true,
+            sample_rate: 24_000,
+            channels: 1,
+            enable_noise_filter: false,
+            listen_participants: vec![],
+        });
+        client.set_connected(true).await;
+
+        let mut state_inner = ConnectionState::new();
+        state_inner.set_audio_enabled(true);
+        state_inner.livekit_client = Some(Arc::new(RwLock::new(client)));
+        let state = Arc::new(RwLock::new(state_inner));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing = handle_loading_start_message(&state, &message_tx).await;
+
+        assert!(continue_processing);
+        match message_rx.recv().await {
+            Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
+                assert!(
+                    message.contains("no loading audio was configured"),
+                    "unexpected error message: {message}"
+                );
+            }
+            Some(_) => panic!("expected the missing-clip BadRequest forwarded verbatim"),
+            None => panic!("expected the missing-clip BadRequest forwarded verbatim"),
         }
     }
 

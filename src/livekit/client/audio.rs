@@ -606,25 +606,37 @@ impl LiveKitClient {
 
                         info!("Successfully reconnected and re-published audio track");
 
-                        // Stop any in-progress loading-audio loop: its audio source died with the
-                        // pre-reconnect room. A buffered `NativeAudioSource` keeps accepting frames
-                        // even after its room is gone, so the loop cannot detect the reconnect on
-                        // its own — cancel and abort it here. Clearing `loading_loop` lets a later
-                        // `loading_start` spawn a fresh loop on the re-published track; the client
-                        // must re-send `loading_start` to resume the loading sound.
-                        if let Some(loading) = ctx.loading_loop.lock().await.take() {
-                            loading.token.cancel();
-                            loading.handle.abort();
+                        // Tear down any in-progress loading-audio loop and clear the now-dead
+                        // loading source as one step under the `loading_loop` guard. Both this
+                        // teardown and `start_loading_audio` mutate/read `loading_audio_source`
+                        // while holding `loading_loop`, so a `loading_start` racing this reconnect
+                        // can never bind a fresh loop to the stale pre-reconnect source: it either
+                        // runs before this teardown (its loop is aborted here) or after it (it then
+                        // reads the cleared — or freshly re-published — source). Lock order is
+                        // always `loading_loop` then `loading_audio_source`.
+                        //
+                        // A buffered `NativeAudioSource` keeps accepting frames even after its room
+                        // is gone, so the loop cannot detect the reconnect on its own — hence the
+                        // explicit cancel + abort. The client must re-send `loading_start` to
+                        // resume the loading sound after a reconnect.
+                        {
+                            let mut loading_loop_guard = ctx.loading_loop.lock().await;
+                            if let Some(loading) = loading_loop_guard.take() {
+                                loading.token.cancel();
+                                loading.handle.abort();
+                            }
+                            *ctx.loading_audio_source.lock().await = None;
+                            *ctx.loading_track_publication.lock().await = None;
                         }
 
                         // Re-publish the loading-audio track if a loading clip is configured
                         // (non-fatal). The re-published `LocalAudioTrack` handle is intentionally
                         // dropped here: `OperationContext` carries no `loading_audio_track` field,
                         // and the publication alone keeps the track alive — mirroring how the TTS
-                        // track is re-published above.
+                        // track is re-published above. Storing the rebuilt source needs no
+                        // `loading_loop` guard: until it is stored the source reads `None`, so a
+                        // racing `loading_start` simply gets an "unavailable" error and retries.
                         if let Some(clip) = &ctx.loading_clip {
-                            *ctx.loading_audio_source.lock().await = None;
-                            *ctx.loading_track_publication.lock().await = None;
                             match super::loading_audio::publish_loading_audio_track(
                                 &local_participant,
                                 clip.sample_rate(),

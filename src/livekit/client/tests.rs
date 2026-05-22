@@ -319,13 +319,6 @@ async fn test_livekit_client_operation_priority_ordering() {
     assert!(queue.is_none()); // Queue only exists after connect
 }
 
-/// Builds a base64-encoded raw 16-bit PCM clip long enough to pass the
-/// minimum-duration validation (500 ms of 16 kHz mono audio).
-fn make_loading_clip_base64() -> String {
-    let samples: Vec<i16> = (0..8_000).map(|i| (i % 1000) as i16).collect();
-    crate::livekit::loading_clip::raw_pcm_to_base64(&samples)
-}
-
 #[tokio::test]
 async fn test_livekit_client_loading_fields_default() {
     let config = create_test_config();
@@ -340,9 +333,7 @@ async fn test_livekit_client_loading_fields_default() {
 
 #[tokio::test]
 async fn test_set_loading_audio_clip_stores_clip() {
-    let data = make_loading_clip_base64();
-    let clip = crate::livekit::decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(1), None)
-        .expect("raw PCM loading clip should decode");
+    let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let config = create_test_config();
     let mut client = LiveKitClient::new(config);
@@ -370,9 +361,7 @@ async fn test_setup_loading_audio_track_without_clip_is_noop() {
 
 #[tokio::test]
 async fn test_setup_loading_audio_track_with_clip_requires_room() {
-    let data = make_loading_clip_base64();
-    let clip = crate::livekit::decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(1), None)
-        .expect("raw PCM loading clip should decode");
+    let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let mut client = LiveKitClient::new(create_test_config());
     client.set_loading_audio_clip(clip);
@@ -417,11 +406,43 @@ async fn test_start_loading_audio_connected_without_clip_errors() {
     let client = LiveKitClient::new(config);
     client.set_connected(true).await;
 
-    let result = client.start_loading_audio().await;
-    assert!(
-        result.is_err(),
-        "start_loading_audio should fail without a loading source/clip"
-    );
+    // Connected, but no loading clip was ever configured. The error must name
+    // that specific cause rather than a generic message.
+    let err = client
+        .start_loading_audio()
+        .await
+        .expect_err("start_loading_audio should fail without a loading clip");
+    match err {
+        AppError::BadRequest(msg) => assert!(
+            msg.contains("no loading audio was configured"),
+            "unexpected error message: {msg}"
+        ),
+        other => panic!("expected BadRequest for the missing-clip case, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_start_loading_audio_with_clip_but_no_source_errors() {
+    // A clip is configured but the dedicated loading track never published, so
+    // there is no audio source. start_loading_audio must report that specific
+    // cause, distinct from the missing-clip message.
+    let clip = crate::livekit::loading_clip::make_test_loading_clip();
+
+    let mut client = LiveKitClient::new(create_test_config());
+    client.set_connected(true).await;
+    client.set_loading_audio_clip(clip);
+
+    let err = client
+        .start_loading_audio()
+        .await
+        .expect_err("start_loading_audio should fail with a clip but no published source");
+    match err {
+        AppError::BadRequest(msg) => assert!(
+            msg.contains("failed to publish"),
+            "unexpected error message: {msg}"
+        ),
+        other => panic!("expected BadRequest for the missing-source case, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -439,8 +460,17 @@ async fn test_disconnect_clears_loading_fields() {
     assert!(!client.has_loading_loop().await);
 }
 
+// NOTE: the `livekit_native_*` tests below construct real libwebrtc
+// `NativeAudioSource` objects. libwebrtc's lazily-initialised global runtime is
+// not robust against the heavy thread concurrency of the full unit-test binary
+// and intermittently segfaults when these run alongside the rest of the suite.
+// They are therefore `#[ignore]`d out of the default `cargo test` run and
+// executed isolated (their own process) by a dedicated CI step — see
+// `.github/workflows/ci.yml`. Run locally with:
+//   cargo test --all-features --lib -- --ignored --test-threads=1 livekit_native_
 #[tokio::test]
-async fn test_two_independent_native_audio_sources() {
+#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+async fn livekit_native_two_independent_audio_sources() {
     use livekit::track::LocalAudioTrack;
     use livekit::webrtc::audio_source::native::NativeAudioSource;
     use livekit::webrtc::prelude::{AudioSourceOptions, RtcAudioSource};
@@ -483,9 +513,7 @@ async fn connected_client_with_loading_source() -> LiveKitClient {
     use livekit::webrtc::audio_source::native::NativeAudioSource;
     use livekit::webrtc::prelude::AudioSourceOptions;
 
-    let data = make_loading_clip_base64();
-    let clip = crate::livekit::decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(1), None)
-        .expect("raw PCM loading clip should decode");
+    let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let mut client = LiveKitClient::new(create_test_config());
     client.set_connected(true).await;
@@ -506,7 +534,8 @@ async fn connected_client_with_loading_source() -> LiveKitClient {
 }
 
 #[tokio::test]
-async fn test_start_loading_audio_idempotent_and_disconnect_tears_down() {
+#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+async fn livekit_native_start_idempotent_and_disconnect_teardown() {
     let mut client = connected_client_with_loading_source().await;
 
     // The first start spawns the loop.
@@ -535,7 +564,8 @@ async fn test_start_loading_audio_idempotent_and_disconnect_tears_down() {
 }
 
 #[tokio::test]
-async fn test_rapid_start_stop_loading_audio_is_clean() {
+#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+async fn livekit_native_rapid_start_stop_is_clean() {
     let mut client = connected_client_with_loading_source().await;
 
     // Rapidly alternating start/stop must never panic, and a disconnect
@@ -560,7 +590,8 @@ async fn test_rapid_start_stop_loading_audio_is_clean() {
 }
 
 #[tokio::test]
-async fn test_drop_cancels_active_loading_loop() {
+#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+async fn livekit_native_drop_cancels_active_loop() {
     let client = connected_client_with_loading_source().await;
     client
         .start_loading_audio()

@@ -42,6 +42,18 @@ pub const MAX_LOADING_AUDIO_DECODED_BYTES: usize = (LOADING_AUDIO_SAMPLE_RATE_MA
     * (MAX_LOADING_AUDIO_MS as usize)
     / 1000;
 
+/// Maximum accepted size of the base64-decoded payload, in bytes.
+///
+/// This is [`MAX_LOADING_AUDIO_DECODED_BYTES`] (the worst-case raw PCM size)
+/// plus a fixed allowance for WAV container overhead. A canonical WAV header is
+/// 44 bytes, but real-world files carry extra metadata chunks (`LIST`, `fact`,
+/// …); the allowance keeps a maximum-duration WAV clip from being rejected
+/// purely for its header. The decoded *audio* length is still bounded
+/// authoritatively by the duration check, so the slack cannot admit an
+/// over-long clip — it only stops the wire-payload guard from being stricter
+/// than the audio guard.
+pub const MAX_LOADING_AUDIO_PAYLOAD_BYTES: usize = MAX_LOADING_AUDIO_DECODED_BYTES + 4_096;
+
 /// A decoded, validated, ready-to-play loading audio sample.
 ///
 /// The PCM data in [`LoadingClip::samples`] is flat and interleaved when
@@ -128,10 +140,10 @@ pub fn decode_loading_clip(
     //    encoded characters), so an obviously oversized payload is rejected
     //    before allocating the decoded buffer.
     let estimated_decoded_bytes = data.len() / 4 * 3;
-    if estimated_decoded_bytes > MAX_LOADING_AUDIO_DECODED_BYTES {
+    if estimated_decoded_bytes > MAX_LOADING_AUDIO_PAYLOAD_BYTES {
         return Err(format!(
             "loading_audio.data decoded audio would exceed the maximum size of \
-             {MAX_LOADING_AUDIO_DECODED_BYTES} bytes"
+             {MAX_LOADING_AUDIO_PAYLOAD_BYTES} bytes"
         ));
     }
 
@@ -140,11 +152,14 @@ pub fn decode_loading_clip(
         .decode(data)
         .map_err(|_| "loading_audio.data is not valid base64".to_string())?;
 
-    // 3. Post-decode size guard against the exact decoded length.
-    if bytes.len() > MAX_LOADING_AUDIO_DECODED_BYTES {
+    // 3. Post-decode size guard against the exact decoded payload length. For
+    //    WAV this includes the container header, hence the payload bound
+    //    rather than the raw-PCM bound; the duration check below still bounds
+    //    the audio itself.
+    if bytes.len() > MAX_LOADING_AUDIO_PAYLOAD_BYTES {
         return Err(format!(
             "loading_audio.data decoded audio exceeds the maximum size of \
-             {MAX_LOADING_AUDIO_DECODED_BYTES} bytes"
+             {MAX_LOADING_AUDIO_PAYLOAD_BYTES} bytes"
         ));
     }
 
@@ -295,6 +310,19 @@ pub(crate) fn raw_pcm_to_base64(samples: &[i16]) -> String {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     general_purpose::STANDARD.encode(bytes)
+}
+
+/// Decodes the canonical test loading clip: 500 ms of 16 kHz mono raw PCM,
+/// comfortably above the minimum-duration validation bound.
+///
+/// Test-only helper shared by the loading-audio test suites in this crate so
+/// the `raw_pcm_to_base64` + `decode_loading_clip` idiom is written once.
+#[cfg(test)]
+pub(crate) fn make_test_loading_clip() -> LoadingClip {
+    let samples: Vec<i16> = (0..8_000).map(|i| (i % 1000) as i16).collect();
+    let data = raw_pcm_to_base64(&samples);
+    decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(1), None)
+        .expect("the canonical test loading clip must decode")
 }
 
 #[cfg(test)]
@@ -488,6 +516,23 @@ mod tests {
         let err = decode_loading_clip(&data, Some("pcm"), Some(48_000), Some(1), None)
             .expect_err("oversized input should be rejected");
         assert!(err.contains("maximum size"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_max_duration_wav_is_accepted() {
+        // A maximum-spec WAV — 10 s, 48 kHz, stereo, 16-bit — carries exactly
+        // MAX_LOADING_AUDIO_DECODED_BYTES of PCM *plus* a WAV header. The
+        // payload guard must allow the container overhead so this valid clip is
+        // not rejected purely for its header bytes.
+        let frames = (LOADING_AUDIO_SAMPLE_RATE_MAX * MAX_LOADING_AUDIO_MS / 1000) as usize;
+        let samples: Vec<i16> = vec![0; frames * 2]; // stereo: 2 samples per frame
+        let data = make_wav_base64(LOADING_AUDIO_SAMPLE_RATE_MAX, 2, &samples);
+
+        let clip = decode_loading_clip(&data, None, None, None, None)
+            .expect("a maximum-duration WAV clip must be accepted");
+        assert_eq!(clip.channels(), 2);
+        assert_eq!(clip.sample_rate(), LOADING_AUDIO_SAMPLE_RATE_MAX);
+        assert_eq!(clip.samples().len(), frames * 2);
     }
 
     #[test]
