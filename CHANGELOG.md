@@ -2,12 +2,11 @@
 
 All notable changes to Sayna will be documented in this file.
 
-## [Unreleased]
+## [0.1.16] - 2026-05-25
 
 ### Features
 
-- **websocket:** Add loading indicator audio (`loading_audio` in `config`, `loading_start` / `loading_stop` commands) on a dedicated `"loading-audio"` LiveKit track, independent of TTS
-
+- **ws:** Loading-indicator audio loop on a dedicated LiveKit track  by @tigranbs in [#18](https://github.com/saynaai/sayna/pull/18)
 ## [0.1.15] - 2026-04-30
 
 ### Features
@@ -15,6 +14,8 @@ All notable changes to Sayna will be documented in this file.
 - **recording:** Add Google Cloud Storage backend alongside S3 by @tigranbs
 
 ### Miscellaneous
+
+- Release v0.1.15 by @github-actions[bot]
 
 - Release v0.1.15 by @github-actions[bot]
 
