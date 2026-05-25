@@ -12,11 +12,14 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::{DataPacketKind, Room, RoomEvent};
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
+use livekit::webrtc::prelude::{AudioFrame, RtcAudioSource};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use super::{LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext};
+use super::{
+    LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext,
+    sayna_audio_source_options,
+};
 use crate::AppError;
 
 impl LiveKitClient {
@@ -26,16 +29,10 @@ impl LiveKitClient {
             self.config.sample_rate, self.config.channels
         );
 
-        let audio_source_options = AudioSourceOptions {
-            echo_cancellation: false,
-            noise_suppression: false,
-            auto_gain_control: false,
-        };
-
         let samples_per_frame = (self.config.sample_rate * 10) / 1000;
 
         let audio_source = Arc::new(NativeAudioSource::new(
-            audio_source_options,
+            sayna_audio_source_options(),
             self.config.sample_rate,
             self.config.channels as u32,
             samples_per_frame,
@@ -522,15 +519,9 @@ impl LiveKitClient {
                     }
                 };
 
-                let audio_source_options = AudioSourceOptions {
-                    echo_cancellation: false,
-                    noise_suppression: false,
-                    auto_gain_control: false,
-                };
-
                 let samples_per_frame = (ctx.config.sample_rate * 10) / 1000;
                 let new_audio_source = Arc::new(NativeAudioSource::new(
-                    audio_source_options,
+                    sayna_audio_source_options(),
                     ctx.config.sample_rate,
                     ctx.config.channels as u32,
                     samples_per_frame,

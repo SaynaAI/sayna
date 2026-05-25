@@ -509,27 +509,16 @@ async fn test_disconnect_clears_loading_fields() {
 async fn livekit_native_two_independent_audio_sources() {
     use livekit::track::LocalAudioTrack;
     use livekit::webrtc::audio_source::native::NativeAudioSource;
-    use livekit::webrtc::prelude::{AudioSourceOptions, RtcAudioSource};
-
-    // `AudioSourceOptions` is not `Clone`; construct one per source.
-    let tts_options = AudioSourceOptions {
-        echo_cancellation: false,
-        noise_suppression: false,
-        auto_gain_control: false,
-    };
-    let loading_options = AudioSourceOptions {
-        echo_cancellation: false,
-        noise_suppression: false,
-        auto_gain_control: false,
-    };
+    use livekit::webrtc::prelude::RtcAudioSource;
 
     // TTS-style source at 24 kHz mono.
-    let tts_source = NativeAudioSource::new(tts_options, 24_000, 1, 240);
+    let tts_source = NativeAudioSource::new(super::sayna_audio_source_options(), 24_000, 1, 240);
     let tts_track =
         LocalAudioTrack::create_audio_track("tts-audio", RtcAudioSource::Native(tts_source));
 
     // Loading-style source at a different sample rate, 16 kHz mono.
-    let loading_source = NativeAudioSource::new(loading_options, 16_000, 1, 160);
+    let loading_source =
+        NativeAudioSource::new(super::sayna_audio_source_options(), 16_000, 1, 160);
     let loading_track = LocalAudioTrack::create_audio_track(
         "loading-audio",
         RtcAudioSource::Native(loading_source),
@@ -547,7 +536,6 @@ async fn livekit_native_two_independent_audio_sources() {
 /// which unit tests do not have.
 async fn connected_client_with_loading_source() -> LiveKitClient {
     use livekit::webrtc::audio_source::native::NativeAudioSource;
-    use livekit::webrtc::prelude::AudioSourceOptions;
 
     let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
@@ -556,11 +544,7 @@ async fn connected_client_with_loading_source() -> LiveKitClient {
     client.set_loading_audio_clip(clip);
 
     let source = Arc::new(NativeAudioSource::new(
-        AudioSourceOptions {
-            echo_cancellation: false,
-            noise_suppression: false,
-            auto_gain_control: false,
-        },
+        super::sayna_audio_source_options(),
         16_000,
         1,
         super::loading_audio::LOADING_AUDIO_QUEUE_SIZE_MS,

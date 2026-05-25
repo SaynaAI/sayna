@@ -23,6 +23,7 @@ use std::sync::atomic::AtomicBool;
 use livekit::prelude::{LocalTrackPublication, Room, RoomEvent};
 use livekit::track::LocalAudioTrack;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::prelude::AudioSourceOptions;
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
@@ -106,6 +107,27 @@ pub(crate) const RELIABLE_BUFFER_THRESHOLD_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Maximum audio queue size based on duration (2 seconds worth of frames at 100 frames/sec)
 pub(crate) const MAX_AUDIO_QUEUE_SIZE: usize = 200;
+
+/// Canonical `AudioSourceOptions` for every audio source Sayna publishes.
+///
+/// Every flag is `false` because Sayna feeds already-mastered PCM into LiveKit
+/// — the server's job is to deliver bytes faithfully, not to re-process them:
+/// * `echo_cancellation` is a capture-side feature for microphone input and
+///   would only distort a synthesized output stream.
+/// * `noise_suppression` would re-filter audio that the TTS engine (or the
+///   client-supplied loading clip) already produced clean.
+/// * `auto_gain_control` is **load-bearing** for the loading-audio track: the
+///   loading clip's loudness is set by scaling its samples at decode time
+///   (`volume` config field), and AGC would re-normalise that loudness and
+///   silently undo the attenuation. It is equally undesirable on the TTS
+///   track, whose levels are set by the TTS provider.
+pub(crate) fn sayna_audio_source_options() -> AudioSourceOptions {
+    AudioSourceOptions {
+        echo_cancellation: false,
+        noise_suppression: false,
+        auto_gain_control: false,
+    }
+}
 
 /// LiveKit client for handling audio streaming and publishing.
 ///

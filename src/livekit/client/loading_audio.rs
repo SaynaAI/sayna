@@ -19,12 +19,12 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::LocalTrackPublication;
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
+use livekit::webrtc::prelude::{AudioFrame, RtcAudioSource};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::LiveKitClient;
+use super::{LiveKitClient, sayna_audio_source_options};
 use crate::AppError;
 use crate::livekit::loading_clip::LoadingClip;
 
@@ -155,17 +155,8 @@ pub(super) async fn publish_loading_audio_track(
     ),
     AppError,
 > {
-    // `auto_gain_control: false` is load-bearing for the `volume` feature:
-    // WebRTC AGC would re-normalize loudness and silently undo the configured
-    // volume attenuation already applied to the clip's samples.
-    let audio_source_options = AudioSourceOptions {
-        echo_cancellation: false,
-        noise_suppression: false,
-        auto_gain_control: false,
-    };
-
     let source = Arc::new(NativeAudioSource::new(
-        audio_source_options,
+        sayna_audio_source_options(),
         sample_rate,
         channels as u32,
         LOADING_AUDIO_QUEUE_SIZE_MS,
@@ -600,11 +591,7 @@ mod tests {
         let clip = Arc::new(crate::livekit::loading_clip::make_test_loading_clip());
 
         let source = Arc::new(NativeAudioSource::new(
-            AudioSourceOptions {
-                echo_cancellation: false,
-                noise_suppression: false,
-                auto_gain_control: false,
-            },
+            sayna_audio_source_options(),
             clip.sample_rate(),
             clip.channels() as u32,
             LOADING_AUDIO_QUEUE_SIZE_MS,
@@ -628,4 +615,13 @@ mod tests {
             "run_loading_loop task must not panic"
         );
     }
+
+    // NOTE: integration-level race/stress coverage of `start_loading_audio` /
+    // `stop_loading_audio` / `disconnect` lives in `client/tests.rs`
+    // (`livekit_native_rapid_start_stop_is_clean`,
+    // `livekit_native_start_idempotent_and_disconnect_teardown`,
+    // `livekit_native_loading_loop_cleared_after_stop`,
+    // `livekit_native_drop_cancels_active_loop`). Those use the real public
+    // API; replicating them here against the lower-level `run_loading_loop`
+    // would only duplicate behavioural assertions.
 }

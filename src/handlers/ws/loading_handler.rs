@@ -312,13 +312,9 @@ mod tests {
         state_inner.stream_id = Some("test-stream".to_string());
         state_inner.livekit_client = Some(Arc::new(RwLock::new(client)));
         let state = Arc::new(RwLock::new(state_inner));
-        let (message_tx, mut message_rx): (
-            mpsc::Sender<MessageRoute>,
-            mpsc::Receiver<MessageRoute>,
-        ) = mpsc::channel(4);
+        let (_tx, mut message_rx) = mpsc::channel::<MessageRoute>(4);
 
         let continue_processing = handle_loading_stop_message(&state).await;
-        drop(message_tx);
 
         assert!(continue_processing);
         assert!(
@@ -330,9 +326,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_loading_start_message_success_is_silent() {
         use crate::livekit::loading_clip::make_test_loading_clip;
-        use crate::livekit::{LiveKitClient, LiveKitConfig};
+        use crate::livekit::{LiveKitClient, LiveKitConfig, sayna_audio_source_options};
         use livekit::webrtc::audio_source::native::NativeAudioSource;
-        use livekit::webrtc::prelude::AudioSourceOptions;
 
         let clip = make_test_loading_clip();
         let mut client = LiveKitClient::new(LiveKitConfig {
@@ -350,11 +345,7 @@ mod tests {
         client.set_loading_audio_clip(clip);
 
         let source = Arc::new(NativeAudioSource::new(
-            AudioSourceOptions {
-                echo_cancellation: false,
-                noise_suppression: false,
-                auto_gain_control: false,
-            },
+            sayna_audio_source_options(),
             16_000,
             1,
             100, // NativeAudioSource queue depth in ms (matches LOADING_AUDIO_QUEUE_SIZE_MS)
@@ -389,13 +380,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_loading_stop_message_is_silent_noop() {
         let state = Arc::new(RwLock::new(ConnectionState::new()));
-        let (message_tx, mut message_rx): (
-            mpsc::Sender<MessageRoute>,
-            mpsc::Receiver<MessageRoute>,
-        ) = mpsc::channel(4);
+        let (_tx, mut message_rx) = mpsc::channel::<MessageRoute>(4);
 
         let continue_processing = handle_loading_stop_message(&state).await;
-        drop(message_tx);
 
         assert!(continue_processing);
         assert!(
