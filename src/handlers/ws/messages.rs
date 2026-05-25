@@ -8,8 +8,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, TurnDetectConfigUpdate,
-    VADConfigUpdate, default_allow_interruption, default_audio_enabled,
+    LiveKitWebSocketConfig, LoadingAudioConfig, STTWebSocketConfig, TTSWebSocketConfig,
+    TurnDetectConfigUpdate, VADConfigUpdate, default_allow_interruption, default_audio_enabled,
 };
 
 /// WebSocket message types for incoming messages
@@ -44,6 +44,9 @@ pub enum IncomingMessage {
         /// Optional LiveKit configuration for real-time audio streaming
         #[serde(skip_serializing_if = "Option::is_none")]
         livekit: Option<LiveKitWebSocketConfig>,
+        /// Optional loading-indicator audio configuration.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        loading_audio: Option<LoadingAudioConfig>,
     },
     #[serde(rename = "speak")]
     Speak {
@@ -109,6 +112,12 @@ pub enum IncomingMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_detect: Option<TurnDetectConfigUpdate>,
     },
+    /// Begin looping the configured loading-indicator audio into the LiveKit room.
+    #[serde(rename = "loading_start")]
+    LoadingStart,
+    /// Stop the loading-indicator audio loop (with a short fade-out).
+    #[serde(rename = "loading_stop")]
+    LoadingStop,
 }
 
 /// Unified message structure for all incoming messages from various sources
@@ -469,6 +478,108 @@ mod tests {
         let json = serde_json::to_string(&error).expect("Should serialize");
         assert!(json.contains(r#""type":"sip_transfer_error""#));
         assert!(json.contains(r#""message":"Invalid phone number""#));
+    }
+
+    #[test]
+    fn test_loading_start_message_deserialization() {
+        let json = r#"{"type":"loading_start"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::LoadingStart => {}
+            _ => panic!("Expected LoadingStart variant"),
+        }
+    }
+
+    #[test]
+    fn test_loading_start_message_serialization() {
+        let msg = IncomingMessage::LoadingStart;
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"loading_start""#));
+    }
+
+    #[test]
+    fn test_loading_stop_message_deserialization() {
+        let json = r#"{"type":"loading_stop"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).expect("Should deserialize");
+
+        match msg {
+            IncomingMessage::LoadingStop => {}
+            _ => panic!("Expected LoadingStop variant"),
+        }
+    }
+
+    #[test]
+    fn test_loading_stop_message_serialization() {
+        let msg = IncomingMessage::LoadingStop;
+
+        let json = serde_json::to_string(&msg).expect("Should serialize");
+        assert!(json.contains(r#""type":"loading_stop""#));
+    }
+
+    #[test]
+    fn test_loading_audio_config_round_trip() {
+        let cfg = LoadingAudioConfig {
+            data: "QUJDRA==".to_string(),
+            format: Some("wav".to_string()),
+            sample_rate: Some(16000),
+            channels: Some(1),
+            volume: Some(0.3),
+        };
+
+        let json = serde_json::to_string(&cfg).expect("Should serialize");
+        let parsed: LoadingAudioConfig = serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(parsed.data, "QUJDRA==");
+        assert_eq!(parsed.format, Some("wav".to_string()));
+        assert_eq!(parsed.sample_rate, Some(16000));
+        assert_eq!(parsed.channels, Some(1));
+        assert_eq!(parsed.volume, Some(0.3));
+    }
+
+    #[test]
+    fn test_loading_audio_config_round_trip_minimal() {
+        let cfg = LoadingAudioConfig {
+            data: "QUJDRA==".to_string(),
+            format: None,
+            sample_rate: None,
+            channels: None,
+            volume: None,
+        };
+
+        let json = serde_json::to_string(&cfg).expect("Should serialize");
+        // Optional fields are omitted when None.
+        assert!(!json.contains("format"));
+        assert!(!json.contains("sample_rate"));
+        assert!(!json.contains("channels"));
+        assert!(!json.contains("volume"));
+
+        let parsed: LoadingAudioConfig = serde_json::from_str(&json).expect("Should deserialize");
+        assert_eq!(parsed.data, "QUJDRA==");
+        assert!(parsed.format.is_none());
+        assert!(parsed.sample_rate.is_none());
+        assert!(parsed.channels.is_none());
+        assert!(parsed.volume.is_none());
+    }
+
+    #[test]
+    fn test_loading_audio_config_debug_redacts_data() {
+        let cfg = LoadingAudioConfig {
+            data: "SECRET_BASE64_PAYLOAD_VALUE".to_string(),
+            format: Some("pcm".to_string()),
+            sample_rate: Some(16000),
+            channels: Some(1),
+            volume: Some(1.0),
+        };
+
+        let debug = format!("{cfg:?}");
+        // The redacting Debug reports the length, never the raw data.
+        assert!(debug.contains("base64 chars"));
+        assert!(
+            !debug.contains("SECRET_BASE64_PAYLOAD_VALUE"),
+            "Debug output must not leak the raw base64 data"
+        );
     }
 
     #[test]

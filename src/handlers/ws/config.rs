@@ -241,6 +241,42 @@ impl TTSWebSocketConfig {
     }
 }
 
+/// Loading-indicator audio configuration supplied in the `config` message.
+#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LoadingAudioConfig {
+    /// Base64-encoded audio bytes — a complete WAV file or raw 16-bit PCM.
+    pub data: String,
+    /// Audio format: "wav" or "pcm". If omitted, the server auto-detects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "wav"))]
+    pub format: Option<String>,
+    /// Sample rate in Hz. Required for raw PCM; ignored for WAV (header is authoritative).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 16000))]
+    pub sample_rate: Option<u32>,
+    /// Channel count for raw PCM (1 = mono, 2 = stereo); defaults to 1. Ignored for WAV.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 1))]
+    pub channels: Option<u16>,
+    /// Playback volume from 0.0 (silent) to 1.0 (authored level). Default 1.0; out-of-range clamped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 0.3))]
+    pub volume: Option<f32>,
+}
+
+impl std::fmt::Debug for LoadingAudioConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadingAudioConfig")
+            .field("data", &format_args!("<{} base64 chars>", self.data.len()))
+            .field("format", &self.format)
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .field("volume", &self.volume)
+            .finish()
+    }
+}
+
 /// Compute TTS configuration hash for caching.
 ///
 /// Includes a stable auth fingerprint so session-scoped credentials do not share

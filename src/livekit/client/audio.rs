@@ -12,11 +12,14 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::{DataPacketKind, Room, RoomEvent};
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
+use livekit::webrtc::prelude::{AudioFrame, RtcAudioSource};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use super::{LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext};
+use super::{
+    LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext,
+    sayna_audio_source_options,
+};
 use crate::AppError;
 
 impl LiveKitClient {
@@ -26,16 +29,10 @@ impl LiveKitClient {
             self.config.sample_rate, self.config.channels
         );
 
-        let audio_source_options = AudioSourceOptions {
-            echo_cancellation: false,
-            noise_suppression: false,
-            auto_gain_control: false,
-        };
-
         let samples_per_frame = (self.config.sample_rate * 10) / 1000;
 
         let audio_source = Arc::new(NativeAudioSource::new(
-            audio_source_options,
+            sayna_audio_source_options(),
             self.config.sample_rate,
             self.config.channels as u32,
             samples_per_frame,
@@ -522,15 +519,9 @@ impl LiveKitClient {
                     }
                 };
 
-                let audio_source_options = AudioSourceOptions {
-                    echo_cancellation: false,
-                    noise_suppression: false,
-                    auto_gain_control: false,
-                };
-
                 let samples_per_frame = (ctx.config.sample_rate * 10) / 1000;
                 let new_audio_source = Arc::new(NativeAudioSource::new(
-                    audio_source_options,
+                    sayna_audio_source_options(),
                     ctx.config.sample_rate,
                     ctx.config.channels as u32,
                     samples_per_frame,
@@ -605,6 +596,55 @@ impl LiveKitClient {
                         active_streams_clone.lock().await.push(handle);
 
                         info!("Successfully reconnected and re-published audio track");
+
+                        // Tear down any in-progress loading-audio loop and clear the now-dead
+                        // loading source as one step under the `loading_loop` guard. Both this
+                        // teardown and `start_loading_audio` mutate/read `loading_audio_source`
+                        // while holding `loading_loop`, so a `loading_start` racing this reconnect
+                        // can never bind a fresh loop to the stale pre-reconnect source: it either
+                        // runs before this teardown (its loop is aborted here) or after it (it then
+                        // reads the cleared — or freshly re-published — source). Lock order is
+                        // always `loading_loop` then `loading_audio_source`.
+                        //
+                        // A buffered `NativeAudioSource` keeps accepting frames even after its room
+                        // is gone, so the loop cannot detect the reconnect on its own — hence the
+                        // explicit cancel + abort. The client must re-send `loading_start` to
+                        // resume the loading sound after a reconnect.
+                        {
+                            let mut loading_loop_guard = ctx.loading_loop.lock().await;
+                            if let Some(loading) = loading_loop_guard.take() {
+                                loading.token.cancel();
+                                loading.handle.abort();
+                            }
+                            *ctx.loading_audio_source.lock().await = None;
+                            *ctx.loading_track_publication.lock().await = None;
+                        }
+
+                        // Re-publish the loading-audio track if a loading clip is configured
+                        // (non-fatal). The re-published `LocalAudioTrack` handle is intentionally
+                        // dropped here: `OperationContext` carries no `loading_audio_track` field,
+                        // and the publication alone keeps the track alive — mirroring how the TTS
+                        // track is re-published above. Storing the rebuilt source needs no
+                        // `loading_loop` guard: until it is stored the source reads `None`, so a
+                        // racing `loading_start` simply gets an "unavailable" error and retries.
+                        if let Some(clip) = &ctx.loading_clip {
+                            match super::loading_audio::publish_loading_audio_track(
+                                &local_participant,
+                                clip.sample_rate(),
+                                clip.channels(),
+                            )
+                            .await
+                            {
+                                Ok((source, _track, publication)) => {
+                                    *ctx.loading_audio_source.lock().await = Some(source);
+                                    *ctx.loading_track_publication.lock().await = Some(publication);
+                                    info!("Re-published loading audio track after reconnect");
+                                }
+                                Err(e) => warn!(
+                                    "Failed to re-publish loading audio track after reconnect (non-fatal): {e:?}"
+                                ),
+                            }
+                        }
 
                         // Return room_events for event handler restart and success flag
                         Ok((Some(room_events), true))

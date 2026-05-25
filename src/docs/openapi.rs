@@ -22,7 +22,9 @@ use crate::handlers::{
     speak::SpeakRequest,
     voices::Voice,
     ws::{
-        config::{LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig},
+        config::{
+            LiveKitWebSocketConfig, LoadingAudioConfig, STTWebSocketConfig, TTSWebSocketConfig,
+        },
         messages::{
             IncomingMessage, OutgoingMessage, ParticipantConnectedInfo,
             ParticipantDisconnectedInfo, TrackSubscribedInfo, UnifiedMessage,
@@ -106,6 +108,7 @@ use crate::handlers::{
         STTWebSocketConfig,
         TTSWebSocketConfig,
         LiveKitWebSocketConfig,
+        LoadingAudioConfig,
         Pronunciation,
     )),
     modifiers(&SecurityAddon),

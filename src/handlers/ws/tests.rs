@@ -3,7 +3,8 @@ use bytes::Bytes;
 use serde_json::json;
 
 use super::config::{
-    LiveKitWebSocketConfig, STTWebSocketConfig, TTSWebSocketConfig, compute_tts_config_hash,
+    LiveKitWebSocketConfig, LoadingAudioConfig, STTWebSocketConfig, TTSWebSocketConfig,
+    compute_tts_config_hash,
 };
 use super::messages::{
     IncomingMessage, MessageRoute, OutgoingMessage, ParticipantDisconnectedInfo, UnifiedMessage,
@@ -100,6 +101,7 @@ fn test_incoming_message_serialization() {
             auth: None,
         }),
         livekit: None,
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -865,6 +867,7 @@ fn test_incoming_message_config_with_livekit() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -901,6 +904,7 @@ fn test_incoming_message_config_without_livekit() {
             auth: None,
         }),
         livekit: None,
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1201,6 +1205,7 @@ fn test_config_message_without_livekit_routing() {
             auth: None,
         }),
         livekit: None, // No LiveKit configuration
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1254,6 +1259,7 @@ fn test_config_message_with_livekit_routing() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1441,6 +1447,7 @@ fn test_config_message_audio_disabled() {
             sayna_participant_name: None,
             listen_participants: vec![],
         }),
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1501,6 +1508,7 @@ fn test_config_message_audio_default() {
             auth: None,
         }),
         livekit: None,
+        loading_audio: None,
     };
 
     let json = serde_json::to_string(&config_msg).unwrap();
@@ -1573,4 +1581,135 @@ fn test_unified_message_for_livekit_integration() {
     assert!(json_binary.contains("\"data\":"));
     // Should not contain message field for binary data
     assert!(!json_binary.contains("\"message\":null"));
+}
+
+#[test]
+fn test_parse_config_message_with_loading_audio() {
+    let json = r#"{
+            "type": "config",
+            "stt_config": {
+                "provider": "deepgram",
+                "language": "en-US",
+                "sample_rate": 16000,
+                "channels": 1,
+                "punctuation": true,
+                "encoding": "linear16",
+                "model": "nova-3"
+            },
+            "tts_config": {
+                "provider": "deepgram",
+                "voice_id": "aura-luna-en",
+                "speaking_rate": 1.0,
+                "audio_format": "pcm",
+                "sample_rate": 22050,
+                "connection_timeout": 30,
+                "request_timeout": 60,
+                "model": ""
+            },
+            "loading_audio": {
+                "data": "QUJDRA==",
+                "format": "wav",
+                "sample_rate": 16000,
+                "channels": 1,
+                "volume": 0.3
+            }
+        }"#;
+
+    let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
+    if let IncomingMessage::Config { loading_audio, .. } = parsed {
+        let loading_audio = loading_audio.expect("loading_audio should be populated");
+        assert_eq!(loading_audio.data, "QUJDRA==");
+        assert_eq!(loading_audio.format, Some("wav".to_string()));
+        assert_eq!(loading_audio.sample_rate, Some(16000));
+    } else {
+        panic!("Expected Config message");
+    }
+}
+
+#[test]
+fn test_parse_config_message_without_loading_audio() {
+    // Existing clients omit loading_audio entirely; it must default to None.
+    let json = r#"{
+            "type": "config",
+            "stt_config": {
+                "provider": "deepgram",
+                "language": "en-US",
+                "sample_rate": 16000,
+                "channels": 1,
+                "punctuation": true,
+                "encoding": "linear16",
+                "model": "nova-3"
+            },
+            "tts_config": {
+                "provider": "deepgram",
+                "voice_id": "aura-luna-en",
+                "speaking_rate": 1.0,
+                "audio_format": "pcm",
+                "sample_rate": 22050,
+                "connection_timeout": 30,
+                "request_timeout": 60,
+                "model": ""
+            }
+        }"#;
+
+    let parsed: IncomingMessage = serde_json::from_str(json).unwrap();
+    if let IncomingMessage::Config { loading_audio, .. } = parsed {
+        assert!(
+            loading_audio.is_none(),
+            "loading_audio should be None when not provided"
+        );
+    } else {
+        panic!("Expected Config message");
+    }
+}
+
+#[test]
+fn test_config_message_loading_audio_round_trip() {
+    let config_msg = IncomingMessage::Config {
+        stream_id: None,
+        audio: Some(true),
+        stt_config: Some(STTWebSocketConfig {
+            provider: "deepgram".to_string(),
+            language: "en-US".to_string(),
+            sample_rate: 16000,
+            channels: 1,
+            punctuation: true,
+            encoding: "linear16".to_string(),
+            model: "nova-3".to_string(),
+            auth: None,
+        }),
+        tts_config: Some(TTSWebSocketConfig {
+            provider: "deepgram".to_string(),
+            voice_id: Some("aura-luna-en".to_string()),
+            speaking_rate: Some(1.0),
+            audio_format: Some("pcm".to_string()),
+            sample_rate: Some(22050),
+            connection_timeout: Some(30),
+            request_timeout: Some(60),
+            model: "".to_string(),
+            pronunciations: Vec::new(),
+            auth: None,
+        }),
+        livekit: None,
+        loading_audio: Some(LoadingAudioConfig {
+            data: "QUJDRA==".to_string(),
+            format: Some("pcm".to_string()),
+            sample_rate: Some(16000),
+            channels: Some(1),
+            volume: Some(0.5),
+        }),
+    };
+
+    let json = serde_json::to_string(&config_msg).unwrap();
+    let parsed: IncomingMessage = serde_json::from_str(&json).unwrap();
+    if let IncomingMessage::Config { loading_audio, .. } = parsed {
+        let loading_audio = loading_audio.expect("loading_audio should survive round-trip");
+        assert_eq!(loading_audio.data, "QUJDRA==");
+        assert_eq!(loading_audio.format, Some("pcm".to_string()));
+        assert_eq!(loading_audio.sample_rate, Some(16000));
+        assert_eq!(loading_audio.channels, Some(1));
+        assert_eq!(loading_audio.volume, Some(0.5));
+    } else {
+        panic!("Expected Config message");
+    }
 }

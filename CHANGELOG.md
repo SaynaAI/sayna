@@ -2,6 +2,12 @@
 
 All notable changes to Sayna will be documented in this file.
 
+## [Unreleased]
+
+### Features
+
+- **websocket:** Add loading indicator audio (`loading_audio` in `config`, `loading_start` / `loading_stop` commands) on a dedicated `"loading-audio"` LiveKit track, independent of TTS
+
 ## [0.1.15] - 2026-04-30
 
 ### Features

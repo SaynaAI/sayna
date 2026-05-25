@@ -9,6 +9,7 @@ mod audio;
 mod callbacks;
 mod connection;
 mod events;
+mod loading_audio;
 mod messaging;
 mod operation_worker;
 
@@ -22,11 +23,13 @@ use std::sync::atomic::AtomicBool;
 use livekit::prelude::{LocalTrackPublication, Room, RoomEvent};
 use livekit::track::LocalAudioTrack;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::prelude::AudioSourceOptions;
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
 pub(crate) use super::operations::{LiveKitOperation, OperationQueue, QueueStats};
 pub(crate) use super::types::LiveKitConfig;
+use crate::livekit::loading_clip::LoadingClip;
 
 /// Callback type for handling incoming audio chunks.
 pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -105,6 +108,27 @@ pub(crate) const RELIABLE_BUFFER_THRESHOLD_BYTES: u64 = 200 * 1024 * 1024;
 /// Maximum audio queue size based on duration (2 seconds worth of frames at 100 frames/sec)
 pub(crate) const MAX_AUDIO_QUEUE_SIZE: usize = 200;
 
+/// Canonical `AudioSourceOptions` for every audio source Sayna publishes.
+///
+/// Every flag is `false` because Sayna feeds already-mastered PCM into LiveKit
+/// — the server's job is to deliver bytes faithfully, not to re-process them:
+/// * `echo_cancellation` is a capture-side feature for microphone input and
+///   would only distort a synthesized output stream.
+/// * `noise_suppression` would re-filter audio that the TTS engine (or the
+///   client-supplied loading clip) already produced clean.
+/// * `auto_gain_control` is **load-bearing** for the loading-audio track: the
+///   loading clip's loudness is set by scaling its samples at decode time
+///   (`volume` config field), and AGC would re-normalise that loudness and
+///   silently undo the attenuation. It is equally undesirable on the TTS
+///   track, whose levels are set by the TTS provider.
+pub(crate) fn sayna_audio_source_options() -> AudioSourceOptions {
+    AudioSourceOptions {
+        echo_cancellation: false,
+        noise_suppression: false,
+        auto_gain_control: false,
+    }
+}
+
 /// LiveKit client for handling audio streaming and publishing.
 ///
 /// Optimized for low latency with queue-based operations to eliminate lock contention.
@@ -125,6 +149,22 @@ pub struct LiveKitClient {
     pub(crate) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     pub(crate) local_audio_track: Option<LocalAudioTrack>,
     pub(crate) local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    /// Decoded loading-indicator clip; `None` when the feature is unused.
+    pub(crate) loading_clip: Option<Arc<LoadingClip>>,
+    /// Dedicated audio source feeding the "loading-audio" track.
+    pub(crate) loading_audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+    /// Handle keeping the "loading-audio" track published.
+    pub(crate) loading_audio_track: Option<LocalAudioTrack>,
+    /// Publication of the dedicated "loading-audio" track.
+    pub(crate) loading_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    /// Running loading-audio loop handle and its cancellation token, if active.
+    ///
+    /// Wrapped in `Arc` so the operation worker's `OperationContext` can hold a
+    /// clone and cancel the loop from `process_reconnect` (the running loop's
+    /// audio source dies with the pre-reconnect room). Visibility is
+    /// `pub(super)` because [`loading_audio::LoadingLoopHandle`] is an internal
+    /// type only used within the `client` submodule.
+    pub(super) loading_loop: Arc<Mutex<Option<loading_audio::LoadingLoopHandle>>>,
     pub(crate) _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     pub(crate) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub(crate) operation_queue: Option<OperationQueue>,
@@ -185,6 +225,11 @@ impl LiveKitClient {
             audio_source: Arc::new(Mutex::new(None)),
             local_audio_track: None,
             local_track_publication: Arc::new(Mutex::new(None)),
+            loading_clip: None,
+            loading_audio_source: Arc::new(Mutex::new(None)),
+            loading_audio_track: None,
+            loading_track_publication: Arc::new(Mutex::new(None)),
+            loading_loop: Arc::new(Mutex::new(None)),
             _audio_buffer_pool: Arc::new(Mutex::new(
                 (0..4)
                     .map(|_| Vec::with_capacity(buffer_capacity))
@@ -234,12 +279,58 @@ impl LiveKitClient {
     pub(crate) fn has_room_events(&self) -> bool {
         self.room_events.is_some()
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_loading_clip(&self) -> bool {
+        self.loading_clip.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_audio_source(&self) -> bool {
+        self.loading_audio_source.lock().await.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_loading_audio_track(&self) -> bool {
+        self.loading_audio_track.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_track_publication(&self) -> bool {
+        self.loading_track_publication.lock().await.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_loading_loop(&self) -> bool {
+        self.loading_loop
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|existing| !existing.handle.is_finished())
+    }
 }
 
 impl Drop for LiveKitClient {
     fn drop(&mut self) {
         if self.operation_worker_handle.is_some() {
             warn!("LiveKitClient dropped without explicit disconnect call");
+        }
+
+        // Best-effort backstop for the loading-audio loop. `disconnect` is the
+        // normal teardown path, but session cleanup may skip it if the LiveKit
+        // write lock cannot be acquired in time. A buffered `NativeAudioSource`
+        // keeps accepting frames even after the room is gone, so the loop would
+        // never observe a `capture_frame` error and never self-terminate.
+        // Cancelling the token and aborting the task here reaps the loop on the
+        // common drop paths. `try_lock` is used because `Drop` cannot block; if
+        // it loses a momentary race for the `loading_loop` lock, the loop is
+        // left for that lock holder's own teardown (`disconnect` / reconnect) to
+        // reap.
+        if let Ok(mut guard) = self.loading_loop.try_lock()
+            && let Some(loading) = guard.take()
+        {
+            loading.token.cancel();
+            loading.handle.abort();
         }
     }
 }

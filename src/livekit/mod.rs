@@ -69,6 +69,7 @@
 //! - Supporting the WebSocket API abstraction layer
 
 mod client;
+pub mod loading_clip;
 mod manager;
 pub mod metadata;
 pub mod operations;
@@ -77,7 +78,10 @@ pub mod sip_handler;
 mod types;
 
 // Re-export public types and traits
+#[cfg(test)]
+pub(crate) use client::sayna_audio_source_options;
 pub use client::{AudioCallback, DataCallback, DataMessage, LiveKitClient};
+pub use loading_clip::{LoadingClip, decode_loading_clip};
 pub use manager::LiveKitManager;
 pub use operations::{LiveKitOperation, OperationQueue};
 pub use room_handler::LiveKitRoomHandler;

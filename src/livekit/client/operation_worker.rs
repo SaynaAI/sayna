@@ -12,11 +12,13 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use super::loading_audio::LoadingLoopHandle;
 use super::{
     AudioCallback, DataCallback, LiveKitClient, LiveKitConfig, LiveKitOperation, OperationQueue,
     ParticipantConnectCallback, ParticipantDisconnectCallback, TrackSubscribedCallback,
 };
 use crate::AppError;
+use crate::livekit::loading_clip::LoadingClip;
 
 /// Context struct for process_operation to avoid too many arguments
 pub(super) struct OperationContext {
@@ -35,6 +37,20 @@ pub(super) struct OperationContext {
     pub(super) track_subscribed_callback: Option<TrackSubscribedCallback>,
     /// Generation counter - audio operations with lower generation are skipped
     pub(super) audio_generation: Arc<AtomicU64>,
+    // The following loading-audio fields are read by `process_reconnect` to
+    // rebuild the dedicated "loading-audio" track after a reconnect, and to
+    // cancel a loop left running on the now-dead pre-reconnect source. They do
+    // NOT entangle the loading loop with TTS queue/generation state — the
+    // loading loop's isolation invariant still holds.
+    /// Decoded loading-indicator clip; `None` when the feature is unused.
+    pub(super) loading_clip: Option<Arc<LoadingClip>>,
+    /// Dedicated audio source feeding the "loading-audio" track.
+    pub(super) loading_audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+    /// Publication of the dedicated "loading-audio" track.
+    pub(super) loading_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
+    /// Running loading-audio loop, so `process_reconnect` can cancel a loop
+    /// whose audio source died with the pre-reconnect room.
+    pub(super) loading_loop: Arc<Mutex<Option<LoadingLoopHandle>>>,
 }
 
 impl LiveKitClient {
@@ -57,6 +73,10 @@ impl LiveKitClient {
             participant_connect_callback: self.participant_connect_callback.clone(),
             track_subscribed_callback: self.track_subscribed_callback.clone(),
             audio_generation,
+            loading_clip: self.loading_clip.clone(),
+            loading_audio_source: Arc::clone(&self.loading_audio_source),
+            loading_track_publication: Arc::clone(&self.loading_track_publication),
+            loading_loop: Arc::clone(&self.loading_loop),
         };
         let stats = Arc::clone(&self.stats);
 

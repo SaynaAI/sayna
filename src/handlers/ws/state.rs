@@ -36,6 +36,11 @@ pub struct ConnectionState {
     pub livekit_local_identity: Option<String>,
     /// Recording egress ID for cleanup operations
     pub recording_egress_id: Option<String>,
+    /// Loading-indicator audio decode failure, if the `loading_audio` supplied
+    /// in the `config` message failed to decode. Retained so a later
+    /// `loading_start` can report the original reason instead of a generic
+    /// "not available" message.
+    pub loading_audio_error: Option<String>,
     /// Auth context for this connection (used for room metadata auth_id guard)
     pub auth: Auth,
 }
@@ -57,6 +62,7 @@ impl ConnectionState {
             livekit_room_name: None,
             livekit_local_identity: None,
             recording_egress_id: None,
+            loading_audio_error: None,
             auth: Auth::empty(),
         }
     }
@@ -72,6 +78,7 @@ impl ConnectionState {
             livekit_room_name: None,
             livekit_local_identity: None,
             recording_egress_id: None,
+            loading_audio_error: None,
             auth,
         }
     }
