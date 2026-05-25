@@ -11,3 +11,6 @@ libonnxruntime.so
 onnxruntime/
 dist/
 .mcgravity/
+
+# Local planning doc for loading-indicator feature (not part of the product tree)
+loading-indicator.md

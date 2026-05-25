@@ -107,11 +107,14 @@ pub async fn handle_config_message(
         return true;
     }
 
-    // Store audio_enabled flag in connection state
+    // Store audio_enabled flag in connection state. Reset any prior
+    // loading-audio decode error so the field reflects only this config and a
+    // later `loading_start` cannot replay a stale failure.
     {
         let mut state_guard = state.write().await;
         state_guard.set_audio_enabled(audio_enabled);
         state_guard.stream_id = Some(stream_id.clone());
+        state_guard.loading_audio_error = None;
     }
     debug!(stream_id = %stream_id, "Stored stream_id in connection state");
 

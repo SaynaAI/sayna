@@ -47,21 +47,29 @@ pub async fn handle_loading_start_message(
     debug!("Processing loading_start command");
 
     // Snapshot the state we need, then drop the read lock immediately.
-    let (audio_enabled, livekit_client, loading_audio_error) = {
+    let (stream_id, audio_enabled, livekit_client, loading_audio_error) = {
         let state_guard = state.read().await;
         (
+            state_guard.stream_id.clone(),
             state_guard.is_audio_enabled(),
             state_guard.livekit_client.clone(),
             state_guard.loading_audio_error.clone(),
         )
     };
 
-    // Audio must be enabled. This also covers the "no config received yet" case,
-    // since audio defaults to disabled until a config message sets it.
+    if stream_id.is_none() {
+        send_error(
+            message_tx,
+            "Send a config message first before using loading_start.",
+        )
+        .await;
+        return true;
+    }
+
     if !audio_enabled {
         send_error(
             message_tx,
-            "Loading indicator requires audio to be enabled. Send a config message with audio=true first.",
+            "Loading indicator requires audio to be enabled. Send a config message with audio=true.",
         )
         .await;
         return true;
@@ -155,10 +163,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_loading_start_message_rejects_when_audio_disabled() {
-        // A fresh ConnectionState has audio disabled, which is also the state
-        // before any config message — so this covers both the no-config-yet
-        // case and a config received with audio=false.
-        let state = Arc::new(RwLock::new(ConnectionState::new()));
+        let mut state_inner = ConnectionState::new();
+        state_inner.stream_id = Some("test-stream".to_string());
+        let state = Arc::new(RwLock::new(state_inner));
         let (message_tx, mut message_rx) = mpsc::channel(4);
 
         let continue_processing = handle_loading_start_message(&state, &message_tx).await;
@@ -179,6 +186,7 @@ mod tests {
         // decode. loading_start must replay the original decode reason, not a
         // generic "not available" message.
         let mut state_inner = ConnectionState::new();
+        state_inner.stream_id = Some("test-stream".to_string());
         state_inner.set_audio_enabled(true);
         state_inner.loading_audio_error =
             Some("loading_audio.data is not valid base64".to_string());
@@ -201,7 +209,8 @@ mod tests {
     async fn test_handle_loading_start_message_rejects_when_no_livekit() {
         let state = Arc::new(RwLock::new(ConnectionState::new()));
         {
-            let state_guard = state.write().await;
+            let mut state_guard = state.write().await;
+            state_guard.stream_id = Some("test-stream".to_string());
             state_guard.set_audio_enabled(true);
         }
         let (message_tx, mut message_rx) = mpsc::channel(4);
@@ -240,6 +249,7 @@ mod tests {
         client.set_connected(true).await;
 
         let mut state_inner = ConnectionState::new();
+        state_inner.stream_id = Some("test-stream".to_string());
         state_inner.set_audio_enabled(true);
         state_inner.livekit_client = Some(Arc::new(RwLock::new(client)));
         let state = Arc::new(RwLock::new(state_inner));
@@ -251,12 +261,128 @@ mod tests {
         match message_rx.recv().await {
             Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
                 assert!(
-                    message.contains("no loading audio was configured"),
+                    message.contains("no loading audio configured"),
                     "unexpected error message: {message}"
                 );
             }
             Some(_) => panic!("expected the missing-clip BadRequest forwarded verbatim"),
             None => panic!("expected the missing-clip BadRequest forwarded verbatim"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_loading_start_message_rejects_before_config() {
+        let state = Arc::new(RwLock::new(ConnectionState::new()));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing = handle_loading_start_message(&state, &message_tx).await;
+
+        assert!(continue_processing);
+        match message_rx.recv().await {
+            Some(MessageRoute::Outgoing(OutgoingMessage::Error { message })) => {
+                assert!(
+                    message.contains("config message first"),
+                    "unexpected error: {message}"
+                );
+            }
+            Some(_) => panic!("expected config-first error"),
+            None => panic!("expected config-first error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_loading_stop_message_silent_with_client_no_loop() {
+        use crate::livekit::{LiveKitClient, LiveKitConfig};
+
+        let client = LiveKitClient::new(LiveKitConfig {
+            url: "wss://test-server.com".to_string(),
+            token: "mock-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            publish_audio: true,
+            subscribe_audio: true,
+            sample_rate: 24_000,
+            channels: 1,
+            enable_noise_filter: false,
+            listen_participants: vec![],
+        });
+        client.set_connected(true).await;
+
+        let mut state_inner = ConnectionState::new();
+        state_inner.set_audio_enabled(true);
+        state_inner.stream_id = Some("test-stream".to_string());
+        state_inner.livekit_client = Some(Arc::new(RwLock::new(client)));
+        let state = Arc::new(RwLock::new(state_inner));
+        let (message_tx, mut message_rx): (
+            mpsc::Sender<MessageRoute>,
+            mpsc::Receiver<MessageRoute>,
+        ) = mpsc::channel(4);
+
+        let continue_processing = handle_loading_stop_message(&state).await;
+        drop(message_tx);
+
+        assert!(continue_processing);
+        assert!(
+            message_rx.try_recv().is_err(),
+            "loading_stop must be silent when a LiveKit client exists but no loop is running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_loading_start_message_success_is_silent() {
+        use crate::livekit::loading_clip::make_test_loading_clip;
+        use crate::livekit::{LiveKitClient, LiveKitConfig};
+        use livekit::webrtc::audio_source::native::NativeAudioSource;
+        use livekit::webrtc::prelude::AudioSourceOptions;
+
+        let clip = make_test_loading_clip();
+        let mut client = LiveKitClient::new(LiveKitConfig {
+            url: "wss://test-server.com".to_string(),
+            token: "mock-jwt-token".to_string(),
+            room_name: "test-room".to_string(),
+            publish_audio: true,
+            subscribe_audio: true,
+            sample_rate: 24_000,
+            channels: 1,
+            enable_noise_filter: false,
+            listen_participants: vec![],
+        });
+        client.set_connected(true).await;
+        client.set_loading_audio_clip(clip);
+
+        let source = Arc::new(NativeAudioSource::new(
+            AudioSourceOptions {
+                echo_cancellation: false,
+                noise_suppression: false,
+                auto_gain_control: false,
+            },
+            16_000,
+            1,
+            100, // NativeAudioSource queue depth in ms (matches LOADING_AUDIO_QUEUE_SIZE_MS)
+        ));
+        *client.loading_audio_source.lock().await = Some(source);
+
+        let mut state_inner = ConnectionState::new();
+        state_inner.set_audio_enabled(true);
+        state_inner.stream_id = Some("test-stream".to_string());
+        state_inner.livekit_client = Some(Arc::new(RwLock::new(client)));
+        let state = Arc::new(RwLock::new(state_inner));
+        let (message_tx, mut message_rx) = mpsc::channel(4);
+
+        let continue_processing = handle_loading_start_message(&state, &message_tx).await;
+        drop(message_tx);
+
+        assert!(continue_processing);
+        assert!(
+            message_rx.try_recv().is_err(),
+            "successful loading_start must not emit any WebSocket message"
+        );
+
+        // Tear down the spawned loop so the test does not leak a background task.
+        {
+            let guard = state.read().await;
+            if let Some(lk) = &guard.livekit_client {
+                lk.read().await.stop_loading_audio().await;
+            }
         }
     }
 

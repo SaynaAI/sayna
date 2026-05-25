@@ -393,10 +393,46 @@ async fn test_start_loading_audio_not_connected_errors() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
 
-    let result = client.start_loading_audio().await;
+    let err = client
+        .start_loading_audio()
+        .await
+        .expect_err("start_loading_audio should fail when not connected");
+    match err {
+        AppError::BadRequest(msg) => assert!(
+            msg.contains("active LiveKit connection"),
+            "unexpected error message: {msg}"
+        ),
+        other => panic!("expected BadRequest when not connected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_has_loading_loop_false_when_handle_finished() {
+    use super::loading_audio::LoadingLoopHandle;
+
+    let config = create_test_config();
+    let client = LiveKitClient::new(config);
+
+    let handle = tokio::spawn(async {});
+    for _ in 0..32 {
+        if handle.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert!(
-        result.is_err(),
-        "start_loading_audio should fail when not connected"
+        handle.is_finished(),
+        "placeholder task should finish promptly"
+    );
+
+    *client.loading_loop.lock().await = Some(LoadingLoopHandle {
+        handle,
+        token: tokio_util::sync::CancellationToken::new(),
+    });
+
+    assert!(
+        !client.has_loading_loop().await,
+        "a finished JoinHandle must not count as an active loading loop"
     );
 }
 
@@ -414,7 +450,7 @@ async fn test_start_loading_audio_connected_without_clip_errors() {
         .expect_err("start_loading_audio should fail without a loading clip");
     match err {
         AppError::BadRequest(msg) => assert!(
-            msg.contains("no loading audio was configured"),
+            msg.contains("no loading audio configured"),
             "unexpected error message: {msg}"
         ),
         other => panic!("expected BadRequest for the missing-clip case, got {other:?}"),
@@ -561,6 +597,29 @@ async fn livekit_native_start_idempotent_and_disconnect_teardown() {
     assert!(!client.has_loading_loop().await);
     assert!(!client.has_loading_audio_source().await);
     assert!(!client.has_loading_clip());
+}
+
+#[tokio::test]
+#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+async fn livekit_native_loading_loop_cleared_after_stop() {
+    let client = connected_client_with_loading_source().await;
+
+    client
+        .start_loading_audio()
+        .await
+        .expect("start_loading_audio should succeed");
+    assert!(client.has_loading_loop().await);
+
+    client.stop_loading_audio().await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if !client.has_loading_loop().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("loading_loop slot must be cleared after stop and fade-out complete");
 }
 
 #[tokio::test]

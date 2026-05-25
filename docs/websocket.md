@@ -1559,6 +1559,8 @@ To use the loading indicator, include a `loading_audio` object in the `config` m
 - Decoded duration must be between ~250 ms and ~10 s (**1–4 s recommended**).
 - Decoded size is capped (~1.9 MB).
 
+**WebSocket message size:** A `config` message with a large `loading_audio.data` blob is still a single text frame. Sayna uses the default Axum/tungstenite maximum message size, which is well above the decoded-size cap above; clips within the documented limits do not require a client-side frame-size change.
+
 **WAV vs. raw PCM:**
 
 - **WAV** — supply a complete 16-bit integer WAV file. The header is authoritative, so `sample_rate` and `channels` in the config are ignored.
@@ -1578,6 +1580,7 @@ The loop is controlled with the [`loading_start`](#5-loading-start-message) and 
 - `loading_stop` stops the loop with a short fade-out (idempotent and always silent).
 - The loop is controlled **exclusively** by these two commands. The `speak` and `clear` commands do **not** affect it — they act only on the speech (STT/TTS) pipeline.
 - The loop also stops automatically on session teardown / disconnect.
+- The server does **not** stop the loop when VAD detects user speech. If you want loading audio to end on barge-in, send `loading_stop` when you handle a `vad_event` or `stt_result`.
 
 **Required client guidance:** Because `speak` does not stop the loop, and the loading track and TTS track are independent and can be audible at the same time, **send `loading_stop` before (or together with) `speak`** in the normal "thinking finished, now answer" flow. Otherwise the loading sound is heard underneath the spoken answer.
 

@@ -94,9 +94,9 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 
 ## Published Audio Tracks
 
-When a WebSocket session is audio-enabled and joins a LiveKit room, the Sayna agent participant publishes synthesized speech on a single audio track named `"tts-audio"`.
+When a WebSocket session is audio-enabled and joins a LiveKit room, the Sayna agent participant publishes synthesized speech on an audio track named `"tts-audio"`.
 
-If that session's `config` message also includes a `loading_audio` object (see [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference), the agent participant publishes a **second** audio track named `"loading-audio"`, carrying the loading indicator sound. In that case the agent publishes **two** audio tracks:
+If that session's `config` message also includes a `loading_audio` object (see [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference), the agent participant also publishes a **second** audio track named `"loading-audio"`, carrying the loading indicator sound. The agent then publishes **two** audio tracks:
 
 | Track name | Carries |
 |------------|---------|

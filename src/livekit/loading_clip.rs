@@ -285,8 +285,10 @@ fn decode_raw_pcm(
         .ok_or_else(|| "sample_rate is required for raw PCM loading_audio".to_string())?;
     let channels = channels.unwrap_or(1);
 
-    // `channels` defaults to 1 and is validated against {1, 2} by the caller,
-    // so `frame_bytes` is always non-zero (>= 2) here.
+    // `channels` is the raw client-supplied value (the caller validates it is
+    // 1 or 2 only *after* this returns), so `channels: 0` can reach here and
+    // make `frame_bytes` zero. `is_multiple_of` is panic-safe for a zero
+    // divisor — unlike `%` — so the alignment check below stays sound.
     let frame_bytes = 2 * channels as usize;
     if !bytes.len().is_multiple_of(2) || !bytes.len().is_multiple_of(frame_bytes) {
         return Err("loading_audio raw PCM length is not frame-aligned".to_string());
@@ -577,6 +579,21 @@ mod tests {
 
         let err = decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(2), None)
             .expect_err("non-frame-aligned stereo raw PCM should be rejected");
+        assert_eq!(err, "loading_audio raw PCM length is not frame-aligned");
+    }
+
+    #[test]
+    fn test_zero_channels_raw_pcm_rejected_without_panic() {
+        // `channels: 0` is the raw client-supplied value; the channel-count
+        // validation runs only *after* `decode_raw_pcm` returns, so a zero
+        // reaches the alignment check and makes `frame_bytes` zero.
+        // `decode_raw_pcm` uses `is_multiple_of` (panic-safe for a zero
+        // divisor) rather than `%`, so this must reject cleanly, never panic.
+        let samples: Vec<i16> = vec![100; 8000];
+        let data = raw_pcm_to_base64(&samples);
+
+        let err = decode_loading_clip(&data, Some("pcm"), Some(16_000), Some(0), None)
+            .expect_err("raw PCM with channels: 0 must be rejected, not panic");
         assert_eq!(err, "loading_audio raw PCM length is not frame-aligned");
     }
 

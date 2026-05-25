@@ -280,7 +280,11 @@ impl LiveKitClient {
 
     #[cfg(test)]
     pub(crate) async fn has_loading_loop(&self) -> bool {
-        self.loading_loop.lock().await.is_some()
+        self.loading_loop
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|existing| !existing.handle.is_finished())
     }
 }
 

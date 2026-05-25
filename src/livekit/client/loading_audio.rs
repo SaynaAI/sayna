@@ -20,6 +20,7 @@ use livekit::prelude::LocalTrackPublication;
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -45,7 +46,7 @@ const LOADING_AUDIO_FADE_OUT_MS: u32 = 30;
 /// mirrors LiveKit's `BackgroundAudioPlayer` reference design: once the queue
 /// fills, `capture_frame().await` applies real-time back-pressure, pacing the
 /// loop at one 10 ms frame per 10 ms of wall-clock with no manual timer.
-pub(super) const LOADING_AUDIO_QUEUE_SIZE_MS: u32 = 100;
+pub(crate) const LOADING_AUDIO_QUEUE_SIZE_MS: u32 = 100;
 
 /// Handle to a running loading-audio loop: its task handle and cancellation token.
 ///
@@ -119,6 +120,22 @@ pub(super) fn apply_fade(frame: &mut [i16], start_index: usize, total: usize) ->
         index += 1;
     }
     index
+}
+
+/// Builds one 10 ms `AudioFrame` borrowing `frame_buf`, tagged with the loop's
+/// fixed `sample_rate`, channel count, and per-channel sample count.
+fn loading_audio_frame(
+    frame_buf: &[i16],
+    sample_rate: u32,
+    channels: u16,
+    samples_per_channel: usize,
+) -> AudioFrame<'_> {
+    AudioFrame {
+        data: std::borrow::Cow::Borrowed(frame_buf),
+        sample_rate,
+        num_channels: channels as u32,
+        samples_per_channel: samples_per_channel as u32,
+    }
 }
 
 /// Creates the dedicated loading audio source plus the "loading-audio" track
@@ -235,8 +252,9 @@ impl LiveKitClient {
     /// clip / source is available for this session.
     pub async fn start_loading_audio(&self) -> Result<(), AppError> {
         if !self.is_connected() {
-            return Err(AppError::InternalServerError(
-                "Not connected to LiveKit room".to_string(),
+            return Err(AppError::BadRequest(
+                "loading indicator requires an active LiveKit connection; connect to a room first"
+                    .to_string(),
             ));
         }
 
@@ -245,10 +263,17 @@ impl LiveKitClient {
             Some(clip) => Arc::clone(clip),
             None => {
                 return Err(AppError::BadRequest(
-                    "no loading audio was configured for this session".to_string(),
+                    "no loading audio configured".to_string(),
                 ));
             }
         };
+
+        if loading_frame_len(clip.sample_rate(), clip.channels()) == 0 || clip.samples().is_empty()
+        {
+            return Err(AppError::BadRequest(
+                "loading audio clip has no playable frames".to_string(),
+            ));
+        }
 
         // Hold `loading_loop` across the whole start, and read
         // `loading_audio_source` while still holding it. A concurrent reconnect
@@ -285,11 +310,17 @@ impl LiveKitClient {
         };
 
         let token = CancellationToken::new();
+        let loading_loop_slot = Arc::clone(&self.loading_loop);
         // Isolation invariant: the spawned loop owns only its dedicated audio
         // source, the loading clip, and its cancellation token. It never
         // touches the TTS operation_queue, audio_queue, audio_generation, or
         // has_audio_source_atomic.
-        let handle = tokio::spawn(run_loading_loop(source, clip, token.clone()));
+        let handle = tokio::spawn(run_loading_loop(
+            source,
+            clip,
+            token.clone(),
+            loading_loop_slot,
+        ));
         *loop_guard = Some(LoadingLoopHandle { handle, token });
 
         info!("Started loading audio loop");
@@ -299,8 +330,8 @@ impl LiveKitClient {
     /// Stops a running loading-audio loop, triggering its short fade-out.
     ///
     /// This is infallible, silent, and idempotent: with no loop running it does
-    /// nothing. The loop's handle is intentionally left in place so that
-    /// disconnect (or the next start) can await or replace it.
+    /// nothing. The loop task clears the `loading_loop` slot when it exits;
+    /// disconnect can still cancel and await the handle as a backstop.
     pub async fn stop_loading_audio(&self) {
         let loop_guard = self.loading_loop.lock().await;
         if let Some(existing) = loop_guard.as_ref() {
@@ -321,6 +352,18 @@ impl LiveKitClient {
     }
 }
 
+/// Clears the `loading_loop` slot when the loop task exits (normal stop, fade
+/// complete, or early error). Uses `try_lock` so `Drop` never blocks.
+struct ClearLoadingLoopOnExit(Arc<Mutex<Option<LoadingLoopHandle>>>);
+
+impl Drop for ClearLoadingLoopOnExit {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.0.try_lock() {
+            guard.take();
+        }
+    }
+}
+
 /// Runs the loading-audio playback loop until cancelled, then fades out.
 ///
 /// The task holds only its `Arc<NativeAudioSource>`, `Arc<LoadingClip>`, and
@@ -330,13 +373,15 @@ async fn run_loading_loop(
     source: Arc<NativeAudioSource>,
     clip: Arc<LoadingClip>,
     token: CancellationToken,
+    loading_loop: Arc<Mutex<Option<LoadingLoopHandle>>>,
 ) {
+    let _clear_slot = ClearLoadingLoopOnExit(loading_loop);
     let sample_rate = clip.sample_rate();
     let channels = clip.channels();
     let frame_len = loading_frame_len(sample_rate, channels);
 
     if frame_len == 0 || clip.samples().is_empty() {
-        warn!("Loading audio clip has no playable frames; loop not started");
+        warn!("Loading audio clip has no playable frames; loop exiting immediately");
         return;
     }
 
@@ -353,13 +398,13 @@ async fn run_loading_loop(
     // back-pressure, pacing the loop at one 10 ms frame per 10 ms of wall-clock
     // — so no manual timer is needed.
     loop {
-        cursor = fill_loading_frame(clip.samples(), cursor, &mut frame_buf);
-        let frame = AudioFrame {
-            data: std::borrow::Cow::Borrowed(&frame_buf),
-            sample_rate,
-            num_channels: channels as u32,
-            samples_per_channel: samples_per_channel as u32,
-        };
+        // Fill the next frame, but commit the cursor advance only once the
+        // frame has actually been captured. If the cancellation token fires
+        // first, `cursor` still points at the start of this uncaptured frame,
+        // so the fade-out below resumes exactly where the last captured frame
+        // ended — no skipped frame and no discontinuity at the stop point.
+        let next_cursor = fill_loading_frame(clip.samples(), cursor, &mut frame_buf);
+        let frame = loading_audio_frame(&frame_buf, sample_rate, channels, samples_per_channel);
 
         tokio::select! {
             biased;
@@ -369,6 +414,7 @@ async fn run_loading_loop(
                     debug!("Loading audio source closed; loop exiting without fade-out");
                     return;
                 }
+                cursor = next_cursor;
             }
         }
     }
@@ -381,16 +427,20 @@ async fn run_loading_loop(
     let mut fade_index: usize = 0;
 
     for _ in 0..fade_frames {
+        if token.is_cancelled() {
+            break;
+        }
         cursor = fill_loading_frame(clip.samples(), cursor, &mut frame_buf);
         fade_index = apply_fade(&mut frame_buf, fade_index, total_fade_samples);
-        let frame = AudioFrame {
-            data: std::borrow::Cow::Borrowed(&frame_buf),
-            sample_rate,
-            num_channels: channels as u32,
-            samples_per_channel: samples_per_channel as u32,
-        };
-        if source.capture_frame(&frame).await.is_err() {
-            break;
+        let frame = loading_audio_frame(&frame_buf, sample_rate, channels, samples_per_channel);
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            res = source.capture_frame(&frame) => {
+                if res.is_err() {
+                    break;
+                }
+            }
         }
     }
 }
@@ -565,7 +615,8 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        let handle = tokio::spawn(run_loading_loop(source, clip, token));
+        let loading_loop = Arc::new(Mutex::new(None));
+        let handle = tokio::spawn(run_loading_loop(source, clip, token, loading_loop));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
 
         assert!(
