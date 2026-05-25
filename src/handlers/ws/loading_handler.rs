@@ -323,8 +323,14 @@ mod tests {
         );
     }
 
+    // This test constructs a real libwebrtc `NativeAudioSource` and so wears
+    // the `livekit_native_` quarantine prefix described in
+    // `src/livekit/client/tests.rs:499-506`: it is `#[ignore]`d out of the
+    // default `cargo test` run and executed isolated by the dedicated CI step
+    // in `.github/workflows/ci.yml`.
     #[tokio::test]
-    async fn test_handle_loading_start_message_success_is_silent() {
+    #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
+    async fn livekit_native_handle_loading_start_message_success_is_silent() {
         use crate::livekit::loading_clip::make_test_loading_clip;
         use crate::livekit::{LiveKitClient, LiveKitConfig, sayna_audio_source_options};
         use livekit::webrtc::audio_source::native::NativeAudioSource;
