@@ -17,7 +17,7 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [Published Audio Tracks](#published-audio-tracks)
+2. [Published Audio Track](#published-audio-track)
 3. [Configuration](#configuration)
 4. [Inbound Webhooks (LiveKit → Sayna)](#inbound-webhooks-livekit--sayna)
 5. [SIP Configuration & Auto-Provisioning](#sip-configuration--auto-provisioning)
@@ -92,20 +92,17 @@ Sayna provides comprehensive LiveKit integration with automatic SIP infrastructu
 
 ---
 
-## Published Audio Tracks
+## Published Audio Track
 
-When a WebSocket session is audio-enabled and joins a LiveKit room, the Sayna agent participant publishes synthesized speech on an audio track named `"tts-audio"`.
-
-If that session's `config` message also includes a `loading_audio` object (see [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference), the agent participant also publishes a **second** audio track named `"loading-audio"`, carrying the loading indicator sound. The agent then publishes **two** audio tracks:
+When a WebSocket session is audio-enabled and joins a LiveKit room, the Sayna agent participant publishes **exactly one** audio track, named `"tts-audio"`. It carries the agent's full output — synthesized speech plus any loading-indicator sound mixed in.
 
 | Track name | Carries |
 |------------|---------|
-| `"tts-audio"` | Synthesized speech (text-to-speech output). |
-| `"loading-audio"` | The loading indicator clip, looped while the calling application is busy. |
+| `"tts-audio"` | Synthesized speech, with the loading indicator clip mixed in while active. |
 
-The two tracks are independent and can be audible at the same time. LiveKit client SDKs automatically play every subscribed audio track, so participants hear both without any extra client-side handling.
+LiveKit is a Selective Forwarding Unit: it forwards each published track as an independent stream and never mixes audio server-side. Many subscribers play only a single audio track — custom browser clients that attach one `<audio>` element, and SIP bridges that downmix to a single phone stream — so publishing the loading indicator on a *second* track would not reliably reach them. Instead, Sayna mixes the loading clip into the one published track server-side (saturating sum, the same approach as LiveKit's own `AudioMixer`), so every single-track subscriber hears it. See [Loading Indicator](websocket.md#loading-indicator) in the WebSocket reference for the client-facing controls.
 
-**Recordings:** Because `"loading-audio"` is a real published track, it is included in room-composite egress recordings alongside `"tts-audio"`. This is correct behavior — the recording faithfully reflects what the human participant heard.
+**Recordings:** Because the loading indicator is part of the single `"tts-audio"` track, it is naturally included in room-composite egress recordings. The recording faithfully reflects what the human participant heard.
 
 ---
 

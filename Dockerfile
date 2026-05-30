@@ -86,7 +86,7 @@ RUN rm -rf /var/lib/apt/lists/* \
     fi \
     && apt-get update -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::Check-Valid-Until=false \
     && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
-    ca-certificates libssl3 libstdc++6 \
+    wget ca-certificates libssl3 libstdc++6 \
     libva2 libva-drm2 \
     libx11-6 libxext6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
     libglib2.0-0 libgbm1 libdrm2 \

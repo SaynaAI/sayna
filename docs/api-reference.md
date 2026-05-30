@@ -586,7 +586,7 @@ Configures audio processing and optional LiveKit mirroring. Must be the first me
 
 **`loading_audio` configuration**
 
-Decoded once at config time; the validated clip is held for the session and played on a dedicated `"loading-audio"` LiveKit track via the `loading_start` / `loading_stop` commands. Only 16-bit PCM is supported.
+Decoded once at config time; the validated clip is resampled to the published track's format, held for the session, and mixed into the single published audio track via the `loading_start` / `loading_stop` commands. Only 16-bit PCM is supported.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -616,7 +616,7 @@ Immediately clears queued audio and LiveKit buffers. Useful for interruptions.
 | `type` | string | `clear`. |
 
 ##### `loading_start`
-Begins looping the configured loading indicator clip on a dedicated `"loading-audio"` LiveKit track. Requires `audio=true`, an active LiveKit room, and a `loading_audio` clip supplied in `config`. Fire-and-forget on success; idempotent if the loop is already running; failures emit an `error` message.
+Begins looping the configured loading indicator clip, mixed into the single published audio track. Requires `audio=true`, an active LiveKit room, and a `loading_audio` clip supplied in `config`. Fire-and-forget on success; idempotent if the loop is already running; failures emit an `error` message.
 
 | Field | Type | Description |
 | --- | --- | --- |

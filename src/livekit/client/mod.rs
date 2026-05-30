@@ -6,17 +6,16 @@
 //! maintainable while preserving the original behaviour.
 
 mod audio;
+mod audio_pump;
 mod callbacks;
 mod connection;
 mod events;
-mod loading_audio;
 mod messaging;
 mod operation_worker;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -29,7 +28,7 @@ use tracing::warn;
 
 pub(crate) use super::operations::{LiveKitOperation, OperationQueue, QueueStats};
 pub(crate) use super::types::LiveKitConfig;
-use crate::livekit::loading_clip::LoadingClip;
+use audio_pump::{AudioPumpHandle, AudioPumpShared};
 
 /// Callback type for handling incoming audio chunks.
 pub type AudioCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -105,10 +104,7 @@ pub struct TrackSubscribedEvent {
 /// Reliable data channel threshold (200 MB) to handle bursty payloads without premature backpressure.
 pub(crate) const RELIABLE_BUFFER_THRESHOLD_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Maximum audio queue size based on duration (2 seconds worth of frames at 100 frames/sec)
-pub(crate) const MAX_AUDIO_QUEUE_SIZE: usize = 200;
-
-/// Canonical `AudioSourceOptions` for every audio source Sayna publishes.
+/// Canonical `AudioSourceOptions` for the published audio source.
 ///
 /// Every flag is `false` because Sayna feeds already-mastered PCM into LiveKit
 /// — the server's job is to deliver bytes faithfully, not to re-process them:
@@ -116,11 +112,11 @@ pub(crate) const MAX_AUDIO_QUEUE_SIZE: usize = 200;
 ///   would only distort a synthesized output stream.
 /// * `noise_suppression` would re-filter audio that the TTS engine (or the
 ///   client-supplied loading clip) already produced clean.
-/// * `auto_gain_control` is **load-bearing** for the loading-audio track: the
-///   loading clip's loudness is set by scaling its samples at decode time
-///   (`volume` config field), and AGC would re-normalise that loudness and
-///   silently undo the attenuation. It is equally undesirable on the TTS
-///   track, whose levels are set by the TTS provider.
+/// * `auto_gain_control` is **load-bearing**: the loading clip's loudness is set
+///   by scaling its samples at decode time (`volume` config field) and TTS
+///   levels are set by the provider, so AGC would re-normalise both and silently
+///   undo that attenuation. Since TTS and the loading overlay are mixed into
+///   this one source, AGC would also pump the combined output.
 pub(crate) fn sayna_audio_source_options() -> AudioSourceOptions {
     AudioSourceOptions {
         echo_cancellation: false,
@@ -149,24 +145,19 @@ pub struct LiveKitClient {
     pub(crate) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     pub(crate) local_audio_track: Option<LocalAudioTrack>,
     pub(crate) local_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
-    /// Decoded loading-indicator clip; `None` when the feature is unused.
-    pub(crate) loading_clip: Option<Arc<LoadingClip>>,
-    /// Dedicated audio source feeding the "loading-audio" track.
-    pub(crate) loading_audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
-    /// Handle keeping the "loading-audio" track published.
-    pub(crate) loading_audio_track: Option<LocalAudioTrack>,
-    /// Publication of the dedicated "loading-audio" track.
-    pub(crate) loading_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
-    /// Running loading-audio loop handle and its cancellation token, if active.
+    /// Shared state for the single audio pump: buffered TTS plus the loading
+    /// overlay's resampled clip and active/stopping flags. Created once and
+    /// reused across reconnects so buffered audio and the overlay survive a
+    /// room rebuild. See [`audio_pump`].
+    pub(crate) audio_pump: Arc<AudioPumpShared>,
+    /// Handle to the running audio pump task (the sole `capture_frame` writer)
+    /// and its cancellation token; `None` until the first track is published.
     ///
-    /// Wrapped in `Arc` so the operation worker's `OperationContext` can hold a
-    /// clone and cancel the loop from `process_reconnect` (the running loop's
-    /// audio source dies with the pre-reconnect room). Visibility is
-    /// `pub(super)` because [`loading_audio::LoadingLoopHandle`] is an internal
-    /// type only used within the `client` submodule.
-    pub(super) loading_loop: Arc<Mutex<Option<loading_audio::LoadingLoopHandle>>>,
+    /// Wrapped in `Arc<Mutex<…>>` so the operation worker's `OperationContext`
+    /// can cancel and respawn the pump from `process_reconnect`, and so `Drop`
+    /// can reap it as a backstop.
+    pub(super) pump: Arc<Mutex<Option<AudioPumpHandle>>>,
     pub(crate) _audio_buffer_pool: Arc<Mutex<Vec<Vec<u8>>>>,
-    pub(crate) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub(crate) operation_queue: Option<OperationQueue>,
     pub(crate) operation_worker_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) stats: Arc<Mutex<QueueStats>>,
@@ -208,6 +199,7 @@ impl LiveKitClient {
     pub fn new(config: LiveKitConfig) -> Self {
         let buffer_capacity =
             ((config.sample_rate as usize * config.channels as usize * 2) / 100).max(4096);
+        let audio_pump = Arc::new(AudioPumpShared::new(config.sample_rate, config.channels));
 
         Self {
             config,
@@ -225,17 +217,13 @@ impl LiveKitClient {
             audio_source: Arc::new(Mutex::new(None)),
             local_audio_track: None,
             local_track_publication: Arc::new(Mutex::new(None)),
-            loading_clip: None,
-            loading_audio_source: Arc::new(Mutex::new(None)),
-            loading_audio_track: None,
-            loading_track_publication: Arc::new(Mutex::new(None)),
-            loading_loop: Arc::new(Mutex::new(None)),
+            audio_pump,
+            pump: Arc::new(Mutex::new(None)),
             _audio_buffer_pool: Arc::new(Mutex::new(
                 (0..4)
                     .map(|_| Vec::with_capacity(buffer_capacity))
                     .collect(),
             )),
-            audio_queue: Arc::new(Mutex::new(VecDeque::new())),
             operation_queue: None,
             operation_worker_handle: None,
             stats: Arc::new(Mutex::new(QueueStats::default())),
@@ -251,11 +239,6 @@ impl LiveKitClient {
     #[cfg(test)]
     pub(crate) async fn has_local_track_publication(&self) -> bool {
         self.local_track_publication.lock().await.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_audio_queue_len(&self) -> usize {
-        self.audio_queue.lock().await.len()
     }
 
     #[cfg(test)]
@@ -279,35 +262,6 @@ impl LiveKitClient {
     pub(crate) fn has_room_events(&self) -> bool {
         self.room_events.is_some()
     }
-
-    #[cfg(test)]
-    pub(crate) fn has_loading_clip(&self) -> bool {
-        self.loading_clip.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn has_loading_audio_source(&self) -> bool {
-        self.loading_audio_source.lock().await.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_loading_audio_track(&self) -> bool {
-        self.loading_audio_track.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn has_loading_track_publication(&self) -> bool {
-        self.loading_track_publication.lock().await.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn has_loading_loop(&self) -> bool {
-        self.loading_loop
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|existing| !existing.handle.is_finished())
-    }
 }
 
 impl Drop for LiveKitClient {
@@ -316,21 +270,20 @@ impl Drop for LiveKitClient {
             warn!("LiveKitClient dropped without explicit disconnect call");
         }
 
-        // Best-effort backstop for the loading-audio loop. `disconnect` is the
-        // normal teardown path, but session cleanup may skip it if the LiveKit
-        // write lock cannot be acquired in time. A buffered `NativeAudioSource`
-        // keeps accepting frames even after the room is gone, so the loop would
-        // never observe a `capture_frame` error and never self-terminate.
-        // Cancelling the token and aborting the task here reaps the loop on the
-        // common drop paths. `try_lock` is used because `Drop` cannot block; if
-        // it loses a momentary race for the `loading_loop` lock, the loop is
-        // left for that lock holder's own teardown (`disconnect` / reconnect) to
-        // reap.
-        if let Ok(mut guard) = self.loading_loop.try_lock()
-            && let Some(loading) = guard.take()
+        // Best-effort backstop for the audio pump. `disconnect` is the normal
+        // teardown path, but session cleanup may skip it if the LiveKit write
+        // lock cannot be acquired in time. A buffered `NativeAudioSource` keeps
+        // accepting frames even after the room is gone, so the pump would never
+        // observe a `capture_frame` error and never self-terminate. Cancelling
+        // the token and aborting the task here reaps it on the common drop
+        // paths. `try_lock` is used because `Drop` cannot block; if it loses a
+        // momentary race for the `pump` lock, the pump is left for that lock
+        // holder's own teardown (`disconnect` / reconnect) to reap.
+        if let Ok(mut guard) = self.pump.try_lock()
+            && let Some(pump) = guard.take()
         {
-            loading.token.cancel();
-            loading.handle.abort();
+            pump.token.cancel();
+            pump.handle.abort();
         }
     }
 }

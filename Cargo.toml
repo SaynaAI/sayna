@@ -1,6 +1,6 @@
 [package]
 name = "sayna"
-version = "0.1.16"
+version = "0.1.15"
 edition = "2024"
 repository = "https://github.com/saynaai/sayna"
 license = "Apache-2.0"
@@ -129,6 +129,7 @@ google-cloud-auth = "1.2.0"
 tonic = { version = "0.11", features = ["tls-roots", "prost", "channel"] }
 prost-types = "0.12"
 async-stream = "0.3"
+rubato = "3.0.0"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
