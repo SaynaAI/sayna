@@ -1,26 +1,95 @@
-//! Audio publishing and frame conversion helpers for `LiveKitClient`.
+//! Publishing the single agent audio track and feeding it from TTS.
 //!
-//! This module encapsulates track setup for TTS output as well as utilities
-//! for streaming synthesized audio into LiveKit and translating audio frames
-//! between byte and `AudioFrame` representations.
+//! This module publishes one audio track for the session and routes synthesized
+//! TTS PCM into the [`AudioPumpShared`] buffer that the [audio pump](super::audio_pump)
+//! drains, mixes with the loading overlay, and captures. It also converts
+//! inbound LiveKit audio frames back to PCM bytes for the audio callback.
+//!
+//! The audio pump is the *sole* writer to the published source; nothing here
+//! calls `capture_frame` directly.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use livekit::options::TrackPublishOptions;
-use livekit::prelude::{DataPacketKind, Room, RoomEvent};
+use livekit::prelude::{DataPacketKind, LocalParticipant, LocalTrackPublication, Room, RoomEvent};
 use livekit::track::{LocalAudioTrack, LocalTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, RtcAudioSource};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use super::audio_pump::{AudioPumpShared, spawn_audio_pump, stop_audio_pump};
 use super::{
     LiveKitClient, LiveKitConfig, LiveKitOperation, operation_worker::OperationContext,
     sayna_audio_source_options,
 };
 use crate::AppError;
+
+/// Name of the single published LiveKit audio track.
+///
+/// It carries the agent's full output — TTS plus any mixed-in loading overlay.
+/// The wire name `"tts-audio"` is retained for compatibility with existing
+/// subscribers and tooling even though the track is no longer TTS-only.
+pub(super) const PUBLISHED_AUDIO_TRACK_NAME: &str = "tts-audio";
+
+/// Internal queue depth, in milliseconds, for the published [`NativeAudioSource`].
+///
+/// libwebrtc requires this to be a **non-zero multiple of 10 ms** and asserts
+/// otherwise. A queue of roughly `sample_rate / 100` ms (~240 ms at 24 kHz)
+/// cushions TTS jitter and is shared by the loading overlay. Computing it as
+/// `(sample_rate / 1000) * 10` keeps the result a multiple of 10 for *any*
+/// client-supplied TTS sample rate — including ones such as 44_100 Hz, where the
+/// older `(sample_rate * 10) / 1000` formula produced 441 and tripped the
+/// assertion (a process crash). `.max(10)` keeps an absurdly low rate from
+/// yielding a zero (invalid) depth.
+pub(super) fn audio_source_queue_size_ms(sample_rate: u32) -> u32 {
+    ((sample_rate / 1000) * 10).max(10)
+}
+
+/// Creates a `NativeAudioSource`, wraps it in the published audio track, and
+/// publishes it on `participant`.
+///
+/// Returns the source (fed by the audio pump), the track handle (which must be
+/// kept alive, or kept published via its publication, to stay published), and
+/// the resulting publication. Shared by initial setup and reconnect so the
+/// track is created identically in both paths.
+pub(super) async fn create_and_publish_audio_track(
+    participant: &LocalParticipant,
+    config: &LiveKitConfig,
+) -> Result<
+    (
+        Arc<NativeAudioSource>,
+        LocalAudioTrack,
+        LocalTrackPublication,
+    ),
+    AppError,
+> {
+    let source = Arc::new(NativeAudioSource::new(
+        sayna_audio_source_options(),
+        config.sample_rate,
+        config.channels as u32,
+        audio_source_queue_size_ms(config.sample_rate),
+    ));
+
+    let rtc_audio_source = RtcAudioSource::Native((*source).clone());
+    let track = LocalAudioTrack::create_audio_track(PUBLISHED_AUDIO_TRACK_NAME, rtc_audio_source);
+
+    let publish_options = TrackPublishOptions {
+        source: TrackSource::Microphone,
+        ..Default::default()
+    };
+
+    match participant
+        .publish_track(LocalTrack::Audio(track.clone()), publish_options)
+        .await
+    {
+        Ok(publication) => Ok((source, track, publication)),
+        Err(e) => Err(AppError::InternalServerError(format!(
+            "Failed to publish audio track: {e:?}"
+        ))),
+    }
+}
 
 impl LiveKitClient {
     pub(super) async fn setup_audio_publishing(&mut self) -> Result<(), AppError> {
@@ -29,111 +98,38 @@ impl LiveKitClient {
             self.config.sample_rate, self.config.channels
         );
 
-        let samples_per_frame = (self.config.sample_rate * 10) / 1000;
-
-        let audio_source = Arc::new(NativeAudioSource::new(
-            sayna_audio_source_options(),
-            self.config.sample_rate,
-            self.config.channels as u32,
-            samples_per_frame,
-        ));
-
-        let rtc_audio_source = RtcAudioSource::Native((*audio_source).clone());
-        let local_audio_track = LocalAudioTrack::create_audio_track("tts-audio", rtc_audio_source);
-
-        // Extract local participant while holding the lock briefly
+        // Extract local participant while holding the room lock briefly.
         let local_participant = {
             let room_guard = self.room.lock().await;
-            if let Some(room) = &*room_guard {
-                room.local_participant().clone()
-            } else {
-                return Err(AppError::InternalServerError(
-                    "Room not available for track publishing".to_string(),
-                ));
+            match &*room_guard {
+                Some(room) => room.local_participant().clone(),
+                None => {
+                    return Err(AppError::InternalServerError(
+                        "Room not available for track publishing".to_string(),
+                    ));
+                }
             }
         };
-        // Room lock is now released
 
-        let publish_options = TrackPublishOptions {
-            source: TrackSource::Microphone,
-            ..Default::default()
-        };
+        let (source, track, publication) =
+            create_and_publish_audio_track(&local_participant, &self.config).await?;
+        info!("Successfully published audio track: {}", publication.sid());
 
-        // Publish track without holding the room lock
-        match local_participant
-            .publish_track(
-                LocalTrack::Audio(local_audio_track.clone()),
-                publish_options,
-            )
-            .await
-        {
-            Ok(publication) => {
-                info!(
-                    "Successfully published TTS audio track: {}",
-                    publication.sid()
-                );
+        *self.audio_source.lock().await = Some(Arc::clone(&source));
+        self.local_audio_track = Some(track);
+        *self.local_track_publication.lock().await = Some(publication);
+        self.has_audio_source_atomic.store(true, Ordering::Release);
 
-                *self.audio_source.lock().await = Some(audio_source.clone());
-                self.local_audio_track = Some(local_audio_track);
-                *self.local_track_publication.lock().await = Some(publication);
-                self.has_audio_source_atomic
-                    .store(true, std::sync::atomic::Ordering::Release);
-
-                // Spawn a lightweight task to drain queued audio without blocking
-                let audio_queue_clone = Arc::clone(&self.audio_queue);
-                let audio_source_clone = Arc::clone(&audio_source);
-                let sample_rate = self.config.sample_rate;
-                let channels = self.config.channels;
-
-                let handle = tokio::spawn(async move {
-                    // Extract all queued data to avoid holding the lock during async operations
-                    let queued_data: Vec<Vec<u8>> = {
-                        let mut queue = audio_queue_clone.lock().await;
-                        if !queue.is_empty() {
-                            info!(
-                                "Draining {} queued audio messages after track publish",
-                                queue.len()
-                            );
-                            queue.drain(..).collect()
-                        } else {
-                            Vec::new()
-                        }
-                    };
-
-                    // Process the drained audio without holding any locks
-                    for audio_data in queued_data {
-                        // Use convert_audio_to_frame_ref to avoid allocations
-                        match LiveKitClient::convert_audio_to_frame_ref(
-                            &audio_data,
-                            sample_rate,
-                            channels,
-                        ) {
-                            Ok(audio_frame) => {
-                                if let Err(e) = audio_source_clone.capture_frame(&audio_frame).await
-                                {
-                                    error!("Failed to send queued audio frame: {:?}", e);
-                                    // Don't re-queue on error to avoid infinite loop
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to convert queued audio frame: {:?}", e);
-                            }
-                        }
-                    }
-                });
-
-                // Track the spawn handle for lifecycle management
-                self.active_streams.lock().await.push(handle);
-
-                info!("Audio source, track, and publication are now set");
-            }
-            Err(e) => {
-                error!("Failed to publish audio track: {:?}", e);
-                return Err(AppError::InternalServerError(format!(
-                    "Failed to publish audio track: {e:?}"
-                )));
-            }
-        }
+        // Spawn the single writer. It drains any TTS already buffered in
+        // `audio_pump` and mixes in the loading overlay when active.
+        spawn_audio_pump(
+            &self.pump,
+            Arc::clone(&self.audio_pump),
+            source,
+            self.config.sample_rate,
+            self.config.channels,
+        )
+        .await;
 
         info!("Audio publishing setup completed successfully");
         Ok(())
@@ -150,11 +146,9 @@ impl LiveKitClient {
                 AppError::InternalServerError("Operation worker disconnected".to_string())
             })?
         } else {
-            // Use the shared helper for consistency
             Self::process_send_audio(
                 audio_data,
-                &self.audio_queue,
-                &self.audio_source,
+                &self.audio_pump,
                 &self.is_connected,
                 &self.config,
             )
@@ -162,41 +156,34 @@ impl LiveKitClient {
         }
     }
 
-    /// Clear any buffered audio data from the local source and queue.
-    ///
-    /// This method clears all pending audio that has not yet been transmitted,
-    /// allowing new audio to be sent without interference from previously
-    /// queued data.
+    /// Clear any buffered audio data so new audio plays without interference
+    /// from previously queued TTS.
     ///
     /// # What Gets Cleared
     ///
     /// 1. **NativeAudioSource Buffer** (`audio_source.clear_buffer()`)
-    ///    - Clears the internal buffer of the LiveKit audio source
-    ///    - Audio frames waiting to be captured to WebRTC are discarded
+    ///    - Discards audio frames already captured to the source but not yet
+    ///      sent to WebRTC.
     ///
-    /// 2. **Audio Frame Queue** (`audio_queue.clear()`)
-    ///    - Clears pending audio frames not yet sent to the audio source
-    ///    - These are frames queued when the source was busy or unavailable
+    /// 2. **Buffered TTS** (`audio_pump.clear_tts()`)
+    ///    - Discards TTS samples queued for the pump but not yet captured.
+    ///
+    /// An active loading overlay keeps playing: `clear` only drops buffered and
+    /// in-flight audio, it does not stop the loading indicator.
     ///
     /// # Limitations
     ///
-    /// - **WebRTC Transport Layer**: Audio frames already captured to the
-    ///   WebRTC transport cannot be cleared. Due to WebRTC buffering and
-    ///   network latency, a small amount of audio may still be transmitted
-    ///   to remote participants after this method returns.
-    ///
-    /// - **Network Latency**: Remote participants may hear audio for a brief
-    ///   period (~10-100ms depending on network conditions) after clearing.
-    ///
-    /// - This is a fundamental limitation of the WebRTC protocol, not this
-    ///   implementation. Once frames enter the transport layer, they are
-    ///   handled by the WebRTC stack.
+    /// - **WebRTC Transport Layer**: Audio frames already handed to WebRTC
+    ///   cannot be cleared. Due to WebRTC buffering and network latency, a small
+    ///   amount of audio (~10-100ms) may still reach remote participants after
+    ///   this method returns. This is a fundamental WebRTC limitation, not an
+    ///   implementation choice.
     ///
     /// # Thread Safety
     ///
-    /// This method is safe to call concurrently with `send_tts_audio()`.
-    /// When using the operation queue (default), the clear operation is
-    /// serialized with other audio operations to prevent race conditions.
+    /// Safe to call concurrently with `send_tts_audio()`. When using the
+    /// operation queue (default), the clear is serialized with other audio
+    /// operations.
     ///
     /// # Errors
     ///
@@ -213,27 +200,13 @@ impl LiveKitClient {
                 AppError::InternalServerError("Operation worker disconnected".to_string())
             })?
         } else {
-            if !*self.is_connected.lock().await {
-                return Err(AppError::InternalServerError(
-                    "Not connected to LiveKit room".to_string(),
-                ));
-            }
-
-            if let Some(audio_source) = self.audio_source.lock().await.as_ref() {
-                audio_source.clear_buffer();
-                debug!("Cleared local audio buffer");
-            } else {
-                warn!("No audio source available - nothing to clear");
-            }
-
-            self.audio_queue.lock().await.clear();
-            debug!("Cleared audio queue");
-            Ok(())
+            Self::process_clear_audio(&self.audio_pump, &self.audio_source, &self.is_connected)
+                .await
         }
     }
 
     pub(super) async fn process_clear_audio(
-        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
+        shared: &Arc<AudioPumpShared>,
         audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
         is_connected: &Arc<Mutex<bool>>,
     ) -> Result<(), AppError> {
@@ -245,21 +218,20 @@ impl LiveKitClient {
 
         if let Some(source) = audio_source.lock().await.as_ref() {
             source.clear_buffer();
-            debug!("Cleared local audio buffer");
+            debug!("Cleared published audio source buffer");
         } else {
             warn!("No audio source available - nothing to clear");
         }
 
-        audio_queue.lock().await.clear();
-        debug!("Cleared audio queue");
+        shared.clear_tts().await;
+        debug!("Cleared buffered TTS audio");
 
         Ok(())
     }
 
     pub(super) async fn process_send_audio(
         audio_data: Vec<u8>,
-        audio_queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
-        audio_source: &Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
+        shared: &Arc<AudioPumpShared>,
         is_connected: &Arc<Mutex<bool>>,
         config: &LiveKitConfig,
     ) -> Result<(), AppError> {
@@ -269,126 +241,19 @@ impl LiveKitClient {
             ));
         }
 
-        // Clone the Arc<NativeAudioSource> out of the mutex to avoid holding lock during await
-        let source = {
-            let guard = audio_source.lock().await;
-            guard.as_ref().cloned()
-        };
-
-        if let Some(source) = source {
-            // Try to convert and send without holding any locks
-            match Self::convert_audio_to_frame_ref(&audio_data, config.sample_rate, config.channels)
-            {
-                Ok(audio_frame) => {
-                    // Try up to 3 times with the current frame before queuing
-                    let mut retry_count = 0;
-                    const MAX_RETRIES: usize = 3;
-
-                    loop {
-                        match source.capture_frame(&audio_frame).await {
-                            Ok(()) => {
-                                debug!("Successfully sent audio frame directly");
-
-                                // Try to drain any queued audio now that we have capacity
-                                let queued_data: Vec<Vec<u8>> = {
-                                    let mut queue = audio_queue.lock().await;
-                                    if !queue.is_empty() && queue.len() <= 5 {
-                                        // Drain a few items to reduce latency
-                                        let drain_count = queue.len().min(5);
-                                        queue.drain(..drain_count).collect()
-                                    } else {
-                                        Vec::new()
-                                    }
-                                };
-
-                                // Process drained items without holding locks
-                                for data in queued_data {
-                                    if let Ok(frame) = Self::convert_audio_to_frame_ref(
-                                        &data,
-                                        config.sample_rate,
-                                        config.channels,
-                                    ) {
-                                        let _ = source.capture_frame(&frame).await;
-                                    }
-                                }
-
-                                return Ok(());
-                            }
-                            Err(e) if retry_count < MAX_RETRIES => {
-                                retry_count += 1;
-                                debug!(
-                                    "Retry {}/{} for frame capture after error: {:?}",
-                                    retry_count, MAX_RETRIES, e
-                                );
-                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to capture frame after {} retries: {:?}, queuing",
-                                    MAX_RETRIES, e
-                                );
-                                // Apply bounded queue with backpressure - drop oldest if queue is too large
-                                let mut queue = audio_queue.lock().await;
-                                if queue.len() >= super::MAX_AUDIO_QUEUE_SIZE {
-                                    // Drop the oldest audio frame to prevent unbounded latency
-                                    match queue.pop_front() {
-                                        Some(_dropped) => {
-                                            warn!(
-                                                "Audio queue full, dropping oldest frame to prevent latency spike"
-                                            );
-                                        }
-                                        None => warn!(
-                                            "Audio queue full but nothing to drop; queue state may be inconsistent"
-                                        ),
-                                    }
-                                }
-                                queue.push_back(audio_data);
-                                debug!(
-                                    "Queued audio data for later processing, queue size: {}",
-                                    queue.len()
-                                );
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Conversion failure is likely a format issue, not transient
-                    error!("Failed to convert audio frame: {:?}", e);
-                    return Err(AppError::InternalServerError(format!(
-                        "Audio format error: {e:?}"
-                    )));
-                }
-            }
-        }
-
-        // No audio source yet, queue for when track is ready with bounded queue
-        let mut queue = audio_queue.lock().await;
-        if queue.len() >= super::MAX_AUDIO_QUEUE_SIZE {
-            match queue.pop_front() {
-                Some(_dropped) => {
-                    warn!(
-                        "Audio queue full (no source), dropping oldest frame to prevent latency spike"
-                    );
-                }
-                None => warn!(
-                    "Audio queue full (no source) but nothing to drop; queue state may be inconsistent"
-                ),
-            }
-        }
-        queue.push_back(audio_data);
-        debug!(
-            "Queued audio data (no source yet), queue size: {}",
-            queue.len()
-        );
+        // Convert and buffer; the pump drains and captures. It is fine to buffer
+        // before the source is published — the pump is spawned with the source
+        // and the operation worker only runs once the room is bootstrapped.
+        let samples = Self::pcm_to_samples(&audio_data, config.channels)?;
+        shared.push_tts(samples).await;
         Ok(())
     }
 
-    pub(super) fn convert_audio_to_frame_ref(
-        audio_data: &[u8],
-        sample_rate: u32,
-        channels: u16,
-    ) -> Result<AudioFrame<'static>, AppError> {
+    /// Converts little-endian 16-bit PCM bytes into interleaved `i16` samples.
+    ///
+    /// Validates that the byte length is even and forms a whole number of frames
+    /// for `channels`.
+    pub(super) fn pcm_to_samples(audio_data: &[u8], channels: u16) -> Result<Vec<i16>, AppError> {
         if audio_data.len() & 1 != 0 {
             return Err(AppError::InternalServerError(
                 "Invalid audio data length (must be even for 16-bit samples)".to_string(),
@@ -396,40 +261,29 @@ impl LiveKitClient {
         }
 
         let num_samples = audio_data.len() / 2;
-        let samples_per_channel = num_samples / channels as usize;
-
-        if samples_per_channel == 0 || !num_samples.is_multiple_of(channels as usize) {
+        if num_samples == 0 || !num_samples.is_multiple_of(channels as usize) {
             return Err(AppError::InternalServerError(format!(
                 "Invalid audio data: {num_samples} samples doesn't divide evenly by {channels} channels"
             )));
         }
 
-        // Zero-copy conversion using bytemuck for aligned data
-        // Fall back to manual conversion for unaligned data
+        // Zero-copy reinterpretation for aligned data; manual decode otherwise.
         let samples: Vec<i16> = if (audio_data.as_ptr() as usize).is_multiple_of(2) {
-            // Data is aligned, use zero-copy reinterpretation
+            // SAFETY: length is even and the pointer is 2-byte aligned, so the
+            // bytes form `num_samples` valid `i16` values.
             unsafe {
-                // SAFETY: We've verified the length is even and the data is aligned
                 let ptr = audio_data.as_ptr() as *const i16;
                 let slice = std::slice::from_raw_parts(ptr, num_samples);
                 slice.to_vec()
             }
         } else {
-            // Data is unaligned, fall back to manual conversion
-            let mut samples = Vec::with_capacity(num_samples);
-            for chunk in audio_data.chunks_exact(2) {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                samples.push(sample);
-            }
-            samples
+            audio_data
+                .chunks_exact(2)
+                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect()
         };
 
-        Ok(AudioFrame {
-            data: samples.into(),
-            sample_rate,
-            num_channels: channels as u32,
-            samples_per_channel: samples_per_channel as u32,
-        })
+        Ok(samples)
     }
 
     pub(super) fn convert_frame_to_audio(
@@ -470,12 +324,20 @@ impl LiveKitClient {
         .await
         {
             Ok((new_room, room_events)) => {
-                // Clear old audio resources
+                // The old pump's source died with the previous room. Stop it and
+                // clear the stale audio resources before rebuilding.
+                stop_audio_pump(&ctx.pump).await;
                 *ctx.audio_source.lock().await = None;
                 *ctx.local_track_publication.lock().await = None;
                 ctx.has_audio_source_atomic.store(false, Ordering::Release);
 
-                // Configure data channel threshold on the new room
+                // The loading overlay does not auto-resume across a reconnect;
+                // the client re-sends `loading_start`. Buffered TTS is retained
+                // and drained by the new pump (mirroring the old drain-on-
+                // reconnect behaviour).
+                ctx.audio_pump.deactivate_loading();
+
+                // Configure the data channel threshold on the new room.
                 {
                     let participant = new_room.local_participant();
                     if let Err(e) = participant.set_data_channel_buffered_amount_low_threshold(
@@ -495,10 +357,7 @@ impl LiveKitClient {
                 }
 
                 // Store the new room before any media-specific setup.
-                {
-                    let mut room_guard = ctx.room.lock().await;
-                    *room_guard = Some(new_room);
-                }
+                *ctx.room.lock().await = Some(new_room);
 
                 if !ctx.config.publish_audio {
                     info!("Successfully reconnected in strict no-media mode");
@@ -519,142 +378,33 @@ impl LiveKitClient {
                     }
                 };
 
-                let samples_per_frame = (ctx.config.sample_rate * 10) / 1000;
-                let new_audio_source = Arc::new(NativeAudioSource::new(
-                    sayna_audio_source_options(),
-                    ctx.config.sample_rate,
-                    ctx.config.channels as u32,
-                    samples_per_frame,
-                ));
-
-                let rtc_audio_source = RtcAudioSource::Native((*new_audio_source).clone());
-                let local_audio_track =
-                    LocalAudioTrack::create_audio_track("tts-audio", rtc_audio_source);
-
-                let publish_options = TrackPublishOptions {
-                    source: TrackSource::Microphone,
-                    ..Default::default()
-                };
-
-                // Publish track without holding the room lock
-                match local_participant
-                    .publish_track(
-                        LocalTrack::Audio(local_audio_track.clone()),
-                        publish_options,
-                    )
-                    .await
-                {
-                    Ok(publication) => {
-                        *ctx.audio_source.lock().await = Some(new_audio_source.clone());
+                match create_and_publish_audio_track(&local_participant, &ctx.config).await {
+                    // The track handle is intentionally dropped: `OperationContext`
+                    // has no field to hold it, and the publication keeps the track
+                    // alive (as the previous reconnect path also relied on).
+                    Ok((source, _track, publication)) => {
+                        *ctx.audio_source.lock().await = Some(Arc::clone(&source));
                         *ctx.local_track_publication.lock().await = Some(publication);
                         ctx.has_audio_source_atomic.store(true, Ordering::Release);
 
-                        // Spawn a task to drain queued audio just like in initial setup
-                        let audio_queue_clone = Arc::clone(&ctx.audio_queue);
-                        let audio_source_clone = Arc::clone(&new_audio_source);
-                        let sample_rate = ctx.config.sample_rate;
-                        let channels = ctx.config.channels;
-                        let active_streams_clone = Arc::clone(&ctx.active_streams);
-
-                        let handle = tokio::spawn(async move {
-                            // Extract all queued data to avoid holding the lock during async operations
-                            let queued_data: Vec<Vec<u8>> = {
-                                let mut queue = audio_queue_clone.lock().await;
-                                if !queue.is_empty() {
-                                    info!(
-                                        "Draining {} queued audio messages after reconnect",
-                                        queue.len()
-                                    );
-                                    queue.drain(..).collect()
-                                } else {
-                                    Vec::new()
-                                }
-                            };
-
-                            // Process the drained audio without holding any locks
-                            for audio_data in queued_data {
-                                match Self::convert_audio_to_frame_ref(
-                                    &audio_data,
-                                    sample_rate,
-                                    channels,
-                                ) {
-                                    Ok(audio_frame) => {
-                                        if let Err(e) =
-                                            audio_source_clone.capture_frame(&audio_frame).await
-                                        {
-                                            error!("Failed to send queued audio frame: {:?}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to convert queued audio to frame: {:?}", e);
-                                    }
-                                }
-                            }
-                        });
-
-                        // Track the spawn handle for lifecycle management
-                        active_streams_clone.lock().await.push(handle);
+                        // Respawn the single writer bound to the new source; it
+                        // drains any TTS buffered during the outage.
+                        spawn_audio_pump(
+                            &ctx.pump,
+                            Arc::clone(&ctx.audio_pump),
+                            source,
+                            ctx.config.sample_rate,
+                            ctx.config.channels,
+                        )
+                        .await;
 
                         info!("Successfully reconnected and re-published audio track");
-
-                        // Tear down any in-progress loading-audio loop and clear the now-dead
-                        // loading source as one step under the `loading_loop` guard. Both this
-                        // teardown and `start_loading_audio` mutate/read `loading_audio_source`
-                        // while holding `loading_loop`, so a `loading_start` racing this reconnect
-                        // can never bind a fresh loop to the stale pre-reconnect source: it either
-                        // runs before this teardown (its loop is aborted here) or after it (it then
-                        // reads the cleared — or freshly re-published — source). Lock order is
-                        // always `loading_loop` then `loading_audio_source`.
-                        //
-                        // A buffered `NativeAudioSource` keeps accepting frames even after its room
-                        // is gone, so the loop cannot detect the reconnect on its own — hence the
-                        // explicit cancel + abort. The client must re-send `loading_start` to
-                        // resume the loading sound after a reconnect.
-                        {
-                            let mut loading_loop_guard = ctx.loading_loop.lock().await;
-                            if let Some(loading) = loading_loop_guard.take() {
-                                loading.token.cancel();
-                                loading.handle.abort();
-                            }
-                            *ctx.loading_audio_source.lock().await = None;
-                            *ctx.loading_track_publication.lock().await = None;
-                        }
-
-                        // Re-publish the loading-audio track if a loading clip is configured
-                        // (non-fatal). The re-published `LocalAudioTrack` handle is intentionally
-                        // dropped here: `OperationContext` carries no `loading_audio_track` field,
-                        // and the publication alone keeps the track alive — mirroring how the TTS
-                        // track is re-published above. Storing the rebuilt source needs no
-                        // `loading_loop` guard: until it is stored the source reads `None`, so a
-                        // racing `loading_start` simply gets an "unavailable" error and retries.
-                        if let Some(clip) = &ctx.loading_clip {
-                            match super::loading_audio::publish_loading_audio_track(
-                                &local_participant,
-                                clip.sample_rate(),
-                                clip.channels(),
-                            )
-                            .await
-                            {
-                                Ok((source, _track, publication)) => {
-                                    *ctx.loading_audio_source.lock().await = Some(source);
-                                    *ctx.loading_track_publication.lock().await = Some(publication);
-                                    info!("Re-published loading audio track after reconnect");
-                                }
-                                Err(e) => warn!(
-                                    "Failed to re-publish loading audio track after reconnect (non-fatal): {e:?}"
-                                ),
-                            }
-                        }
-
-                        // Return room_events for event handler restart and success flag
                         Ok((Some(room_events), true))
                     }
                     Err(e) => {
                         error!("Failed to re-publish audio track after reconnect: {:?}", e);
                         *ctx.is_connected.lock().await = false;
-                        Err(AppError::InternalServerError(format!(
-                            "Failed to re-publish audio track: {e:?}"
-                        )))
+                        Err(e)
                     }
                 }
             }

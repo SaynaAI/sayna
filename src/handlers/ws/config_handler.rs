@@ -946,8 +946,19 @@ async fn initialize_livekit_client(
     let mut livekit_client = LiveKitClient::new(livekit_config);
 
     // Register the loading-indicator audio clip before connecting, if supplied.
-    if let Some(clip) = loading_clip {
-        livekit_client.set_loading_audio_clip(clip);
+    // Resampling to the published track format only fails on an internal/track
+    // misconfiguration, not bad client input: the decoder already enforces every
+    // precondition the resampler needs (mono/stereo, 8-48 kHz, whole frames).
+    // So this is treated as non-fatal — the indicator is simply unavailable, and
+    // the client is informed — rather than recorded as a `loading_audio`
+    // validation error (that channel is reserved for decode-time rejections).
+    if let Some(clip) = loading_clip
+        && let Err(message) = livekit_client.set_loading_audio_clip(clip)
+    {
+        error!("Failed to prepare loading_audio: {}", message);
+        let _ = message_tx
+            .send(MessageRoute::Outgoing(OutgoingMessage::Error { message }))
+            .await;
     }
 
     // Set up audio callback to forward to STT processing

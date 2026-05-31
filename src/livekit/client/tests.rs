@@ -1,8 +1,11 @@
 //! Unit tests for `LiveKitClient` public APIs and helpers.
 
+use super::audio_pump::AudioPumpHandle;
 use super::*;
 use crate::AppError;
+use livekit::webrtc::audio_source::native::NativeAudioSource;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 
 fn create_test_config() -> LiveKitConfig {
     LiveKitConfig {
@@ -111,31 +114,55 @@ async fn test_livekit_client_callback_registration() {
     assert!(client.participant_disconnect_callback.is_some());
 }
 
-#[tokio::test]
-async fn test_livekit_client_audio_frame_conversion() {
-    let config = create_test_config();
+#[test]
+fn test_pcm_to_samples_decodes_little_endian() {
+    // Bytes [0,1,2,3] little-endian -> i16 [0x0100, 0x0302] = [256, 770].
     let audio_data = vec![0u8, 1u8, 2u8, 3u8];
-    let result =
-        LiveKitClient::convert_audio_to_frame_ref(&audio_data, config.sample_rate, config.channels);
-
-    assert!(result.is_ok());
-    let audio_frame = result.unwrap();
-    assert_eq!(audio_frame.sample_rate, 24000);
-    assert_eq!(audio_frame.num_channels, 1);
-    assert_eq!(audio_frame.samples_per_channel, 2);
+    let samples =
+        LiveKitClient::pcm_to_samples(&audio_data, 1).expect("even byte count must decode");
+    assert_eq!(samples, vec![256, 770]);
 }
 
-#[tokio::test]
-async fn test_livekit_client_audio_frame_conversion_invalid_data() {
-    let config = create_test_config();
+#[test]
+fn test_pcm_to_samples_rejects_odd_length() {
     let audio_data = vec![0u8, 1u8, 2u8];
-    let result =
-        LiveKitClient::convert_audio_to_frame_ref(&audio_data, config.sample_rate, config.channels);
+    let result = LiveKitClient::pcm_to_samples(&audio_data, 1);
 
     assert!(result.is_err());
     if let Err(AppError::InternalServerError(msg)) = result {
         assert!(msg.contains("even"));
+    } else {
+        panic!("expected an InternalServerError mentioning even length");
     }
+}
+
+#[test]
+fn test_pcm_to_samples_rejects_partial_frame() {
+    // One i16 sample cannot fill a stereo frame.
+    let audio_data = vec![0u8, 1u8];
+    assert!(LiveKitClient::pcm_to_samples(&audio_data, 2).is_err());
+}
+
+#[test]
+fn test_audio_source_queue_size_ms_is_always_valid() {
+    // libwebrtc asserts the source queue depth is a non-zero multiple of 10 ms.
+    // Client-supplied TTS sample rates are arbitrary, so the depth must stay
+    // valid for any of them — notably 44_100 Hz, which the old formula broke.
+    use super::audio::audio_source_queue_size_ms;
+    for rate in [
+        8_000u32, 11_025, 16_000, 22_050, 24_000, 44_100, 48_000, 999, 1,
+    ] {
+        let ms = audio_source_queue_size_ms(rate);
+        assert!(ms > 0, "queue depth must be non-zero at {rate} Hz");
+        assert_eq!(
+            ms % 10,
+            0,
+            "queue depth must be a multiple of 10 at {rate} Hz"
+        );
+    }
+    // The nominal rates keep their historical ~sample_rate/100 ms depth.
+    assert_eq!(audio_source_queue_size_ms(24_000), 240);
+    assert_eq!(audio_source_queue_size_ms(48_000), 480);
 }
 
 #[tokio::test]
@@ -162,17 +189,18 @@ async fn test_livekit_client_send_tts_audio_not_connected() {
 }
 
 #[tokio::test]
-async fn test_livekit_client_send_tts_audio_no_source() {
+async fn test_send_tts_audio_buffers_samples_when_connected() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
     client.set_connected(true).await;
 
+    // 1024 bytes = 512 interleaved i16 samples (mono). With no pump running yet,
+    // they accumulate in the shared TTS buffer for the pump to drain.
     let audio_data = vec![0u8; 1024];
-    let result = client.send_tts_audio(audio_data.clone()).await;
+    let result = client.send_tts_audio(audio_data).await;
 
     assert!(result.is_ok());
-    let queue_len = client.get_audio_queue_len().await;
-    assert_eq!(queue_len, 1);
+    assert_eq!(client.tts_buffer_len().await, 512);
 }
 
 #[tokio::test]
@@ -245,25 +273,22 @@ async fn test_livekit_client_clear_audio_integration_pattern() {
 }
 
 #[tokio::test]
-async fn test_livekit_client_audio_queue_drain_success() {
+async fn test_tts_buffer_accumulates_and_clear_empties_it() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
     client.set_connected(true).await;
 
-    // Queue multiple audio frames
+    // Three 4-byte chunks = three 2-sample pushes = 6 buffered samples.
     let audio_data = vec![0u8, 1u8, 2u8, 3u8];
     for _ in 0..3 {
         let _ = client.send_tts_audio(audio_data.clone()).await;
     }
+    assert_eq!(client.tts_buffer_len().await, 6);
 
-    // Verify frames were queued
-    let queue_len = client.get_audio_queue_len().await;
-    assert_eq!(queue_len, 3);
-
-    // Clear the queue
+    // Clear drains the buffer.
     let result = client.clear_audio().await;
     assert!(result.is_ok());
-    assert_eq!(client.get_audio_queue_len().await, 0);
+    assert_eq!(client.tts_buffer_len().await, 0);
 }
 
 #[tokio::test]
@@ -291,22 +316,23 @@ async fn test_livekit_client_message_send_with_serializable_struct() {
 }
 
 #[tokio::test]
-async fn test_livekit_client_reconnect_audio_queue_preservation() {
+async fn test_buffered_tts_survives_connection_toggle() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
     client.set_connected(true).await;
 
-    // Queue audio data
+    // 48 bytes = 24 interleaved i16 samples (mono).
     let audio_data = vec![0u8; 48];
-    let _ = client.send_tts_audio(audio_data.clone()).await;
-    assert_eq!(client.get_audio_queue_len().await, 1);
+    let _ = client.send_tts_audio(audio_data).await;
+    assert_eq!(client.tts_buffer_len().await, 24);
 
-    // Audio should remain queued after status changes
+    // Buffered audio is retained across connection-status changes; only the new
+    // pump (on reconnect) or an explicit clear consumes it.
     client.set_connected(false).await;
-    assert_eq!(client.get_audio_queue_len().await, 1);
+    assert_eq!(client.tts_buffer_len().await, 24);
 
     client.set_connected(true).await;
-    assert_eq!(client.get_audio_queue_len().await, 1);
+    assert_eq!(client.tts_buffer_len().await, 24);
 }
 
 #[tokio::test]
@@ -320,72 +346,38 @@ async fn test_livekit_client_operation_priority_ordering() {
 }
 
 #[tokio::test]
-async fn test_livekit_client_loading_fields_default() {
+async fn test_loading_overlay_default_state() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
 
-    assert!(!client.has_loading_clip());
-    assert!(!client.has_loading_audio_source().await);
-    assert!(!client.has_loading_audio_track());
-    assert!(!client.has_loading_track_publication().await);
-    assert!(!client.has_loading_loop().await);
+    assert!(!client.has_loading_samples());
+    assert!(!client.loading_overlay_active());
+    assert!(!client.pump_running().await);
 }
 
 #[tokio::test]
-async fn test_set_loading_audio_clip_stores_clip() {
+async fn test_set_loading_audio_clip_resamples_and_stores() {
+    // The canonical 16 kHz mono clip is resampled to the 24 kHz mono track.
     let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let config = create_test_config();
     let mut client = LiveKitClient::new(config);
-    assert!(!client.has_loading_clip());
+    assert!(!client.has_loading_samples());
 
-    client.set_loading_audio_clip(clip);
-    assert!(client.has_loading_clip());
-}
-
-#[tokio::test]
-async fn test_setup_loading_audio_track_without_clip_is_noop() {
-    let mut client = LiveKitClient::new(create_test_config());
-
-    // With no loading clip configured, track setup is a clean no-op — it
-    // returns Ok and publishes nothing, leaving every loading field empty.
     client
-        .setup_loading_audio_track()
-        .await
-        .expect("setup_loading_audio_track must be a no-op when no clip is configured");
-
-    assert!(!client.has_loading_audio_source().await);
-    assert!(!client.has_loading_audio_track());
-    assert!(!client.has_loading_track_publication().await);
+        .set_loading_audio_clip(clip)
+        .expect("resampling the clip to the track format should succeed");
+    assert!(client.has_loading_samples());
 }
 
 #[tokio::test]
-async fn test_setup_loading_audio_track_with_clip_requires_room() {
-    let clip = crate::livekit::loading_clip::make_test_loading_clip();
-
-    let mut client = LiveKitClient::new(create_test_config());
-    client.set_loading_audio_clip(clip);
-
-    // A clip is configured but no room is connected: setup must surface an
-    // error rather than silently succeed, confirming the clip-present path is
-    // taken and the track is not published without a room.
-    let result = client.setup_loading_audio_track().await;
-    assert!(
-        result.is_err(),
-        "setup_loading_audio_track must error when a clip is set but no room is available"
-    );
-    assert!(!client.has_loading_audio_source().await);
-    assert!(!client.has_loading_track_publication().await);
-}
-
-#[tokio::test]
-async fn test_stop_loading_audio_no_loop_is_noop() {
+async fn test_stop_loading_audio_with_no_overlay_is_noop() {
     let config = create_test_config();
     let client = LiveKitClient::new(config);
 
-    // Stopping with no loop running must not panic and must leave no loop.
+    // Stopping with no overlay active must not panic and must leave it inactive.
     client.stop_loading_audio().await;
-    assert!(!client.has_loading_loop().await);
+    assert!(!client.loading_overlay_active());
 }
 
 #[tokio::test]
@@ -404,36 +396,6 @@ async fn test_start_loading_audio_not_connected_errors() {
         ),
         other => panic!("expected BadRequest when not connected, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn test_has_loading_loop_false_when_handle_finished() {
-    use super::loading_audio::LoadingLoopHandle;
-
-    let config = create_test_config();
-    let client = LiveKitClient::new(config);
-
-    let handle = tokio::spawn(async {});
-    for _ in 0..32 {
-        if handle.is_finished() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        handle.is_finished(),
-        "placeholder task should finish promptly"
-    );
-
-    *client.loading_loop.lock().await = Some(LoadingLoopHandle {
-        handle,
-        token: tokio_util::sync::CancellationToken::new(),
-    });
-
-    assert!(
-        !client.has_loading_loop().await,
-        "a finished JoinHandle must not count as an active loading loop"
-    );
 }
 
 #[tokio::test]
@@ -458,42 +420,81 @@ async fn test_start_loading_audio_connected_without_clip_errors() {
 }
 
 #[tokio::test]
-async fn test_start_loading_audio_with_clip_but_no_source_errors() {
-    // A clip is configured but the dedicated loading track never published, so
-    // there is no audio source. start_loading_audio must report that specific
-    // cause, distinct from the missing-clip message.
+async fn test_start_loading_audio_with_clip_activates_overlay() {
+    // Connected with a configured clip: the overlay flag flips on. (No pump is
+    // spawned here, so nothing plays — the flag is what the pump consumes.)
     let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let mut client = LiveKitClient::new(create_test_config());
     client.set_connected(true).await;
-    client.set_loading_audio_clip(clip);
+    client
+        .set_loading_audio_clip(clip)
+        .expect("resampling should succeed");
 
-    let err = client
+    assert!(!client.loading_overlay_active());
+    client
         .start_loading_audio()
         .await
-        .expect_err("start_loading_audio should fail with a clip but no published source");
-    match err {
-        AppError::BadRequest(msg) => assert!(
-            msg.contains("failed to publish"),
-            "unexpected error message: {msg}"
-        ),
-        other => panic!("expected BadRequest for the missing-source case, got {other:?}"),
-    }
+        .expect("start_loading_audio should succeed with a clip while connected");
+    assert!(client.loading_overlay_active());
+
+    // A second start while active is an idempotent no-op.
+    client
+        .start_loading_audio()
+        .await
+        .expect("second start_loading_audio should be an idempotent no-op");
+    assert!(client.loading_overlay_active());
 }
 
 #[tokio::test]
-async fn test_disconnect_clears_loading_fields() {
+async fn test_pump_running_false_when_handle_finished() {
     let config = create_test_config();
-    let mut client = LiveKitClient::new(config);
+    let client = LiveKitClient::new(config);
+
+    let handle = tokio::spawn(async {});
+    for _ in 0..32 {
+        if handle.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        handle.is_finished(),
+        "placeholder task should finish promptly"
+    );
+
+    *client.pump.lock().await = Some(AudioPumpHandle {
+        handle,
+        token: CancellationToken::new(),
+    });
+
+    assert!(
+        !client.pump_running().await,
+        "a finished JoinHandle must not count as a running pump"
+    );
+}
+
+#[tokio::test]
+async fn test_disconnect_clears_loading_overlay_state() {
+    let clip = crate::livekit::loading_clip::make_test_loading_clip();
+
+    let mut client = LiveKitClient::new(create_test_config());
     client.set_connected(true).await;
+    client
+        .set_loading_audio_clip(clip)
+        .expect("resampling should succeed");
+    client
+        .start_loading_audio()
+        .await
+        .expect("start_loading_audio should succeed");
+    assert!(client.has_loading_samples());
+    assert!(client.loading_overlay_active());
 
     assert!(client.disconnect().await.is_ok());
 
-    assert!(!client.has_loading_clip());
-    assert!(!client.has_loading_audio_source().await);
-    assert!(!client.has_loading_audio_track());
-    assert!(!client.has_loading_track_publication().await);
-    assert!(!client.has_loading_loop().await);
+    assert!(!client.has_loading_samples());
+    assert!(!client.loading_overlay_active());
+    assert!(!client.pump_running().await);
 }
 
 // NOTE: the `livekit_native_*` tests below construct real libwebrtc
@@ -504,116 +505,103 @@ async fn test_disconnect_clears_loading_fields() {
 // executed isolated (their own process) by a dedicated CI step — see
 // `.github/workflows/ci.yml`. Run locally with:
 //   cargo test --all-features --lib -- --ignored --test-threads=1 livekit_native_
-#[tokio::test]
-#[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
-async fn livekit_native_two_independent_audio_sources() {
-    use livekit::track::LocalAudioTrack;
-    use livekit::webrtc::audio_source::native::NativeAudioSource;
-    use livekit::webrtc::prelude::RtcAudioSource;
 
-    // TTS-style source at 24 kHz mono.
-    let tts_source = NativeAudioSource::new(super::sayna_audio_source_options(), 24_000, 1, 240);
-    let tts_track =
-        LocalAudioTrack::create_audio_track("tts-audio", RtcAudioSource::Native(tts_source));
-
-    // Loading-style source at a different sample rate, 16 kHz mono.
-    let loading_source =
-        NativeAudioSource::new(super::sayna_audio_source_options(), 16_000, 1, 160);
-    let loading_track = LocalAudioTrack::create_audio_track(
-        "loading-audio",
-        RtcAudioSource::Native(loading_source),
-    );
-
-    // Both tracks must construct without panic, confirming a participant can
-    // hold two independent audio sources/tracks at different sample rates.
-    assert_eq!(tts_track.name(), "tts-audio");
-    assert_eq!(loading_track.name(), "loading-audio");
-}
-
-/// Builds a connected `LiveKitClient` with a loading clip set and a loading
-/// audio source injected, ready to exercise the loading loop. The source is
-/// injected directly because `setup_loading_audio_track` needs a live room,
-/// which unit tests do not have.
-async fn connected_client_with_loading_source() -> LiveKitClient {
-    use livekit::webrtc::audio_source::native::NativeAudioSource;
-
+/// Builds a connected `LiveKitClient` with a loading clip configured and a real
+/// audio pump spawned on a native source, ready to exercise overlay start/stop.
+///
+/// The pump and source are wired directly because the normal setup path
+/// (`setup_audio_publishing`) needs a live room, which unit tests do not have.
+async fn connected_client_with_pump() -> LiveKitClient {
     let clip = crate::livekit::loading_clip::make_test_loading_clip();
 
     let mut client = LiveKitClient::new(create_test_config());
     client.set_connected(true).await;
-    client.set_loading_audio_clip(clip);
+    client
+        .set_loading_audio_clip(clip)
+        .expect("resampling should succeed");
 
+    // 24 kHz mono source matching the test config; 240 ms queue mirrors setup.
     let source = Arc::new(NativeAudioSource::new(
         super::sayna_audio_source_options(),
-        16_000,
+        24_000,
         1,
-        super::loading_audio::LOADING_AUDIO_QUEUE_SIZE_MS,
+        240,
     ));
-    *client.loading_audio_source.lock().await = Some(source);
+    *client.audio_source.lock().await = Some(Arc::clone(&source));
+    super::audio_pump::spawn_audio_pump(
+        &client.pump,
+        Arc::clone(&client.audio_pump),
+        source,
+        24_000,
+        1,
+    )
+    .await;
+
     client
 }
 
 #[tokio::test]
 #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
 async fn livekit_native_start_idempotent_and_disconnect_teardown() {
-    let mut client = connected_client_with_loading_source().await;
+    let mut client = connected_client_with_pump().await;
 
-    // The first start spawns the loop.
     client
         .start_loading_audio()
         .await
         .expect("first start_loading_audio should succeed");
-    assert!(client.has_loading_loop().await);
+    assert!(client.loading_overlay_active());
+    assert!(client.pump_running().await);
 
-    // A second start while the loop is still running is an idempotent no-op.
+    // A second start while the overlay is active is an idempotent no-op.
     client
         .start_loading_audio()
         .await
         .expect("second start_loading_audio should be an idempotent no-op");
-    assert!(client.has_loading_loop().await);
+    assert!(client.loading_overlay_active());
 
-    // Disconnect cancels the loop, awaits it (with the abort backstop), and
-    // clears every loading field.
+    // Disconnect stops the pump and clears the overlay state.
     client
         .disconnect()
         .await
         .expect("disconnect should succeed");
-    assert!(!client.has_loading_loop().await);
-    assert!(!client.has_loading_audio_source().await);
-    assert!(!client.has_loading_clip());
+    assert!(!client.pump_running().await);
+    assert!(!client.loading_overlay_active());
+    assert!(!client.has_loading_samples());
 }
 
 #[tokio::test]
 #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
-async fn livekit_native_loading_loop_cleared_after_stop() {
-    let client = connected_client_with_loading_source().await;
+async fn livekit_native_overlay_deactivates_after_stop() {
+    let client = connected_client_with_pump().await;
 
     client
         .start_loading_audio()
         .await
         .expect("start_loading_audio should succeed");
-    assert!(client.has_loading_loop().await);
+    assert!(client.loading_overlay_active());
 
+    // Requesting a stop triggers the fade-out; once it completes the pump flips
+    // the overlay inactive and returns to pass-through.
     client.stop_loading_audio().await;
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline {
-        if !client.has_loading_loop().await {
+        if !client.loading_overlay_active() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("loading_loop slot must be cleared after stop and fade-out complete");
+    panic!("overlay must become inactive after stop and fade-out complete");
 }
 
 #[tokio::test]
 #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
 async fn livekit_native_rapid_start_stop_is_clean() {
-    let mut client = connected_client_with_loading_source().await;
+    let mut client = connected_client_with_pump().await;
 
     // Rapidly alternating start/stop must never panic, and a disconnect
-    // afterwards (with the loop possibly mid-fade) must still tear down cleanly
-    // without hanging.
+    // afterwards (with the overlay possibly mid-fade) must still tear down
+    // cleanly without hanging.
     for _ in 0..30 {
         client
             .start_loading_audio()
@@ -628,33 +616,32 @@ async fn livekit_native_rapid_start_stop_is_clean() {
         "disconnect must not hang after rapid start/stop"
     );
     assert!(teardown.expect("disconnect completed").is_ok());
-    assert!(!client.has_loading_loop().await);
-    assert!(!client.has_loading_audio_source().await);
+    assert!(!client.pump_running().await);
 }
 
 #[tokio::test]
 #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
-async fn livekit_native_drop_cancels_active_loop() {
-    let client = connected_client_with_loading_source().await;
+async fn livekit_native_drop_cancels_pump() {
+    let client = connected_client_with_pump().await;
     client
         .start_loading_audio()
         .await
         .expect("start_loading_audio should succeed");
 
-    // Hold a clone of the running loop's cancellation token, then drop the
-    // client WITHOUT calling disconnect — the path session cleanup takes when
-    // it cannot acquire the LiveKit lock in time.
+    // Hold a clone of the running pump's cancellation token, then drop the
+    // client WITHOUT calling disconnect — the path session cleanup takes when it
+    // cannot acquire the LiveKit lock in time.
     let token = client
-        .loading_loop_token_for_test()
+        .pump_token_for_test()
         .await
-        .expect("a loop should be running");
+        .expect("a pump should be running");
     assert!(!token.is_cancelled());
 
     drop(client);
 
-    // The Drop backstop must have cancelled the loop so it cannot be orphaned.
+    // The Drop backstop must have cancelled the pump so it cannot be orphaned.
     assert!(
         token.is_cancelled(),
-        "dropping the client must cancel the loading loop"
+        "dropping the client must cancel the audio pump"
     );
 }

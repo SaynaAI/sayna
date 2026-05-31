@@ -3,7 +3,6 @@
 //! Handles serialized execution of LiveKit operations to avoid lock
 //! contention and to centralize error handling.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -12,18 +11,16 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use super::loading_audio::LoadingLoopHandle;
+use super::audio_pump::{AudioPumpHandle, AudioPumpShared};
 use super::{
     AudioCallback, DataCallback, LiveKitClient, LiveKitConfig, LiveKitOperation, OperationQueue,
     ParticipantConnectCallback, ParticipantDisconnectCallback, TrackSubscribedCallback,
 };
 use crate::AppError;
-use crate::livekit::loading_clip::LoadingClip;
 
 /// Context struct for process_operation to avoid too many arguments
 pub(super) struct OperationContext {
     pub(super) room: Arc<Mutex<Option<Room>>>,
-    pub(super) audio_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub(super) audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
     pub(super) is_connected: Arc<Mutex<bool>>,
     pub(super) has_audio_source_atomic: Arc<AtomicBool>,
@@ -37,20 +34,12 @@ pub(super) struct OperationContext {
     pub(super) track_subscribed_callback: Option<TrackSubscribedCallback>,
     /// Generation counter - audio operations with lower generation are skipped
     pub(super) audio_generation: Arc<AtomicU64>,
-    // The following loading-audio fields are read by `process_reconnect` to
-    // rebuild the dedicated "loading-audio" track after a reconnect, and to
-    // cancel a loop left running on the now-dead pre-reconnect source. They do
-    // NOT entangle the loading loop with TTS queue/generation state — the
-    // loading loop's isolation invariant still holds.
-    /// Decoded loading-indicator clip; `None` when the feature is unused.
-    pub(super) loading_clip: Option<Arc<LoadingClip>>,
-    /// Dedicated audio source feeding the "loading-audio" track.
-    pub(super) loading_audio_source: Arc<Mutex<Option<Arc<NativeAudioSource>>>>,
-    /// Publication of the dedicated "loading-audio" track.
-    pub(super) loading_track_publication: Arc<Mutex<Option<LocalTrackPublication>>>,
-    /// Running loading-audio loop, so `process_reconnect` can cancel a loop
-    /// whose audio source died with the pre-reconnect room.
-    pub(super) loading_loop: Arc<Mutex<Option<LoadingLoopHandle>>>,
+    /// Shared state for the single audio pump (buffered TTS + loading overlay),
+    /// reused when `process_reconnect` respawns the pump on the rebuilt source.
+    pub(super) audio_pump: Arc<AudioPumpShared>,
+    /// Handle to the running audio pump, so `process_reconnect` can stop the
+    /// pump bound to the dead room and respawn it on the new source.
+    pub(super) pump: Arc<Mutex<Option<AudioPumpHandle>>>,
 }
 
 impl LiveKitClient {
@@ -60,7 +49,6 @@ impl LiveKitClient {
 
         let context = OperationContext {
             room: Arc::clone(&self.room),
-            audio_queue: Arc::clone(&self.audio_queue),
             audio_source: Arc::clone(&self.audio_source),
             is_connected: Arc::clone(&self.is_connected),
             has_audio_source_atomic: Arc::clone(&self.has_audio_source_atomic),
@@ -73,10 +61,8 @@ impl LiveKitClient {
             participant_connect_callback: self.participant_connect_callback.clone(),
             track_subscribed_callback: self.track_subscribed_callback.clone(),
             audio_generation,
-            loading_clip: self.loading_clip.clone(),
-            loading_audio_source: Arc::clone(&self.loading_audio_source),
-            loading_track_publication: Arc::clone(&self.loading_track_publication),
-            loading_loop: Arc::clone(&self.loading_loop),
+            audio_pump: Arc::clone(&self.audio_pump),
+            pump: Arc::clone(&self.pump),
         };
         let stats = Arc::clone(&self.stats);
 
@@ -169,8 +155,7 @@ impl LiveKitClient {
                 }
                 let result = LiveKitClient::process_send_audio(
                     audio_data,
-                    &ctx.audio_queue,
-                    &ctx.audio_source,
+                    &ctx.audio_pump,
                     &ctx.is_connected,
                     &ctx.config,
                 )
@@ -213,7 +198,7 @@ impl LiveKitClient {
             }
             LiveKitOperation::ClearAudio { response_tx } => {
                 let result = LiveKitClient::process_clear_audio(
-                    &ctx.audio_queue,
+                    &ctx.audio_pump,
                     &ctx.audio_source,
                     &ctx.is_connected,
                 )

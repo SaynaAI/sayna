@@ -73,13 +73,12 @@ pub mod loading_clip;
 mod manager;
 pub mod metadata;
 pub mod operations;
+mod resample;
 pub mod room_handler;
 pub mod sip_handler;
 mod types;
 
 // Re-export public types and traits
-#[cfg(test)]
-pub(crate) use client::sayna_audio_source_options;
 pub use client::{AudioCallback, DataCallback, DataMessage, LiveKitClient};
 pub use loading_clip::{LoadingClip, decode_loading_clip};
 pub use manager::LiveKitManager;

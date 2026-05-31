@@ -435,7 +435,7 @@ If `allow_interruption: false` was set on the most recent speak command, the cle
 ```
 
 **Behavior:**
-- Starts the configured loading clip on a continuous, seamless loop on a dedicated `"loading-audio"` LiveKit track, separate from the `"tts-audio"` speech track.
+- Starts the configured loading clip on a continuous, seamless loop, mixed into the single published audio track (`"tts-audio"`) and summed under any speech.
 - If a loop is already running, the command is an idempotent no-op (the loop continues uninterrupted).
 - The loading clip must have been supplied via the `loading_audio` object in the `config` message. See [Loading Indicator](#loading-indicator) for configuration and authoring guidance.
 
@@ -1513,7 +1513,7 @@ Use the token to connect to LiveKit room from web browsers or mobile apps using 
 
 The loading indicator is a short audio clip the server plays on a continuous, seamless loop into the LiveKit room while your application is busy ("thinking") and cannot yet answer. It is the audio equivalent of a spinner: it signals to the human participant that the agent is still working, instead of leaving the room silent.
 
-The loading audio plays on its **own dedicated, second published LiveKit audio track** (`"loading-audio"`), separate from the speech track (`"tts-audio"`), so it never interferes with text-to-speech output.
+The loading audio is **mixed into the single published audio track** (`"tts-audio"`), summed under text-to-speech output. LiveKit never mixes audio server-side and many subscribers (custom browser clients, SIP bridges) play only one audio track, so mixing into the one track is what lets every subscriber hear the indicator. See [LiveKit Integration](livekit_integration.md#published-audio-track) for details.
 
 The feature has three parts:
 1. **Configuration** — the `config` message gains an optional `loading_audio` object. The server decodes and validates the clip once and holds it for the session.
@@ -1595,9 +1595,9 @@ The server plays the clip **as supplied** (apart from the `volume` scaling and t
 
 Loudness can be controlled in two ways: by authoring the clip quietly, and by setting the `volume` field (which scales the clip's sample amplitudes at config time). A LiveKit publisher cannot adjust a track's output volume after the fact, so these are the only loudness controls available.
 
-### Separate Track Behavior
+### Track and Mixing Behavior
 
-The loading audio is published on its own LiveKit audio track (`"loading-audio"`), independent of the speech track (`"tts-audio"`). An audio-enabled session with `loading_audio` configured therefore publishes **two** audio tracks from the Sayna agent participant. See [LiveKit Integration](livekit_integration.md#published-audio-tracks) for details, including how the loading track appears in room-composite recordings.
+The loading audio is mixed into the single published LiveKit audio track (`"tts-audio"`); an audio-enabled session publishes exactly one audio track from the Sayna agent participant whether or not `loading_audio` is configured. Mixing is a saturating sum of 16-bit samples (the same approach as LiveKit's own `AudioMixer`), so the indicator plays *under* speech rather than replacing it. See [LiveKit Integration](livekit_integration.md#published-audio-track) for why a single track is required and how the indicator appears in room-composite recordings.
 
 After a LiveKit publisher-timeout reconnect, an in-progress loop stops (the old audio source is gone). The client must re-send `loading_start` to resume the loop.
 

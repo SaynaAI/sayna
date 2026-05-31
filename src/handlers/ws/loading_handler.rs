@@ -323,17 +323,13 @@ mod tests {
         );
     }
 
-    // This test constructs a real libwebrtc `NativeAudioSource` and so wears
-    // the `livekit_native_` quarantine prefix described in
-    // `src/livekit/client/tests.rs:499-506`: it is `#[ignore]`d out of the
-    // default `cargo test` run and executed isolated by the dedicated CI step
-    // in `.github/workflows/ci.yml`.
+    // `start_loading_audio` only needs an active connection and a configured
+    // clip (the pump consumes the overlay flag), so this success-path test needs
+    // no real audio source and runs in the default suite.
     #[tokio::test]
-    #[ignore = "creates native libwebrtc objects; run isolated via the dedicated CI step (see ci.yml)"]
-    async fn livekit_native_handle_loading_start_message_success_is_silent() {
+    async fn test_handle_loading_start_message_success_is_silent() {
         use crate::livekit::loading_clip::make_test_loading_clip;
-        use crate::livekit::{LiveKitClient, LiveKitConfig, sayna_audio_source_options};
-        use livekit::webrtc::audio_source::native::NativeAudioSource;
+        use crate::livekit::{LiveKitClient, LiveKitConfig};
 
         let clip = make_test_loading_clip();
         let mut client = LiveKitClient::new(LiveKitConfig {
@@ -348,15 +344,9 @@ mod tests {
             listen_participants: vec![],
         });
         client.set_connected(true).await;
-        client.set_loading_audio_clip(clip);
-
-        let source = Arc::new(NativeAudioSource::new(
-            sayna_audio_source_options(),
-            16_000,
-            1,
-            100, // NativeAudioSource queue depth in ms (matches LOADING_AUDIO_QUEUE_SIZE_MS)
-        ));
-        *client.loading_audio_source.lock().await = Some(source);
+        client
+            .set_loading_audio_clip(clip)
+            .expect("resampling the clip to the track format should succeed");
 
         let mut state_inner = ConnectionState::new();
         state_inner.set_audio_enabled(true);
@@ -373,14 +363,6 @@ mod tests {
             message_rx.try_recv().is_err(),
             "successful loading_start must not emit any WebSocket message"
         );
-
-        // Tear down the spawned loop so the test does not leak a background task.
-        {
-            let guard = state.read().await;
-            if let Some(lk) = &guard.livekit_client {
-                lk.read().await.stop_loading_audio().await;
-            }
-        }
     }
 
     #[tokio::test]
